@@ -47,5 +47,6 @@ export enum TextureFormat {
   /** RGB(A) compressed format,128 bits per 10x10 pixel block. */
   ASTC_10x10,
   /** RGB(A) compressed format,128 bits per 12x12 pixel block. */
-  ASTC_12x12
+  ASTC_12x12,
+  R11G11B10
 }

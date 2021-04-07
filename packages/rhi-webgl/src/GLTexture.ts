@@ -84,6 +84,13 @@ export class GLTexture implements IPlatformTexture {
           dataType: gl.FLOAT,
           isCompressed: false
         };
+      case TextureFormat.R11G11B10:
+        return {
+          internalFormat: isWebGL2 ? gl.R11F_G11F_B10F : gl.R11F_G11F_B10F,
+          baseFormat: gl.RGB,
+          dataType: gl.UNSIGNED_INT_10F_11F_11F_REV,
+          isCompressed: false
+        };
       case TextureFormat.DXT1:
         return {
           internalFormat: GLCompressedTextureInternalFormat.RGB_S3TC_DXT1_EXT,

@@ -29,7 +29,13 @@ function getMipmaps(ktxContainer: KTXContainer): Mipmap[] {
     dataOffset += 4; // size of the image + 4 for the imageSize field
 
     for (var face = 0; face < ktxContainer.numberOfFaces; face++) {
-      var byteArray = new Uint8Array(ktxContainer.buffer, dataOffset, imageSize);
+      let byteArray = null;
+
+      if (ktxContainer.engineFormat === TextureFormat.R11G11B10) {
+        byteArray = new Uint32Array(ktxContainer.buffer, dataOffset, imageSize / 4);
+      } else {
+        byteArray = new Uint8Array(ktxContainer.buffer, dataOffset, imageSize);
+      }
 
       mipmaps.push({ data: byteArray, width, height });
 
@@ -110,6 +116,8 @@ function getEngineFormat(internalFormat: GLint): TextureFormat {
       return TextureFormat.ASTC_10x10;
     case GLCompressedTextureInternalFormat.RGBA_ASTC_12X12_KHR:
       return TextureFormat.ASTC_12x12;
+    case 35898:
+      return TextureFormat.R11G11B10;
     default:
       const formatName: any = GLCompressedTextureInternalFormat[internalFormat];
       throw new Error(`this format is not supported in Oasis Engine: ${formatName}`);
@@ -154,12 +162,12 @@ export const khronosTextureContainerParser = {
     };
 
     // Make sure we have a compressed type.  Not only reduces work, but probably better to let dev know they are not compressing.
-    if (parsedResult.glType !== 0) {
-      throw new Error("only compressed formats currently supported");
-    } else {
-      // value of zero is an indication to generate mipmaps @ runtime.  Not usually allowed for compressed, so disregard.
-      parsedResult.numberOfMipmapLevels = Math.max(1, parsedResult.numberOfMipmapLevels);
-    }
+    // if (parsedResult.glType !== 0) {
+    // throw new Error("only compressed formats currently supported");
+    // } else {
+    // value of zero is an indication to generate mipmaps @ runtime.  Not usually allowed for compressed, so disregard.
+    parsedResult.numberOfMipmapLevels = Math.max(1, parsedResult.numberOfMipmapLevels);
+    // }
 
     if (parsedResult.pixelHeight === 0 || parsedResult.pixelDepth !== 0) {
       throw new Error("only 2D textures currently supported");
@@ -169,8 +177,8 @@ export const khronosTextureContainerParser = {
       throw new Error("texture arrays not currently supported");
     }
 
-    parsedResult.mipmaps = getMipmaps(parsedResult);
     parsedResult.engineFormat = getEngineFormat(parsedResult.glInternalFormat);
+    parsedResult.mipmaps = getMipmaps(parsedResult);
 
     return parsedResult;
   }
