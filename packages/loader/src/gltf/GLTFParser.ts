@@ -23,37 +23,33 @@ export class GLTFParser {
     SceneParser
   ]);
 
-  private static _isPromise(value: any): boolean {
-    return value && typeof value.then === "function";
-  }
-
-  private _pipelinePasses: Parser[] = [];
+  private _pipes: Parser[] = [];
 
   /**
    * @private
    */
-  constructor(passes: (new () => Parser)[]) {
-    passes.forEach((pass: new () => Parser, index: number) => {
-      this._pipelinePasses[index] = new pass();
+  constructor(pipes: (new () => Parser)[]) {
+    pipes.forEach((pipe: new () => Parser, index: number) => {
+      this._pipes[index] = new pipe();
     });
   }
 
   parse(context: GLTFResource): Promise<GLTFResource> {
-    let lastPipeOutput: void | Promise<void> = void 0;
+    let lastPipe: void | Promise<void>;
 
     return new Promise((resolve, reject) => {
-      this._pipelinePasses.forEach((parser: Parser) => {
-        if (GLTFParser._isPromise(lastPipeOutput)) {
-          lastPipeOutput = (lastPipeOutput as Promise<void>).then(() => {
+      this._pipes.forEach((parser: Parser) => {
+        if (lastPipe) {
+          lastPipe = lastPipe.then(() => {
             return parser.parse(context);
           });
         } else {
-          lastPipeOutput = parser.parse(context);
+          lastPipe = parser.parse(context);
         }
       });
 
-      if (GLTFParser._isPromise(lastPipeOutput)) {
-        (lastPipeOutput as Promise<void>)
+      if (lastPipe) {
+        lastPipe
           .then(() => {
             resolve(context);
           })
