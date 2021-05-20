@@ -4,14 +4,6 @@ import { ExtensionSchema } from "../extensions/Schema";
 import { GLTFResource } from "../GLTFResource";
 
 export abstract class Parser {
-  /** @internal */
-  static _addExtensionParser(extensionName: string, extensionParser: ExtensionParser) {
-    if (!Parser._extensionParsers[extensionName]) {
-      Parser._extensionParsers[extensionName] = [];
-    }
-    Parser._extensionParsers[extensionName].push(extensionParser);
-  }
-
   private static _extensionParsers: Record<string, ExtensionParser[]> = {};
 
   static parseEngineResource(
@@ -91,6 +83,16 @@ export abstract class Parser {
   }
 
   abstract parse(context: GLTFResource): void | Promise<void>;
+
+  /**
+   * @internal
+   */
+  static _addExtensionParser(extensionName: string, extensionParser: ExtensionParser) {
+    if (!Parser._extensionParsers[extensionName]) {
+      Parser._extensionParsers[extensionName] = [];
+    }
+    Parser._extensionParsers[extensionName].push(extensionParser);
+  }
 }
 
 /**
