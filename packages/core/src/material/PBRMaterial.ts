@@ -11,6 +11,75 @@ export class PBRMaterial extends PBRBaseMaterial {
   private _metallicTexture: Texture2D;
   private _roughnessTexture: Texture2D;
   private _metallicRoughnessTexture: Texture2D;
+  private _clearcoatFactor: number;
+  private _clearcoatTexture: Texture2D;
+  private _clearcoatRoughnessFactor: number;
+  private _clearcoatRoughnessTexture: Texture2D;
+  private _clearcoatNormalTexture: Texture2D;
+
+  get clearcoatFactor(): number {
+    return this._clearcoatFactor;
+  }
+  set clearcoatFactor(value: number) {
+    this._clearcoatFactor = value;
+    this.shaderData.setFloat("u_clearcoatFactor", value);
+
+    if (value === 0) {
+      this.shaderData.disableMacro("CLEARCOAT");
+    } else {
+      this.shaderData.enableMacro("CLEARCOAT");
+    }
+  }
+
+  get clearcoatTexture(): Texture2D {
+    return this._clearcoatTexture;
+  }
+  set clearcoatTexture(value: Texture2D) {
+    this._clearcoatTexture = value;
+
+    if (value) {
+      this.shaderData.enableMacro("HAS_CLEARCOATTEXTURE");
+      this.shaderData.setTexture("u_clearcoatTexture", value);
+    } else {
+      this.shaderData.disableMacro("HAS_CLEARCOATTEXTURE");
+    }
+  }
+
+  get clearcoatRoughnessFactor(): number {
+    return this._clearcoatRoughnessFactor;
+  }
+  set clearcoatRoughnessFactor(value: number) {
+    this._clearcoatRoughnessFactor = value;
+    this.shaderData.setFloat("u_clearcoatRoughnessFactor", value);
+  }
+
+  get clearcoatRoughnessTexture(): Texture2D {
+    return this._clearcoatRoughnessTexture;
+  }
+  set clearcoatRoughnessTexture(value: Texture2D) {
+    this._clearcoatRoughnessTexture = value;
+
+    if (value) {
+      this.shaderData.enableMacro("HAS_CLEARCOATROUGHNESSTEXTURE");
+      this.shaderData.setTexture("u_clearcoatRoughnessTexture", value);
+    } else {
+      this.shaderData.disableMacro("HAS_CLEARCOATROUGHNESSTEXTURE");
+    }
+  }
+
+  get clearcoatNormalTexture(): Texture2D {
+    return this._clearcoatNormalTexture;
+  }
+  set clearcoatNormalTexture(value: Texture2D) {
+    this._clearcoatNormalTexture = value;
+
+    if (value) {
+      this.shaderData.enableMacro("HAS_CLEARCOATNORMALTEXTURE");
+      this.shaderData.setTexture("u_clearcoatNormalTexture", value);
+    } else {
+      this.shaderData.disableMacro("HAS_CLEARCOATNORMALTEXTURE");
+    }
+  }
 
   /**
    * Metallic factor.

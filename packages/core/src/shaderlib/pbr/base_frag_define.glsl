@@ -12,6 +12,13 @@ uniform float u_refractionRatio;
 
 uniform vec2 u_resolution;
 
+#ifdef CLEARCOAT
+    uniform float u_clearcoatFactor;
+    uniform float u_clearcoatRoughnessFactor;
+#endif
+
+
+
 // todo: delete
 uniform float u_normalIntensity;
 uniform float u_occlusionStrength;
