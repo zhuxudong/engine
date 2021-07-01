@@ -95,6 +95,26 @@
         material.specularRoughness += getAARoughnessFactor(normal);
         material.specularRoughness = min( material.specularRoughness, 1.0 );
 
+
+        #ifdef CLEARCOAT
+             material.clearcoat = u_clearcoatFactor;
+             material.clearcoatRoughness = u_clearcoatRoughnessFactor;
+             #ifdef HAS_CLEARCOATTEXTURE
+                 material.clearcoat *= texture2D( u_clearcoatTexture, v_uv ).r;
+             #endif
+             #ifdef HAS_CLEARCOATROUGHNESSTEXTURE
+                 material.clearcoatRoughness *= texture2D( u_clearcoatRoughnessTexture, v_uv ).g;
+             #endif
+             material.clearcoat = saturate( material.clearcoat );
+             material.clearcoatRoughness = clamp( material.clearcoatRoughness, 0.005, 1.0 );
+             material.clearcoatRoughness += getAARoughnessFactor(normal);
+             material.clearcoatRoughness = min( material.clearcoatRoughness, 1.0 );
+        #endif
+
         geometry.position = v_pos;
         geometry.normal = normal;
         geometry.viewDir = normalize( u_cameraPos - v_pos );
+
+        #ifdef CLEARCOAT
+            geometry.clearcoatNormal = getClearCoatNormal();
+        #endif

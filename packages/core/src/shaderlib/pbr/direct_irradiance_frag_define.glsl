@@ -1,12 +1,22 @@
+float clearcoatDHRApprox( const in float roughness, const in float dotNL ) {
+    return DEFAULT_SPECULAR_COEFFICIENT + ( 1.0 - DEFAULT_SPECULAR_COEFFICIENT ) * ( pow( 1.0 - dotNL, 5.0 ) * pow( 1.0 - roughness, 2.0 ) );
+}
+
 void RE_Direct_Physical( const in IncidentLight directLight, const in GeometricContext geometry, const in PhysicalMaterial material, inout ReflectedLight reflectedLight ) {
-
     float dotNL = saturate( dot( geometry.normal, directLight.direction ) );
-
     vec3 irradiance = dotNL * directLight.color;
 
-    reflectedLight.directSpecular += irradiance * BRDF_Specular_GGX( directLight, geometry, material.specularColor, material.specularRoughness );
+ 	#ifdef CLEARCOAT
+        float ccDotNL = saturate( dot( geometry.normal, directLight.direction ) );
+        vec3 ccIrradiance = ccDotNL * directLight.color;
+        float clearcoatDHR = material.clearcoat * clearcoatDHRApprox( material.clearcoatRoughness, ccDotNL );
+        reflectedLight.directSpecular += ccIrradiance * material.clearcoat * BRDF_Specular_GGX( directLight, geometry.viewDir, geometry.clearcoatNormal, vec3( DEFAULT_SPECULAR_COEFFICIENT ), material.clearcoatRoughness );
+    #else
+        float clearcoatDHR = 0.0;
+    #endif
 
-    reflectedLight.directDiffuse += irradiance * BRDF_Diffuse_Lambert( material.diffuseColor );
+    reflectedLight.directSpecular += ( 1.0 - clearcoatDHR ) * irradiance * BRDF_Specular_GGX( directLight, geometry.viewDir, geometry.normal, material.specularColor, material.specularRoughness );
+    reflectedLight.directDiffuse +=  ( 1.0 - clearcoatDHR ) * irradiance * BRDF_Diffuse_Lambert( material.diffuseColor );
 
 }
 

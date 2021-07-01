@@ -58,3 +58,21 @@ uniform sampler2D u_opacitySampler;
 uniform samplerCube u_reflectionSampler;
 
 #endif
+
+#ifdef HAS_CLEARCOATTEXTURE
+
+uniform sampler2D u_clearcoatTexture;
+
+#endif
+
+#ifdef HAS_CLEARCOATROUGHNESSTEXTURE
+
+uniform sampler2D u_clearcoatRoughnessTexture;
+
+#endif
+
+#ifdef HAS_CLEARCOATNORMALTEXTURE
+
+uniform sampler2D u_clearcoatNormalTexture;
+
+#endif

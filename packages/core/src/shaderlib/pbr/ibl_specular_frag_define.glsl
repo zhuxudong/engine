@@ -7,9 +7,9 @@ vec2 integrateSpecularBRDF( const in float dotNV, const in float roughness ) {
     return vec2( -1.04, 1.04 ) * a004 + r.zw;
 }
 
-vec3 BRDF_Specular_GGX_Environment( const in GeometricContext geometry, const in vec3 specularColor, const in float roughness ) {
+vec3 BRDF_Specular_GGX_Environment( const in vec3 viewDir, const in vec3 normal, const in vec3 specularColor, const in float roughness ) {
 
-    float dotNV = saturate( dot( geometry.normal, geometry.viewDir ) );
+    float dotNV = saturate( dot( normal, viewDir ) );
     vec2 brdf = integrateSpecularBRDF( dotNV, roughness );
 
     return specularColor * brdf.x + brdf.y;
@@ -45,7 +45,7 @@ float getSpecularMIPLevel( const in float roughness, const in int maxMIPLevel ) 
 }
 
 
-vec3 getIndirectRadiance( const in GeometricContext geometry, const in float roughness, const in int maxMIPLevel ) {
+vec3 getIndirectRadiance(  const in vec3 viewDir, const in vec3 normal, const in float roughness, const in int maxMIPLevel ) {
 
     #if !defined(O3_USE_SPECULAR_ENV) && !defined(HAS_REFLECTIONMAP)
 
@@ -55,11 +55,11 @@ vec3 getIndirectRadiance( const in GeometricContext geometry, const in float rou
 
         #ifdef ENVMAPMODE_REFRACT
 
-            vec3 reflectVec = refract( -geometry.viewDir, geometry.normal, u_refractionRatio );
+            vec3 reflectVec = refract( -viewDir, normal, u_refractionRatio );
 
         #else
 
-            vec3 reflectVec = reflect( -geometry.viewDir, geometry.normal );
+            vec3 reflectVec = reflect( -viewDir, normal );
 
         #endif
 
@@ -92,16 +92,23 @@ vec3 getIndirectRadiance( const in GeometricContext geometry, const in float rou
 
 }
 
-void RE_IndirectSpecular_Physical( const in vec3 radiance, const in vec3 multiScatteringRadiance, const in GeometricContext geometry, const in PhysicalMaterial material, inout ReflectedLight reflectedLight ) {
+void RE_IndirectSpecular_Physical( const in vec3 radiance, const in vec3 multiScatteringRadiance, const in vec3 clearcoatRadiance, const in GeometricContext geometry, const in PhysicalMaterial material, inout ReflectedLight reflectedLight ) {
 
-	// reflectedLight.indirectSpecular += radiance * BRDF_Specular_GGX_Environment( geometry, material.specularColor, material.specularRoughness );
-    
+    #ifdef CLEARCOAT
+        float ccDotNV = saturate( dot( geometry.normal, geometry.viewDir ) );
+       reflectedLight.indirectSpecular += clearcoatRadiance * material.clearcoat * BRDF_Specular_GGX_Environment( geometry.viewDir, geometry.clearcoatNormal, vec3( DEFAULT_SPECULAR_COEFFICIENT ), material.clearcoatRoughness );
+        float ccDotNL = ccDotNV;
+        float clearcoatDHR = material.clearcoat * clearcoatDHRApprox( material.clearcoatRoughness, ccDotNL );
+    #else
+        float clearcoatDHR = 0.0;
+    #endif
+    float clearcoatInv = 1.0 - clearcoatDHR;
     vec3 singleScattering = vec3( 0.0 );
     vec3 multiScattering = vec3( 0.0 );
     BRDF_Specular_Multiscattering_Environment( geometry, material.specularColor, material.specularRoughness, singleScattering, multiScattering );
     
     vec3 diffuse = material.diffuseColor * ( 1.0 - ( singleScattering + multiScattering ) );
-    reflectedLight.indirectSpecular += radiance * singleScattering;
+    reflectedLight.indirectSpecular += clearcoatInv * radiance * singleScattering;
     reflectedLight.indirectSpecular += multiScattering * multiScatteringRadiance;
     reflectedLight.indirectDiffuse += diffuse * multiScatteringRadiance;
 }

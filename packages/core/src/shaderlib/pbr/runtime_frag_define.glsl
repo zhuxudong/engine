@@ -12,9 +12,16 @@ struct GeometricContext {
     vec3 position;
     vec3 normal;
     vec3 viewDir;
+    #ifdef CLEARCOAT
+        vec3 clearcoatNormal;
+    #endif
 };
 struct PhysicalMaterial {
-    vec3    diffuseColor;
-    float   specularRoughness;
-    vec3    specularColor;
+    vec3 diffuseColor;
+    float specularRoughness;
+    vec3  specularColor;
+    #ifdef CLEARCOAT
+        float clearcoat;
+        float clearcoatRoughness;
+    #endif
 };
