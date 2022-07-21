@@ -15,6 +15,18 @@ void addDirectRadiance(vec3 incidentDirection, vec3 color, Geometry geometry, Ma
     reflectedLight.directSpecular += attenuation * irradiance * BRDF_Specular_GGX( incidentDirection, geometry.viewDir, geometry.normal, material.specularColor, material.roughness);
     reflectedLight.directDiffuse += attenuation * irradiance * BRDF_Diffuse_Lambert( material.diffuseColor );
 
+    // SSS
+    // ref: https://colinbarrebrisebois.com/2011/03/07/gdc-2011-approximating-translucency-for-a-fast-cheap-and-convincing-subsurface-scattering-look/
+    #ifdef SUBSURFACE
+        #ifdef THICKNESSTEXTURE
+            float thickness = texture2D(u_thicknessTexture, v_uv).r;
+        #else
+            float thickness = 0.5;
+        #endif
+        float backScatter = pow(saturate(dot(geometry.viewDir, -incidentDirection)), 4.0);
+        float subsurface = backScatter * (1.0 - thickness);
+        reflectedLight.directDiffuse += u_subsurfaceColor * (subsurface * RECIPROCAL_PI * u_subsurface);
+    #endif
 }
 
 #ifdef O3_DIRECT_LIGHT_COUNT

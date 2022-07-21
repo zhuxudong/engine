@@ -15,6 +15,11 @@ uniform float u_normalIntensity;
 uniform float u_occlusionIntensity;
 uniform float u_occlusionTextureCoord;
 
+#ifdef SUBSURFACE
+    uniform float u_subsurface;
+    uniform vec3 u_subsurfaceColor;
+#endif
+
 // Texture
 #ifdef BASETEXTURE
     uniform sampler2D u_baseTexture;
@@ -53,6 +58,9 @@ uniform float u_occlusionTextureCoord;
     uniform sampler2D u_clearCoatNormalTexture;
 #endif
 
+#ifdef THICKNESSTEXTURE
+    uniform sampler2D u_thicknessTexture;
+#endif
 
 
 // Runtime

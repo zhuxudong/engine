@@ -78,3 +78,25 @@ vec3 getLightProbeRadiance(vec3 viewDir, vec3 normal, float roughness, int maxMI
     #endif
 
 }
+
+vec3 prefilteredRadiance(const vec3 r, float roughness, float offset, int maxMIPLevel) {
+    #ifdef O3_USE_SPECULAR_ENV
+        float lod = getSpecularMIPLevel(roughness, maxMIPLevel );
+        return textureCubeLodEXT(u_env_specularSampler, r, lod + offset).rgb;
+    #endif
+        return vec3(0);
+}
+
+void evaluateSubsurfaceIBL(vec3 viewDir,Material material, vec3 diffuseIrradiance, int maxMIPLevel, inout vec3 Fd) {
+    #if defined(O3_USE_SPECULAR_ENV) && defined(SUBSURFACE)
+        #ifdef THICKNESSTEXTURE
+            float thickness = texture2D(u_thicknessTexture, v_uv).r;
+        #else
+            float thickness = 0.5;
+        #endif
+        vec3 viewIndependent = diffuseIrradiance;
+        vec3 viewDependent = prefilteredRadiance(-viewDir, material.roughness, 1.0 + thickness, maxMIPLevel);
+        float attenuation = (1.0 - thickness) * RECIPROCAL_PI;
+        Fd += u_subsurfaceColor * (viewIndependent + viewDependent) * attenuation * u_subsurface;
+    #endif
+}

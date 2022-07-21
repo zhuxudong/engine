@@ -22,6 +22,10 @@ addTotalDirectRadiance(geometry, material, reflectedLight);
 
 reflectedLight.indirectDiffuse += irradiance * BRDF_Diffuse_Lambert( material.diffuseColor );
 
+
+// SSS
+evaluateSubsurfaceIBL(geometry.viewDir, material, irradiance, int(u_envMapLight.mipMapLevel), reflectedLight.indirectDiffuse);
+
 // IBL specular
 vec3 radiance = getLightProbeRadiance(geometry.viewDir, geometry.normal, material.roughness, int(u_envMapLight.mipMapLevel), u_envMapLight.specularIntensity);
 float radianceAttenuation = 1.0;

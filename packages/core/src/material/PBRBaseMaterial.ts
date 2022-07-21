@@ -20,6 +20,10 @@ export abstract class PBRBaseMaterial extends BaseMaterial {
   private static _clearCoatRoughnessTextureProp = Shader.getPropertyByName("u_clearCoatRoughnessTexture");
   private static _clearCoatNormalTextureProp = Shader.getPropertyByName("u_clearCoatNormalTexture");
 
+  private static _thicknessTextureProp = Shader.getPropertyByName("u_thicknessTexture");
+  private static _subsurfaceColorProp = Shader.getPropertyByName("u_subsurfaceColor");
+  private static _subsurfaceProp = Shader.getPropertyByName("u_subsurface");
+
   /**
    * Base color.
    */
@@ -244,6 +248,55 @@ export abstract class PBRBaseMaterial extends BaseMaterial {
   }
 
   /**
+   * The thickness texture of subsurface scattering.
+   */
+  get thicknessTexture(): Texture2D {
+    return <Texture2D>this.shaderData.getTexture(PBRBaseMaterial._thicknessTextureProp);
+  }
+
+  set thicknessTexture(value: Texture2D) {
+    this.shaderData.setTexture(PBRBaseMaterial._thicknessTextureProp, value);
+
+    if (value) {
+      this.shaderData.enableMacro("THICKNESSTEXTURE");
+    } else {
+      this.shaderData.disableMacro("THICKNESSTEXTURE");
+    }
+  }
+
+  /**
+   * Subsurface color.
+   */
+  get subsurfaceColor(): Color {
+    return this.shaderData.getColor(PBRBaseMaterial._subsurfaceColorProp);
+  }
+
+  set subsurfaceColor(value: Color) {
+    const subsurfaceColor = this.shaderData.getColor(PBRBaseMaterial._subsurfaceColorProp);
+    if (value !== subsurfaceColor) {
+      subsurfaceColor.copyFrom(value);
+    }
+  }
+
+  /**
+   * Subsurface intensity.
+   */
+  get subsurface(): number {
+    return this.shaderData.getFloat(PBRBaseMaterial._subsurfaceProp);
+  }
+
+  set subsurface(value: number) {
+    if (!!this.shaderData.getFloat(PBRBaseMaterial._subsurfaceProp) !== !!value) {
+      if (value === 0) {
+        this.shaderData.disableMacro("SUBSURFACE");
+      } else {
+        this.shaderData.enableMacro("SUBSURFACE");
+      }
+    }
+    this.shaderData.setFloat(PBRBaseMaterial._subsurfaceProp, value);
+  }
+
+  /**
    * Create a pbr base material instance.
    * @param engine - Engine to which the material belongs
    * @param shader - Shader used by the material
@@ -266,5 +319,8 @@ export abstract class PBRBaseMaterial extends BaseMaterial {
 
     shaderData.setFloat(PBRBaseMaterial._clearCoatProp, 0);
     shaderData.setFloat(PBRBaseMaterial._clearCoatRoughnessProp, 0);
+
+    shaderData.setFloat(PBRBaseMaterial._subsurfaceProp, 0);
+    shaderData.setColor(PBRBaseMaterial._subsurfaceColorProp, new Color(1, 1, 1, 1));
   }
 }
