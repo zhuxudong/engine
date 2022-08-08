@@ -67,14 +67,22 @@ vec3 emissiveRadiance = u_emissiveColor;
 #endif
 
 // Total
-vec3 totalRadiance =    reflectedLight.directDiffuse + 
-                        reflectedLight.indirectDiffuse + 
-                        reflectedLight.directSpecular + 
+vec3 totalRadiance =    reflectedLight.directSpecular + 
                         reflectedLight.indirectSpecular + 
                         emissiveRadiance;
 
 vec4 targetColor =vec4(totalRadiance, material.opacity);
-#ifndef OASIS_COLORSPACE_GAMMA
-    targetColor = linearToGamma(targetColor);
+// #ifndef OASIS_COLORSPACE_GAMMA
+    // targetColor = linearToGamma(targetColor);
+// #endif
+
+
+gl_FragData[0] = targetColor;
+gl_FragData[1] = vec4(reflectedLight.directDiffuse + reflectedLight.indirectDiffuse, 1.0);
+gl_FragData[2] = vec4(LinearizeDepth(gl_FragCoord.z), 0, 0,
+#ifdef SUBSURFACE
+ 1.0
+#else
+0
 #endif
-gl_FragColor = targetColor;
+ );
