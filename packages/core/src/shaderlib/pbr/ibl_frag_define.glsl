@@ -82,7 +82,12 @@ vec3 getLightProbeRadiance(vec3 viewDir, vec3 normal, float roughness, int maxMI
 vec3 prefilteredRadiance(const vec3 r, float roughness, float offset, int maxMIPLevel) {
     #ifdef O3_USE_SPECULAR_ENV
         float lod = getSpecularMIPLevel(roughness, maxMIPLevel );
-        return textureCubeLodEXT(u_env_specularSampler, r, lod + offset).rgb;
+
+        #ifdef HAS_TEX_LOD
+           return textureCubeLodEXT(u_env_specularSampler, r, lod + offset).rgb;
+        #else
+           return textureCube(u_env_specularSampler, r, lod + offset).rgb;
+        #endif
     #endif
         return vec3(0);
 }
