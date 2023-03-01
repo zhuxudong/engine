@@ -6,7 +6,8 @@ import { GLTFParserContext } from "./gltf/parser/GLTFParserContext";
 @resourceLoader(AssetType.Prefab, ["gltf", "glb"])
 export class GLTFLoader extends Loader<GLTFResource> {
   load(item: LoadItem, resourceManager: ResourceManager): Record<string, AssetPromise<any>> {
-    const { url, params } = item;
+    const { url } = item;
+    const params = <GLTFParams>item.params;
     const context = new GLTFParserContext(url);
     const glTFResource = new GLTFResource(resourceManager.engine, url);
     const masterPromiseInfo = context.masterPromiseInfo;
@@ -22,7 +23,7 @@ export class GLTFLoader extends Loader<GLTFResource> {
     });
 
     (params.pipeline || GLTFPipeline.defaultPipeline)
-      .parse(context)
+      ._parse(context)
       .then(masterPromiseInfo.resolve)
       .catch((e) => {
         console.error(e);
@@ -39,4 +40,6 @@ export class GLTFLoader extends Loader<GLTFResource> {
 export interface GLTFParams {
   /** Keep raw mesh data for glTF parser, default is false. */
   keepMeshData: boolean;
+  /** Custom glTF pipeline. */
+  pipeline: GLTFPipeline;
 }
