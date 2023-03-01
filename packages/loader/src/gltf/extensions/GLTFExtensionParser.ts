@@ -21,7 +21,7 @@ export abstract class GLTFExtensionParser {
   initialize(): void | Promise<void> {}
 
   /**
-   * Create a resource instance.
+   * Create and parse the resource.
    * @remarks This method overrides the default resource creation.
    * @param context - The parser context
    * @param extensionSchema - The extension schema
