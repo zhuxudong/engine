@@ -43,6 +43,12 @@ void initGeometry(out Geometry geometry, bool isFrontFacing){
         geometry.clearCoatDotNV = saturate( dot(geometry.clearCoatNormal, geometry.viewDir) );
     #endif
 
+    #ifdef HAS_ANISOTROPY
+        geometry.anisotropy = u_anisotropy;
+        geometry.anisotropicT = normalize(tbn * u_anisotropyDirection);
+        geometry.anisotropicB = normalize(cross(geometry.normal, geometry.anisotropicT));
+    #endif
+
 }
 
 void initMaterial(out Material material, const in Geometry geometry){

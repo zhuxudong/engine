@@ -22,7 +22,7 @@ vec3 getNormalByNormalTexture(mat3 tbn, sampler2D normalTexture, float normalInt
 }
 
 mat3 getTBN(bool isFrontFacing){
-    #if defined(O3_HAS_NORMAL) && defined(O3_HAS_TANGENT) && ( defined(NORMALTEXTURE) || defined(HAS_CLEARCOATNORMALTEXTURE) )
+    #if defined(O3_HAS_NORMAL) && defined(O3_HAS_TANGENT) && ( defined(NORMALTEXTURE) || defined(HAS_CLEARCOATNORMALTEXTURE) || defined(HAS_ANISOTROPY)) 
         mat3 tbn = v_TBN;
     #else
         vec3 normal = getNormal(isFrontFacing);

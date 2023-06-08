@@ -53,6 +53,10 @@ uniform float u_occlusionTextureCoord;
     uniform sampler2D u_clearCoatNormalTexture;
 #endif
 
+#ifdef HAS_ANISOTROPY
+    uniform float u_anisotropy;
+    uniform vec3 u_anisotropyDirection;
+#endif
 
 
 // Runtime
@@ -72,6 +76,12 @@ struct Geometry {
     #ifdef CLEARCOAT
         vec3 clearCoatNormal;
         float clearCoatDotNV;
+    #endif
+
+    #ifdef HAS_ANISOTROPY
+        vec3  anisotropicT;
+        vec3  anisotropicB;
+        float anisotropy;
     #endif
 
 };
