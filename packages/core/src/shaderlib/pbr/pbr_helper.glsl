@@ -21,7 +21,7 @@ void initGeometry(out Geometry geometry, bool isFrontFacing){
     geometry.position = v_pos;
     geometry.viewDir =  normalize(u_cameraPos - v_pos);
 
-    #if defined(NORMALTEXTURE) || defined(HAS_CLEARCOATNORMALTEXTURE)
+    #if defined(NORMALTEXTURE) || defined(HAS_CLEARCOATNORMALTEXTURE) || defined(HAS_ANISOTROPY)
         mat3 tbn = getTBN(isFrontFacing);
     #endif
 
