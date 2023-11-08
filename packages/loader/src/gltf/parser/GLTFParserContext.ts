@@ -35,9 +35,8 @@ export class GLTFParserContext {
   buffers?: ArrayBuffer[];
 
   private _resourceCache = new Map<string, any>();
-  private _taskCount = 0;
+  private _totalTaskCount = 0;
   private _finishedTaskCount = 0;
-  private _progress = 0;
 
   /** @internal */
   _setProgress: (number) => void;
@@ -113,8 +112,7 @@ export class GLTFParserContext {
           this._createAnimator(this, glTFResource.animations);
         }
         this.resourceManager.addContentRestorer(this.contentRestorer);
-        this._setProgress(1);
-        return this.glTFResource;
+        return glTFResource;
       });
     });
   }
@@ -149,16 +147,15 @@ export class GLTFParserContext {
   ): void {
     const glTFResourceKey = glTFResourceMap[type];
     if (!glTFResourceKey) return;
-    this._taskCount++;
 
+    const glTFResource = this.glTFResource;
     if (type === GLTFParserType.Entity) {
-      (this.glTFResource[glTFResourceKey] ||= [])[index] = <Entity>resource;
-      this._increaseProgress();
+      (glTFResource[glTFResourceKey] ||= [])[index] = <Entity>resource;
     } else {
-      const url = this.glTFResource.url;
-
+      const url = glTFResource.url;
+      this._totalTaskCount++;
       (<Promise<T>>resource).then((item: T) => {
-        (this.glTFResource[glTFResourceKey] ||= [])[index] = item;
+        (glTFResource[glTFResourceKey] ||= [])[index] = item;
         this._increaseProgress();
 
         if (type === GLTFParserType.Mesh) {
@@ -180,11 +177,8 @@ export class GLTFParserContext {
   }
 
   private _increaseProgress() {
-    const progress = ++this._finishedTaskCount / this._taskCount;
-    if (progress > this._progress && progress < 1) {
-      this._progress = progress;
-      this._setProgress(progress);
-    }
+    const progress = ++this._finishedTaskCount / this._totalTaskCount;
+    this._setProgress(progress);
   }
 }
 
