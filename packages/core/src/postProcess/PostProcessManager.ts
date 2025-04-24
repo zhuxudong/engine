@@ -5,7 +5,7 @@ import { Scene } from "../Scene";
 import { Logger } from "../base/Logger";
 import { Material } from "../material";
 import { Collider } from "../physics";
-import { RenderTarget, Texture2D, TextureFilterMode, TextureFormat, TextureWrapMode } from "../texture";
+import { RenderTarget, Texture2D, TextureFilterMode, TextureWrapMode } from "../texture";
 import { PostProcess } from "./PostProcess";
 import { PostProcessEffect } from "./PostProcessEffect";
 
@@ -166,6 +166,18 @@ export class PostProcessManager {
   }
 
   /**
+   * Destroy the PostProcessManager.
+   */
+  destroy(): void {
+    const swapRenderTarget = this._swapRenderTarget;
+    if (swapRenderTarget) {
+      swapRenderTarget.getColorTexture(0)?.destroy(true);
+      swapRenderTarget.destroy(true);
+      this._swapRenderTarget = null;
+    }
+  }
+
+  /**
    * @internal
    */
   _render(camera: Camera, srcRenderTarget: RenderTarget, destRenderTarget: RenderTarget): void {
@@ -185,18 +197,6 @@ export class PostProcessManager {
       pass.onRender(camera, this._getCurrentSourceTexture(), this._currentDestRenderTarget);
       this._remainActivePassCount--;
       this._swapRT();
-    }
-  }
-
-  /**
-   * @internal
-   */
-  _releaseSwapRenderTarget(): void {
-    const swapRenderTarget = this._swapRenderTarget;
-    if (swapRenderTarget) {
-      swapRenderTarget.getColorTexture(0)?.destroy(true);
-      swapRenderTarget.destroy(true);
-      this._swapRenderTarget = null;
     }
   }
 
@@ -234,7 +234,7 @@ export class PostProcessManager {
         viewport.width,
         viewport.height,
         camera._getInternalColorTextureFormat(),
-        TextureFormat.Depth24Stencil8,
+        null,
         false,
         false,
         !camera.enableHDR,

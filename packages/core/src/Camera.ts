@@ -172,6 +172,14 @@ export class Camera extends Component {
    * @remarks If true, the msaa in viewport can turn or off independently by `msaaSamples` property.
    */
   get independentCanvasEnabled(): boolean {
+    if (this.needFinalPass) {
+      return true;
+    }
+
+    if (this.engine._linearBlend && !this.renderTarget) {
+      return true;
+    }
+
     // Uber pass need internal RT
     if (this.enablePostProcess && this.scene.postProcessManager._isValid()) {
       return true;
@@ -181,6 +189,12 @@ export class Camera extends Component {
       return this._getInternalColorTextureFormat() !== this.renderTarget?.getColorTexture(0).format;
     }
 
+    return false;
+  }
+
+  get needFinalPass() {
+    // @todo: merge FXAA logic
+    // return this.enableFXAA
     return false;
   }
 
@@ -732,6 +746,14 @@ export class Camera extends Component {
         ? TextureFormat.R11G11B10_UFloat
         : TextureFormat.R16G16B16A16
       : TextureFormat.R8G8B8A8;
+  }
+
+  /**
+   * @internal
+   */
+  _getTargetColorTextureFormat(): TextureFormat {
+    const renderTarget = this._renderTarget;
+    return renderTarget ? renderTarget.getColorTexture(0).format : TextureFormat.R8G8B8A8;
   }
 
   /**

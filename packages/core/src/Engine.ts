@@ -14,6 +14,7 @@ import { Camera } from "./Camera";
 import { Canvas } from "./Canvas";
 import { EngineSettings } from "./EngineSettings";
 import { Entity } from "./Entity";
+import { FinalPass } from "./FinalPass";
 import { BatcherManager } from "./RenderPipeline/BatcherManager";
 import { RenderContext } from "./RenderPipeline/RenderContext";
 import { RenderElement } from "./RenderPipeline/RenderElement";
@@ -115,6 +116,12 @@ export class Engine extends EventDispatcher {
 
   /** @internal */
   protected _canvas: Canvas;
+
+  /* @internal */
+  _finalPass: FinalPass;
+
+  /* @internal */
+  readonly _linearBlend = true;
 
   private _settings: EngineSettings = {};
   private _resourceManager: ResourceManager = new ResourceManager(this);
@@ -279,6 +286,8 @@ export class Engine extends EventDispatcher {
 
     const uberPass = new PostProcessUberPass(this);
     this.addPostProcessPass(uberPass);
+
+    this._finalPass = new FinalPass(this);
   }
 
   /**
@@ -491,6 +500,15 @@ export class Engine extends EventDispatcher {
 
   private _destroy(): void {
     this._sceneManager._destroyAllScene();
+
+    const postProcessPasses = this._postProcessPasses;
+    for (let i = 0; i < postProcessPasses.length; i++) {
+      const pass = postProcessPasses[i];
+      pass.destroy();
+    }
+    postProcessPasses.length = 0;
+    this._finalPass.destroy();
+    this._finalPass = null;
 
     this._resourceManager._destroy();
     this._textDefaultFont = null;

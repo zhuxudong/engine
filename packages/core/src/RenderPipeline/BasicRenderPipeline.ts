@@ -291,20 +291,30 @@ export class BasicRenderPipeline {
 
     const postProcessManager = scene.postProcessManager;
     const cameraRenderTarget = camera.renderTarget;
-    if (camera.enablePostProcess && postProcessManager._isValid()) {
+    const needPostProcess = camera.enablePostProcess && postProcessManager._isValid();
+
+    if (needPostProcess) {
       postProcessManager._render(camera, internalColorTarget, cameraRenderTarget);
     } else {
-      postProcessManager._releaseSwapRenderTarget();
-      if (internalColorTarget) {
-        internalColorTarget._blitRenderTarget();
-        Blitter.blitTexture(
-          engine,
-          <Texture2D>internalColorTarget.getColorTexture(0),
-          cameraRenderTarget,
-          0,
-          camera.viewport
-        );
-      }
+      postProcessManager.destroy();
+    }
+
+    const finalPass = engine._finalPass;
+    if (camera.needFinalPass) {
+      finalPass.onRender(camera, <Texture2D>internalColorTarget.getColorTexture(0), cameraRenderTarget);
+    } else {
+      finalPass.destroy();
+    }
+
+    if (!(needPostProcess || camera.needFinalPass) && internalColorTarget) {
+      internalColorTarget._blitRenderTarget();
+      Blitter.blitTexture(
+        engine,
+        <Texture2D>internalColorTarget.getColorTexture(0),
+        cameraRenderTarget,
+        0,
+        camera.viewport
+      );
     }
 
     cameraRenderTarget?._blitRenderTarget();
