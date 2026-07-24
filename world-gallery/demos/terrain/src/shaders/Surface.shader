@@ -17,10 +17,12 @@ Shader "Terrain/Surface" {
         vec4 TANGENT;
         vec2 TEXCOORD_0;
         vec4 COLOR_0;
-        vec4 INSTANCE_POSITION_HASH;
-        vec4 INSTANCE_ROTATION;
-        vec4 INSTANCE_SCALE_WIND;
-        vec4 INSTANCE_COLOR;
+        #ifdef RENDERER_SURFACE_INSTANCED
+          vec4 INSTANCE_POSITION_HASH;
+          vec4 INSTANCE_ROTATION;
+          vec4 INSTANCE_SCALE_WIND;
+          vec4 INSTANCE_COLOR;
+        #endif
       };
 
       struct Varyings {
@@ -234,63 +236,79 @@ Shader "Terrain/Surface" {
       }
 
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal, out vec4 worldTangent) {
-        vec3 prototypePosition = renderer_SurfaceLocalPosition +
-          rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
-        vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
-        #ifdef RENDERER_SURFACE_BILLBOARD
-          vec3 billboardRight;
-          vec3 billboardUp;
-          vec3 billboardForward;
-          billboardBasis(billboardRight, billboardUp, billboardForward);
-          vec3 localNormal = normalize(
-            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
-          );
-          vec3 localTangent = normalize(
-            attributes.TANGENT.xyz * renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz
-          );
-          vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
-            billboardRight * scaledPosition.x +
-            billboardUp * scaledPosition.y +
-            billboardForward * scaledPosition.z;
-          worldNormal = normalize(
-            billboardRight * localNormal.x +
-            billboardUp * localNormal.y +
-            billboardForward * localNormal.z
-          );
+        vec3 worldPosition;
+        vec3 fadeAnchor;
+        float windPhase = 0.0;
+        #ifdef RENDERER_SURFACE_INSTANCED
+          vec3 prototypePosition = renderer_SurfaceLocalPosition +
+            rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
+          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+          #ifdef RENDERER_SURFACE_BILLBOARD
+            vec3 billboardRight;
+            vec3 billboardUp;
+            vec3 billboardForward;
+            billboardBasis(billboardRight, billboardUp, billboardForward);
+            vec3 localNormal = normalize(
+              attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+            );
+            vec3 localTangent = normalize(
+              attributes.TANGENT.xyz * renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz
+            );
+            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+              billboardRight * scaledPosition.x +
+              billboardUp * scaledPosition.y +
+              billboardForward * scaledPosition.z;
+            worldNormal = normalize(
+              billboardRight * localNormal.x +
+              billboardUp * localNormal.y +
+              billboardForward * localNormal.z
+            );
+            worldTangent = vec4(
+              normalize(
+                billboardRight * localTangent.x +
+                billboardUp * localTangent.y +
+                billboardForward * localTangent.z
+              ),
+              attributes.TANGENT.w
+            );
+          #else
+            vec3 localNormal = normalize(
+              rotateByQuaternion(
+                attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
+                renderer_SurfaceLocalRotation
+              ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+            );
+            localNormal = normalize(mix(localNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
+            vec3 localTangent = normalize(
+              rotateByQuaternion(
+                attributes.TANGENT.xyz * renderer_SurfaceLocalScale,
+                renderer_SurfaceLocalRotation
+              ) * attributes.INSTANCE_SCALE_WIND.xyz
+            );
+            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+              rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
+            worldNormal = normalize(rotateByQuaternion(localNormal, attributes.INSTANCE_ROTATION));
+            worldTangent = vec4(
+              normalize(rotateByQuaternion(localTangent, attributes.INSTANCE_ROTATION)),
+              attributes.TANGENT.w
+            );
+          #endif
+          fadeAnchor = attributes.INSTANCE_POSITION_HASH.xyz;
+          windPhase = attributes.INSTANCE_SCALE_WIND.w;
+        #else
+          worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;
+          worldNormal = normalize((renderer_NormalMat * vec4(attributes.NORMAL, 0.0)).xyz);
+          worldNormal = normalize(mix(worldNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
           worldTangent = vec4(
-            normalize(
-              billboardRight * localTangent.x +
-              billboardUp * localTangent.y +
-              billboardForward * localTangent.z
-            ),
+            normalize((renderer_ModelMat * vec4(attributes.TANGENT.xyz, 0.0)).xyz),
             attributes.TANGENT.w
           );
-        #else
-        vec3 localNormal = normalize(
-          rotateByQuaternion(
-            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
-            renderer_SurfaceLocalRotation
-          ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
-        );
-        localNormal = normalize(mix(localNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
-        vec3 localTangent = normalize(
-          rotateByQuaternion(
-            attributes.TANGENT.xyz * renderer_SurfaceLocalScale,
-            renderer_SurfaceLocalRotation
-          ) * attributes.INSTANCE_SCALE_WIND.xyz
-        );
-        vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
-          rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
-        worldNormal = normalize(rotateByQuaternion(localNormal, attributes.INSTANCE_ROTATION));
-        worldTangent = vec4(
-          normalize(rotateByQuaternion(localTangent, attributes.INSTANCE_ROTATION)),
-          attributes.TANGENT.w
-        );
+          fadeAnchor = (renderer_ModelMat * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
         #endif
 
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
-            attributes.INSTANCE_SCALE_WIND.w;
+            windPhase;
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
@@ -300,11 +318,7 @@ Shader "Terrain/Surface" {
         }
 
         if (material_FadeDistance > 0.0) {
-          float eyeDepth = -(renderer_MVMat * vec4(
-            attributes.INSTANCE_POSITION_HASH.xyz +
-              rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION),
-            1.0
-          )).z;
+          float eyeDepth = -(camera_ViewMat * vec4(worldPosition, 1.0)).z;
           float cameraDepthFade = (
             eyeDepth - camera_ProjectionParams.y - material_FadeDistance
           ) / 5.0;
@@ -313,7 +327,7 @@ Shader "Terrain/Surface" {
             0.0,
             1.0
           );
-          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fadeMask);
+          worldPosition = mix(fadeAnchor, worldPosition, fadeMask);
         }
         return worldPosition;
       }
@@ -327,9 +341,13 @@ Shader "Terrain/Surface" {
         output.worldPosition = surfacePosition;
         output.worldNormal = surfaceNormal;
         output.worldTangent = surfaceTangent;
-        output.instanceColor = attributes.INSTANCE_COLOR;
+        #ifdef RENDERER_SURFACE_INSTANCED
+          output.instanceColor = attributes.INSTANCE_COLOR;
+        #else
+          output.instanceColor = vec4(1.0);
+        #endif
         output.localPosition = attributes.POSITION;
-        output.positionVS = (renderer_MVMat * vec4(surfacePosition, 1.0)).xyz;
+        output.positionVS = (camera_ViewMat * vec4(surfacePosition, 1.0)).xyz;
         output.positionCS = camera_VPMat * vec4(surfacePosition, 1.0);
         #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
           output.probeIrradiance = vec3(0.0);
@@ -683,9 +701,11 @@ Shader "Terrain/Surface" {
         vec3 NORMAL;
         vec2 TEXCOORD_0;
         vec4 COLOR_0;
-        vec4 INSTANCE_POSITION_HASH;
-        vec4 INSTANCE_ROTATION;
-        vec4 INSTANCE_SCALE_WIND;
+        #ifdef RENDERER_SURFACE_INSTANCED
+          vec4 INSTANCE_POSITION_HASH;
+          vec4 INSTANCE_ROTATION;
+          vec4 INSTANCE_SCALE_WIND;
+        #endif
       };
 
       struct Varyings {
@@ -805,42 +825,53 @@ Shader "Terrain/Surface" {
       }
 
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal) {
-        vec3 prototypePosition = renderer_SurfaceLocalPosition +
-          rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
-        #ifdef RENDERER_SURFACE_BILLBOARD
-          vec3 billboardRight;
-          vec3 billboardUp;
-          vec3 billboardForward;
-          billboardBasis(billboardRight, billboardUp, billboardForward);
+        vec3 worldPosition;
+        vec3 fadeAnchor;
+        float windPhase = 0.0;
+        #ifdef RENDERER_SURFACE_INSTANCED
+          vec3 prototypePosition = renderer_SurfaceLocalPosition +
+            rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
           vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
-          vec3 localNormal = normalize(
-            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
-          );
-          vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
-            billboardRight * scaledPosition.x +
-            billboardUp * scaledPosition.y +
-            billboardForward * scaledPosition.z;
-          worldNormal = normalize(
-            billboardRight * localNormal.x +
-            billboardUp * localNormal.y +
-            billboardForward * localNormal.z
-          );
+          #ifdef RENDERER_SURFACE_BILLBOARD
+            vec3 billboardRight;
+            vec3 billboardUp;
+            vec3 billboardForward;
+            billboardBasis(billboardRight, billboardUp, billboardForward);
+            vec3 localNormal = normalize(
+              attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+            );
+            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+              billboardRight * scaledPosition.x +
+              billboardUp * scaledPosition.y +
+              billboardForward * scaledPosition.z;
+            worldNormal = normalize(
+              billboardRight * localNormal.x +
+              billboardUp * localNormal.y +
+              billboardForward * localNormal.z
+            );
+          #else
+            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+              rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
+            worldNormal = normalize(
+              rotateByQuaternion(
+                rotateByQuaternion(
+                  attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
+                  renderer_SurfaceLocalRotation
+                ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001)),
+                attributes.INSTANCE_ROTATION
+              )
+            );
+          #endif
+          fadeAnchor = attributes.INSTANCE_POSITION_HASH.xyz;
+          windPhase = attributes.INSTANCE_SCALE_WIND.w;
         #else
-        vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
-          rotateByQuaternion(prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz, attributes.INSTANCE_ROTATION);
-        worldNormal = normalize(
-          rotateByQuaternion(
-            rotateByQuaternion(
-              attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
-              renderer_SurfaceLocalRotation
-            ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001)),
-            attributes.INSTANCE_ROTATION
-          )
-        );
+          worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;
+          worldNormal = normalize((renderer_NormalMat * vec4(attributes.NORMAL, 0.0)).xyz);
+          fadeAnchor = (renderer_ModelMat * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
         #endif
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
-            attributes.INSTANCE_SCALE_WIND.w;
+            windPhase;
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
@@ -849,14 +880,7 @@ Shader "Terrain/Surface" {
             (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
         }
         if (material_FadeDistance > 0.0) {
-          float eyeDepth = -(renderer_MVMat * vec4(
-            attributes.INSTANCE_POSITION_HASH.xyz +
-              rotateByQuaternion(
-                prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz,
-                attributes.INSTANCE_ROTATION
-              ),
-            1.0
-          )).z;
+          float eyeDepth = -(camera_ViewMat * vec4(worldPosition, 1.0)).z;
           float cameraDepthFade = (
             eyeDepth - camera_ProjectionParams.y - material_FadeDistance
           ) / 5.0;
@@ -865,7 +889,7 @@ Shader "Terrain/Surface" {
             0.0,
             1.0
           );
-          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fadeMask);
+          worldPosition = mix(fadeAnchor, worldPosition, fadeMask);
         }
         return worldPosition;
       }

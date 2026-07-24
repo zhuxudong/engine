@@ -179,6 +179,7 @@ export class SurfaceWorld {
             renderer.receiveShadows = rendererSpec.receiveShadows;
             renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
             SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
+            SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
             SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
             SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
             SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);

@@ -77,6 +77,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _lodFadeEnabled = ShaderProperty.getByName("renderer_SurfaceLodFadeEnabled");
   private static readonly _vertexColorMacro = ShaderMacro.getByName("RENDERER_ENABLE_VERTEXCOLOR");
   private static readonly _billboardMacro = ShaderMacro.getByName("RENDERER_SURFACE_BILLBOARD");
+  private static readonly _instancedMacro = ShaderMacro.getByName("RENDERER_SURFACE_INSTANCED");
   private static readonly _coverageMacro = ShaderMacro.getByName("MATERIAL_SURFACE_COVERAGE");
 
   readonly id: string;
@@ -151,14 +152,14 @@ export class SurfaceMaterial extends BaseMaterial {
    * @param engine Engine that owns the textures and material.
    * @param spec Portable surface material values.
    * @param manifestUrl URL used to resolve material texture paths.
-   * @param lodDitherUrl Screen-space threshold texture used by cross-fading LODs.
+   * @param lodDitherUrl Optional screen-space threshold texture used by cross-fading LODs.
    * @returns Configured material sharing repeat/trilinear texture resources.
    */
   static async create(
     engine: Engine,
     spec: SurfaceMaterialSpec,
     manifestUrl: string,
-    lodDitherUrl: string
+    lodDitherUrl?: string
   ): Promise<SurfaceMaterial> {
     const material = new SurfaceMaterial(engine, spec);
     const [albedo, normal, metallicSmoothness, occlusion, lodDither, coverageTextures] = await Promise.all([
@@ -225,6 +226,18 @@ export class SurfaceMaterial extends BaseMaterial {
    */
   static setRendererVertexColor(enabled: boolean, shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }): void {
     enabled ? shaderData.enableMacro(SurfaceMaterial._vertexColorMacro) : shaderData.disableMacro(SurfaceMaterial._vertexColorMacro);
+  }
+
+  /**
+   * Selects BufferMesh instance attributes instead of an entity model matrix.
+   * @param enabled Whether the renderer owns compiled surface instance streams.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererInstanced(
+    enabled: boolean,
+    shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }
+  ): void {
+    enabled ? shaderData.enableMacro(SurfaceMaterial._instancedMacro) : shaderData.disableMacro(SurfaceMaterial._instancedMacro);
   }
 
   /**
@@ -325,7 +338,12 @@ async function loadSurfaceTexture(
   return texture;
 }
 
-async function loadLodDitherTexture(engine: Engine, url: string): Promise<Texture2D> {
+async function loadLodDitherTexture(engine: Engine, url?: string): Promise<Texture2D> {
+  if (!url) {
+    const texture = new Texture2D(engine, 1, 1);
+    texture.setPixelBuffer(WHITE_PIXEL);
+    return texture;
+  }
   const texture = await engine.resourceManager.load<Texture2D>({
     type: AssetType.Texture,
     url,
