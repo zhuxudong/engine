@@ -290,8 +290,10 @@ export interface TerrainLightingSnapshot {
   directLight: boolean;
   /** Whether the directional light renders and samples its shadow map. */
   shadows: boolean;
-  /** Whether the sky background and baked ambient light are active. */
+  /** Whether baked ambient-light SH contributes diffuse terrain illumination. */
   environment: boolean;
+  /** Whether the HDR cube is drawn as the visible sky background. */
+  skybox: boolean;
 }
 
 /** Full mutable copy of the terrain inputs exposed by the inspector. */
@@ -344,10 +346,6 @@ export interface TerrainDebugApi {
   getLighting(): TerrainLightingSnapshot;
   /** Updates direct-light and baked-environment visibility. */
   setLighting(tuning: Partial<TerrainLightingSnapshot>): void;
-  /** Returns the generated terrain-conforming surface-system state. */
-  getSurface(): SurfaceSystemSnapshot;
-  /** Updates surface-system visibility without changing placement inputs. */
-  setSurface(tuning: Pick<SurfaceSystemSnapshot, "enabled">): void;
   /** Restores manifest defaults. */
   resetTuning(): void;
   /** Returns the rendered clipmap topology. */

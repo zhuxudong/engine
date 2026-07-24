@@ -21,8 +21,10 @@ export interface TerrainLightingSnapshot {
   directLight: boolean;
   /** Whether the directional light renders and samples its shadow map. */
   shadows: boolean;
-  /** Whether the sky background and baked ambient light are active. */
+  /** Whether the baked ambient-light SH contributes diffuse terrain illumination. */
   environment: boolean;
+  /** Whether the HDR cube is drawn as the visible sky background. */
+  skybox: boolean;
 }
 
 /** Runtime controls for terrain's scene lighting. */
@@ -35,6 +37,9 @@ export interface TerrainEnvironment {
 
 const SKY_HORIZON_COLOR = new Color(0.505882, 0.615686, 0.709804, 1);
 const SUN_DIRECTION = new Vector3(0.500003, -0.749999, 0.43301);
+const TERRAIN_SHADOW_RESOLUTION = ShadowResolution.High;
+const TERRAIN_SHADOW_CASCADES = ShadowCascadesMode.FourCascades;
+const TERRAIN_SHADOW_DISTANCE = 128;
 
 /**
  * Loads the baked environment asset and configures the matching terrain light rig.
@@ -66,9 +71,11 @@ export async function createTerrainEnvironment(
   scene.background.mode = BackgroundMode.Sky;
 
   scene.castShadows = true;
-  scene.shadowResolution = ShadowResolution.High;
-  scene.shadowCascades = ShadowCascadesMode.FourCascades;
-  scene.shadowDistance = 256;
+  // Forward-displaced terrain receives these cascades in its own fragment shader.
+  // It is excluded only from the regular caster pass because that pass has no terrain displacement.
+  scene.shadowResolution = TERRAIN_SHADOW_RESOLUTION;
+  scene.shadowCascades = TERRAIN_SHADOW_CASCADES;
+  scene.shadowDistance = TERRAIN_SHADOW_DISTANCE;
 
   const directLightEntity = parent.createChild("terrain-directional-light");
   const directLight = directLightEntity.addComponent(DirectLight);
@@ -76,7 +83,7 @@ export async function createTerrainEnvironment(
   directLight.shadowType = ShadowType.Hard;
   directLightEntity.transform.lookAt(SUN_DIRECTION);
 
-  const state: TerrainLightingSnapshot = { directLight: true, shadows: true, environment: true };
+  const state: TerrainLightingSnapshot = { directLight: true, shadows: true, environment: true, skybox: true };
   return {
     getLighting() {
       return { ...state };
@@ -94,7 +101,10 @@ export async function createTerrainEnvironment(
         state.environment = values.environment;
         ambientLight.diffuseIntensity = values.environment ? 1 : 0;
         ambientLight.specularIntensity = values.environment ? 1 : 0;
-        scene.background.mode = values.environment ? BackgroundMode.Sky : BackgroundMode.SolidColor;
+      }
+      if (values.skybox !== undefined) {
+        state.skybox = values.skybox;
+        scene.background.mode = values.skybox ? BackgroundMode.Sky : BackgroundMode.SolidColor;
       }
     }
   };

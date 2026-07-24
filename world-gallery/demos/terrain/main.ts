@@ -1,16 +1,12 @@
 import {
-  AssetType,
   Camera,
-  Engine,
   Entity,
   PostProcess,
   Shader,
-  ShaderLanguage,
   TonemappingEffect,
   TonemappingMode,
   Vector3,
-  WebGLEngine,
-  WebGPUEngine
+  WebGLEngine
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
@@ -37,7 +33,6 @@ import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
 import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader";
 import { loadTerrainData } from "./src/loader/TerrainDataLoader";
 import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
-import { SurfaceSystem } from "./src/surface/SurfaceSystem";
 import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
 
 export {
@@ -140,14 +135,12 @@ async function boot(): Promise<void> {
   camera.farClipPlane = 20000;
   camera.enableHDR = true;
   camera.enablePostProcess = true;
-  if (new URLSearchParams(window.location.search).has("stats")) {
-    configureStatsForDiagnostics(cameraEntity.addComponent(Stats));
-    installStatsPanelStyle();
-  }
   const postProcess = root.createChild("terrain-tonemapping").addComponent(PostProcess);
   postProcess.addEffect(TonemappingEffect).mode.value = TonemappingMode.Neutral;
-  let cameraControl: OrbitControl | FreeControl = createOrbitControl(cameraEntity);
-  applyCameraPose(cameraEntity, "overview");
+  const orbit = cameraEntity.addComponent(OrbitControl);
+  orbit.minDistance = 20;
+  orbit.maxDistance = 10000;
+  applyCameraPose(cameraEntity, orbit, "overview");
 
   setStatus("loading manifest and region arrays");
   const manifestUrl = new URL("./data/manifest.json", import.meta.url).href;
@@ -262,20 +255,14 @@ async function boot(): Promise<void> {
     getLighting() {
       return environment.getLighting();
     },
-    setLighting(values: Partial<TerrainLightingSnapshot>) {
+    setLighting(values) {
       environment.setLighting(values);
       if (values.directLight !== undefined) {
-        for (const terrainMaterial of terrainMaterials) terrainMaterial.setDirectLightingEnabled(values.directLight);
+        material.setDirectLightingEnabled(values.directLight);
       }
       if (values.environment !== undefined) {
-        for (const terrainMaterial of terrainMaterials) terrainMaterial.setIndirectLightingEnabled(values.environment);
+        material.setIndirectLightingEnabled(values.environment);
       }
-    },
-    getSurface() {
-      return surfaceSystem.inspect();
-    },
-    setSurface(values) {
-      surfaceSystem.setEnabled(values.enabled);
     },
     resetTuning() {
       const defaults = createTuningSnapshot(manifest);

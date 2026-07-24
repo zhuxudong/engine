@@ -38,8 +38,6 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
   const worldNoiseState = createWorldNoiseState(snapshot);
   const waterState = api.getWaterDebug();
   const lightingState = api.getLighting();
-  const surfaceState = api.getSurface();
-  const maximumNormalMapLod = api.inspect().meshLods - 1;
   const selectPreview = new Map<number, () => void>();
   const terrainFolder = inspector.folder("Terrain / 地形", true);
 
@@ -67,22 +65,18 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
   annotate(
     lightingFolder.add(lightingState, "shadows"),
     "Shadows / 阴影",
-    "让方向光生成并采样级联阴影图；关闭后保留同一盏方向光，只移除阴影投射与接收，用于区分光照与阴影图成本。"
+    "让方向光生成并采样级联阴影图；关闭后保留同一盏方向光，只移除阴影投射与接收。"
   ).onChange((value: boolean) => api.setLighting({ shadows: value }));
   annotate(
     lightingFolder.add(lightingState, "environment"),
     "Environment / 环境",
-    "切换天空盒背景和离线烘焙 `.ambLight` 的环境漫反射；关闭后只保留直接光。"
+    "切换离线烘焙 `.ambLight` 的环境漫反射；与直接光共用逐片元地形与纹理法线。"
   ).onChange((value: boolean) => api.setLighting({ environment: value }));
-
-  const surfaceFolder = inspector.subfolder(terrainFolder, "Surface system / 地表系统", true);
-  const setSurfaceReadout = inspector.addReadout(surfaceFolder, "Generated instances / 生成实例");
   annotate(
-    surfaceFolder.add(surfaceState, "enabled"),
-    "Enabled / 启用",
-    "显示或隐藏由 control feature bit、height、slope 与 control overlay 共同筛选的静态 glTF 树木；不会改变地形材质。"
-  ).onChange((enabled: boolean) => api.setSurface({ enabled }));
-  setSurfaceReadout(formatSurfaceSnapshot(surfaceState));
+    lightingFolder.add(lightingState, "skybox"),
+    "Skybox / 天空盒",
+    "只切换 HDR 天空背景绘制，不改变地形的环境漫反射。"
+  ).onChange((value: boolean) => api.setLighting({ skybox: value }));
 
   const worldFolder = inspector.subfolder(terrainFolder, "World background / 世界背景", true);
   annotate(

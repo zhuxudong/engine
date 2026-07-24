@@ -177,8 +177,6 @@ export class TerrainMaterial extends BaseMaterial {
   private static readonly _autoMacro = ShaderMacro.getByName("TERRAIN_AUTO_SHADER");
   private static readonly _dualMacro = ShaderMacro.getByName("TERRAIN_DUAL_SCALING");
   private static readonly _macroVariationMacro = ShaderMacro.getByName("TERRAIN_MACRO_VARIATION");
-  private static readonly _linearControlBlendMacro = ShaderMacro.getByName("TERRAIN_LINEAR_CONTROL_BLEND");
-  private static readonly _materialDetailMacro = ShaderMacro.getByName("TERRAIN_MATERIAL_DETAIL");
   private static readonly _directLightingMacro = ShaderMacro.getByName("TERRAIN_DIRECT_LIGHTING");
   private static readonly _indirectLightingMacro = ShaderMacro.getByName("TERRAIN_INDIRECT_LIGHTING");
   private static readonly _debugMacro = ShaderMacro.getByName("TERRAIN_DEBUG");
@@ -272,7 +270,6 @@ export class TerrainMaterial extends BaseMaterial {
     this._uploadLayerParameters();
     this.shaderData.setInt(TerrainMaterial._layerCount, 0);
     this.shaderData.setInt(TerrainMaterial._backgroundMode, 0);
-    this._setMacro(TerrainMaterial._materialDetailMacro, true);
     this._setMacro(TerrainMaterial._directLightingMacro, true);
     this._setMacro(TerrainMaterial._indirectLightingMacro, true);
     this.setDebugView(TerrainDebugView.Surface);
@@ -445,14 +442,6 @@ export class TerrainMaterial extends BaseMaterial {
   setDebugView(view: TerrainDebugView): void {
     this._setMacro(TerrainMaterial._debugMacro, view !== TerrainDebugView.Surface);
     this.shaderData.setInt(TerrainMaterial._debugView, view);
-  }
-
-  /**
-   * Selects the compiled near or far terrain-material path.
-   * @param enabled Whether this material samples normal/roughness textures and evaluates detailed direct lighting.
-   */
-  setMaterialDetailEnabled(enabled: boolean): void {
-    this._setMacro(TerrainMaterial._materialDetailMacro, enabled);
   }
 
   /**
