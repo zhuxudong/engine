@@ -258,6 +258,7 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
       [
         `visible: ${current.visibleInstances.toLocaleString("en-US")} / ${current.totalInstances.toLocaleString("en-US")}`,
         `cells: ${current.visibleRanges} / ${current.totalRanges}`,
+        `crossfading cells: ${current.transitioningRanges}`,
         `renderer batches: ${current.rendererBatches}`,
         `LOD: ${current.lodCounts.map((count, index) => `${index}=${count.toLocaleString("en-US")}`).join(", ")}`,
         `impostor: ${current.impostorInstances.toLocaleString("en-US")}`

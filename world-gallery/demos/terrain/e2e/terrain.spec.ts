@@ -216,7 +216,8 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
   await test.step("surface cells submit deterministic instanced batches", async () => {
     const compiled = await page.evaluate(() => window.terrainDebug!.inspectSurface());
     expect(compiled.totalInstances).toBe(48_890);
-    expect(compiled.totalRanges).toBe(649);
+    expect(compiled.totalRanges).toBe(928);
+    expect(compiled.rendererBatches).toBe(2_425);
     expect(compiled.categoryCounts).toEqual({
       grass: 39_680,
       flower: 597,
@@ -228,7 +229,7 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(compiled.sourceRules.find((rule) => rule.category === "tree")).toMatchObject({
       mode: "scatter",
       spacing: 24,
-      cellSize: 256
+      cellSize: 128
     });
     expect(compiled.debugMasks.map((mask) => mask.id)).toEqual(["grass", "flower", "shrub", "tree", "rock"]);
     const generatedSurfaceShaders = await page.evaluate(() => window.__surfaceGeneratedShaders);
@@ -247,12 +248,36 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
           !shader.source.includes("worldNormal = worldNormal")
       )
     ).toBe(true);
+    expect(
+      generatedSurfaceShaders.some(
+        (shader) =>
+          shader.stage === "fragment" &&
+          shader.source.includes("material_MetallicSmoothness") &&
+          shader.source.includes("evaluateIBL")
+      )
+    ).toBe(true);
 
     await page.evaluate(async () => {
-      window.terrainDebug!.setPose("first-person");
+      await window.terrainDebug!.setPose("first-person");
       window.terrainDebug!.setSurface({ wind: { enabled: false } });
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     });
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.terrainDebug!.inspectSurface().lodCounts.slice(1).some((count) => count > 0))
+      )
+      .toBe(true);
+    await page.evaluate(() => window.terrainDebug!.setSurface({ lod: { enabled: false } }));
+    await expect.poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges)).toBe(0);
+    const transitioningRanges = await page.evaluate(() => {
+      window.terrainDebug!.setSurface({ lod: { enabled: true } });
+      return window.terrainDebug!.inspectSurface().transitioningRanges;
+    });
+    expect(transitioningRanges).toBeGreaterThan(0);
+    await expect.poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges)).toBe(0);
+    expect(
+      await page.evaluate(() => window.terrainDebug!.inspectSurface().lodCounts.slice(1).some((count) => count > 0))
+    ).toBe(true);
     const surfaceFrame = await readFrameFingerprint(page);
     expect(await page.evaluate(() => window.__surfaceInstanceDraws.some((count) => count > 1))).toBe(true);
 

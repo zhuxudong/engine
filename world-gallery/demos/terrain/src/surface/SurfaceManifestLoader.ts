@@ -36,6 +36,9 @@ function validateManifest(manifest: SurfaceRuntimeManifest): void {
   if (!Number.isInteger(manifest.binary.count) || manifest.binary.count < 0) {
     throw new Error("[SurfaceManifest] binary count must be a non-negative integer");
   }
+  if (!manifest.lodDitherTexture || !(manifest.lodCrossfadeDuration > 0)) {
+    throw new Error("[SurfaceManifest] LOD dither texture and positive crossfade duration are required");
+  }
   const prototypes = new Set(manifest.prototypes);
   if (prototypes.size !== manifest.prototypes.length || prototypes.size !== manifest.prototypeLibrary.length) {
     throw new Error("[SurfaceManifest] prototype ids and library must be unique and complete");
@@ -43,6 +46,27 @@ function validateManifest(manifest: SurfaceRuntimeManifest): void {
   for (const prototype of manifest.prototypeLibrary) {
     if (!prototypes.has(prototype.id) || prototype.lods.length === 0 || !(prototype.maxDistance > 0)) {
       throw new Error(`[SurfaceManifest] invalid prototype ${prototype.id}`);
+    }
+    for (const lod of prototype.lods) {
+      if (lod.index < 0 || lod.renderers.length === 0 || !Number.isFinite(lod.screenRelativeHeight)) {
+        throw new Error(`[SurfaceManifest] invalid LOD ${lod.index} in ${prototype.id}`);
+      }
+    }
+  }
+  for (const material of manifest.materials) {
+    if (
+      (material.metallic ?? 0) < 0 ||
+      (material.metallic ?? 0) > 1 ||
+      material.roughness < 0 ||
+      material.roughness > 1 ||
+      (material.occlusionStrength ?? 1) < 0 ||
+      (material.occlusionStrength ?? 1) > 1 ||
+      material.colorVariation.mode !== "world-noise-2d" &&
+      material.colorVariation.mode !== "world-noise-3d" &&
+      material.colorVariation.mode !== "vertex-gradient" &&
+      material.colorVariation.mode !== "uv-gradient"
+    ) {
+      throw new Error(`[SurfaceManifest] invalid color variation mode in ${material.id}`);
     }
   }
   let expectedOffset = 0;

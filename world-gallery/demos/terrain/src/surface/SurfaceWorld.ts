@@ -22,6 +22,7 @@ import type { SurfaceCategory, SurfaceCellRange } from "./SurfaceContract";
 import { loadSurfaceManifest } from "./SurfaceManifestLoader";
 import { SurfaceMaterial } from "./SurfaceMaterial";
 import type {
+  SurfacePrototypeRendererSpec,
   SurfacePrototypeSpec,
   SurfaceRuntimeManifest,
   SurfaceRuntimeSnapshot,
@@ -40,12 +41,19 @@ interface SurfaceBatch {
   readonly centre: Vector3;
   readonly radius: number;
   activeLod: number;
+  transition: SurfaceLodTransition | null;
 }
 
 interface SurfaceLodBatch {
   readonly index: number;
   readonly renderers: readonly MeshRenderer[];
   readonly height: number;
+}
+
+interface SurfaceLodTransition {
+  from: number;
+  to: number;
+  elapsed: number;
 }
 
 /**
@@ -105,8 +113,11 @@ export class SurfaceWorld {
    */
   static async create(engine: Engine, root: Entity, camera: Camera, manifestUrl: string): Promise<SurfaceWorld> {
     const loaded = await loadSurfaceManifest(engine, manifestUrl);
+    const lodDitherUrl = new URL(loaded.manifest.lodDitherTexture, manifestUrl).href;
     const materialList = await Promise.all(
-      loaded.manifest.materials.map((spec) => SurfaceMaterial.create(engine, spec, manifestUrl))
+      loaded.manifest.materials.map((spec) =>
+        SurfaceMaterial.create(engine, spec, manifestUrl, lodDitherUrl)
+      )
     );
     const materials = new Map(materialList.map((material) => [material.id, material]));
     const modelUrls = Array.from(
@@ -143,35 +154,42 @@ export class SurfaceWorld {
       const lods: SurfaceLodBatch[] = [];
       for (const lod of prototype.lods) {
         const renderers: MeshRenderer[] = [];
-        let lodHeight = 1;
+        let lodHeight = 0;
         for (let rendererIndex = 0; rendererIndex < lod.renderers.length; rendererIndex++) {
           const rendererSpec = lod.renderers[rendererIndex];
           const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
-          const sourceMesh = findModelMesh(models.get(modelUrl)!, rendererSpec.meshName);
-          lodHeight = Math.max(lodHeight, sourceMesh.bounds.max.y - sourceMesh.bounds.min.y);
-          const entity = root.createChild(
-            `${range.prototype}-${range.cell[0]}-${range.cell[1]}-lod${lod.index}-renderer${rendererIndex}`
-          );
-          const renderer = entity.addComponent(MeshRenderer);
-          renderer.mesh = createInstancedMesh(
-            engine,
-            sourceMesh,
-            instanceBuffer,
-            range,
-            decodedInstances.maxScale
-          );
-          renderer.castShadows = rendererSpec.castShadows;
-          renderer.receiveShadows = rendererSpec.receiveShadows;
-          renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
-          SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
-          for (let materialIndex = 0; materialIndex < sourceMesh.subMeshes.length; materialIndex++) {
-            const materialId = rendererSpec.materials[Math.min(materialIndex, rendererSpec.materials.length - 1)];
+          const sourceMeshes = findModelMeshes(models.get(modelUrl)!, rendererSpec.meshName);
+          for (let primitiveIndex = 0; primitiveIndex < sourceMeshes.length; primitiveIndex++) {
+            const sourceMesh = sourceMeshes[primitiveIndex];
+            const prototypeBounds = transformBounds(sourceMesh.bounds, rendererSpec);
+            lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
+            const entity = root.createChild(
+              `${range.prototype}-${range.cell[0]}-${range.cell[1]}-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
+            );
+            const renderer = entity.addComponent(MeshRenderer);
+            renderer.mesh = createInstancedMesh(
+              engine,
+              sourceMesh,
+              instanceBuffer,
+              range,
+              decodedInstances.maxScale,
+              prototypeBounds
+            );
+            renderer.castShadows = rendererSpec.castShadows;
+            renderer.receiveShadows = rendererSpec.receiveShadows;
+            renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
+            SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
+            SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
+            SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
+            const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
             const material = materials.get(materialId);
             if (!material) throw new Error(`[SurfaceWorld] ${range.prototype} references unknown material ${materialId}`);
-            renderer.setMaterial(materialIndex, material);
+            for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
+              renderer.setMaterial(subMeshIndex, material);
+            }
+            entity.isActive = lod.index === 0;
+            renderers.push(renderer);
           }
-          entity.isActive = lod.index === 0;
-          renderers.push(renderer);
         }
         lods.push({ index: lod.index, renderers, height: lodHeight });
       }
@@ -184,7 +202,7 @@ export class SurfaceWorld {
       const radius =
         Math.hypot(bounds[3] - centre.x, bounds[4] - centre.y, bounds[5] - centre.z) +
         Math.max(...lods.map((lod) => lod.height)) * decodedInstances.maxScale;
-      batches.push({ range, prototype, lods, centre, radius, activeLod: 0 });
+      batches.push({ range, prototype, lods, centre, radius, activeLod: 0, transition: null });
     }
 
     const categoryCounts = categoryRecord(0);
@@ -260,6 +278,7 @@ export class SurfaceWorld {
       ),
       visibleRanges: visible.length,
       visibleInstances,
+      transitioningRanges: visible.filter((batch) => batch.transition !== null).length,
       lodCounts,
       categoryCounts: { ...this._categoryCounts },
       impostorInstances: this._impostorInstances,
@@ -297,23 +316,30 @@ export class SurfaceWorld {
     for (const batch of this._batches) {
       const categoryEnabled = this._tuning.enabled[batch.range.category];
       const density = this._tuning.density[batch.range.category];
-      const distance = Vector3.distance(cameraPosition, batch.centre) - batch.radius;
+      const centreDistance = Vector3.distance(cameraPosition, batch.centre);
+      const cullingDistance = centreDistance - batch.radius;
       let selectedLod = -1;
-      if (categoryEnabled && density > 0 && distance <= batch.prototype.maxDistance * this._tuning.lod.distanceScale) {
+      if (
+        categoryEnabled &&
+        density > 0 &&
+        cullingDistance <= batch.prototype.maxDistance * this._tuning.lod.distanceScale
+      ) {
         selectedLod = this._tuning.lod.enabled
-          ? selectLod(batch, Math.max(distance, 0.01), tangent, this._tuning.lod.distanceScale)
+          ? selectLod(
+              batch,
+              Math.max(centreDistance, 0.01),
+              tangent,
+              this._tuning.lod.distanceScale
+            )
           : 0;
       }
-      if (selectedLod !== batch.activeLod || density !== 1) {
-        batch.activeLod = selectedLod;
-        for (const lod of batch.lods) {
-          const active = lod.index === selectedLod;
-          for (const renderer of lod.renderers) {
-            renderer.entity.isActive = active;
-            (renderer.mesh as BufferMesh).instanceCount = active ? Math.floor(batch.range.count * density) : 0;
-          }
-        }
-      }
+      updateBatchLod(
+        batch,
+        selectedLod,
+        Math.floor(batch.range.count * density),
+        deltaTime,
+        this._manifest.lodCrossfadeDuration
+      );
     }
   }
 }
@@ -350,7 +376,8 @@ function createInstancedMesh(
   source: ModelMesh,
   instanceBuffer: Buffer,
   range: SurfaceCellRange,
-  maxScale: number
+  maxScale: number,
+  prototypeBounds: BoundingBox
 ): BufferMesh {
   const mesh = new BufferMesh(engine, `${source.name}-instances-${range.offset}`);
   source.vertexBufferBindings.forEach((binding, index) => mesh.setVertexBufferBinding(binding, index));
@@ -367,12 +394,12 @@ function createInstancedMesh(
   ]);
   for (const subMesh of source.subMeshes) mesh.addSubMesh(subMesh.start, subMesh.count, subMesh.topology);
   const sourceRadius = Math.max(
-    Math.abs(source.bounds.min.x),
-    Math.abs(source.bounds.min.y),
-    Math.abs(source.bounds.min.z),
-    Math.abs(source.bounds.max.x),
-    Math.abs(source.bounds.max.y),
-    Math.abs(source.bounds.max.z)
+    Math.abs(prototypeBounds.min.x),
+    Math.abs(prototypeBounds.min.y),
+    Math.abs(prototypeBounds.min.z),
+    Math.abs(prototypeBounds.max.x),
+    Math.abs(prototypeBounds.max.y),
+    Math.abs(prototypeBounds.max.z)
   ) * maxScale;
   mesh.bounds = new BoundingBox(
     new Vector3(
@@ -409,6 +436,47 @@ function getIndexBufferBinding(engine: Engine, source: ModelMesh): IndexBufferBi
   return binding;
 }
 
+function transformBounds(bounds: BoundingBox, spec: SurfacePrototypeRendererSpec): BoundingBox {
+  const minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+  const maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+  for (const x of [bounds.min.x, bounds.max.x]) {
+    for (const y of [bounds.min.y, bounds.max.y]) {
+      for (const z of [bounds.min.z, bounds.max.z]) {
+        const point = rotateVector(
+          [x * spec.localScale[0], y * spec.localScale[1], z * spec.localScale[2]],
+          spec.localRotation
+        );
+        point[0] += spec.localPosition[0];
+        point[1] += spec.localPosition[1];
+        point[2] += spec.localPosition[2];
+        minimum.x = Math.min(minimum.x, point[0]);
+        minimum.y = Math.min(minimum.y, point[1]);
+        minimum.z = Math.min(minimum.z, point[2]);
+        maximum.x = Math.max(maximum.x, point[0]);
+        maximum.y = Math.max(maximum.y, point[1]);
+        maximum.z = Math.max(maximum.z, point[2]);
+      }
+    }
+  }
+  return new BoundingBox(minimum, maximum);
+}
+
+function rotateVector(
+  value: readonly [number, number, number],
+  rotation: readonly [number, number, number, number]
+): [number, number, number] {
+  const [x, y, z] = value;
+  const [qx, qy, qz, qw] = rotation;
+  const tx = 2 * (qy * z - qz * y);
+  const ty = 2 * (qz * x - qx * z);
+  const tz = 2 * (qx * y - qy * x);
+  return [
+    x + qw * tx + (qy * tz - qz * ty),
+    y + qw * ty + (qz * tx - qx * tz),
+    z + qw * tz + (qx * ty - qy * tx)
+  ];
+}
+
 function decodeInstanceRange(binary: DataView, range: SurfaceCellRange): { data: Float32Array; maxScale: number } {
   const output = new Float32Array(range.count * 16);
   let maxScale = 0;
@@ -436,11 +504,11 @@ function decodeInstanceRange(binary: DataView, range: SurfaceCellRange): { data:
   return { data: output, maxScale };
 }
 
-function findModelMesh(resource: GLTFResource, meshName: string): ModelMesh {
-  const meshes = resource.meshes?.flat() ?? [];
-  const exact = meshes.find((mesh) => mesh.name === meshName);
+function findModelMeshes(resource: GLTFResource, meshName: string): readonly ModelMesh[] {
+  const meshGroups = resource.meshes ?? [];
+  const exact = meshGroups.find((meshes) => meshes[0]?.name === meshName);
   if (exact) return exact;
-  const normalized = meshes.find((mesh) => mesh.name.replace(/\.\d{3}$/, "") === meshName);
+  const normalized = meshGroups.find((meshes) => meshes[0]?.name.replace(/\.\d{3}$/, "") === meshName);
   if (normalized) return normalized;
   throw new Error(`[SurfaceWorld] ${resource.url} does not contain mesh ${meshName}`);
 }
@@ -451,6 +519,95 @@ function selectLod(batch: SurfaceBatch, distance: number, fovTangent: number, di
     if (projectedHeight >= lod.screenRelativeHeight / distanceScale) return lod.index;
   }
   return batch.lods[batch.lods.length - 1].index;
+}
+
+function updateBatchLod(
+  batch: SurfaceBatch,
+  targetLod: number,
+  instanceCount: number,
+  deltaTime: number,
+  duration: number
+): void {
+  if (targetLod < 0) {
+    batch.activeLod = -1;
+    batch.transition = null;
+    setBatchLodState(batch, -1, -1, 0, instanceCount);
+    return;
+  }
+
+  if (batch.activeLod < 0) {
+    batch.activeLod = targetLod;
+    batch.transition = null;
+    setBatchLodState(batch, targetLod, -1, 0, instanceCount);
+    return;
+  }
+
+  const transition = batch.transition;
+  if (transition) {
+    if (targetLod === transition.from) {
+      transition.from = transition.to;
+      transition.to = targetLod;
+      transition.elapsed = duration - transition.elapsed;
+    } else if (targetLod !== transition.to) {
+      batch.activeLod = transition.elapsed < duration * 0.5 ? transition.from : transition.to;
+      batch.transition = null;
+    }
+  }
+
+  if (!batch.transition && targetLod !== batch.activeLod) {
+    if (!batch.prototype.lodCrossfade) {
+      batch.activeLod = targetLod;
+    } else {
+      batch.transition = { from: batch.activeLod, to: targetLod, elapsed: 0 };
+    }
+  }
+
+  if (!batch.transition) {
+    setBatchLodState(batch, batch.activeLod, -1, 0, instanceCount);
+    return;
+  }
+
+  batch.transition.elapsed = Math.min(batch.transition.elapsed + deltaTime, duration);
+  const remaining = 1 - batch.transition.elapsed / duration;
+  setBatchLodState(
+    batch,
+    batch.transition.from,
+    batch.transition.to,
+    remaining,
+    instanceCount
+  );
+  if (batch.transition.elapsed >= duration) {
+    batch.activeLod = batch.transition.to;
+    batch.transition = null;
+    setBatchLodState(batch, batch.activeLod, -1, 0, instanceCount);
+  }
+}
+
+function setBatchLodState(
+  batch: SurfaceBatch,
+  primaryLod: number,
+  secondaryLod: number,
+  remaining: number,
+  instanceCount: number
+): void {
+  for (const lod of batch.lods) {
+    const isPrimary = lod.index === primaryLod;
+    const isSecondary = lod.index === secondaryLod;
+    const active = isPrimary || isSecondary;
+    for (const renderer of lod.renderers) {
+      renderer.entity.isActive = active;
+      (renderer.mesh as BufferMesh).instanceCount = active ? instanceCount : 0;
+      if (secondaryLod >= 0) {
+        SurfaceMaterial.setRendererLodFade(
+          true,
+          isPrimary ? remaining : -remaining,
+          renderer.shaderData
+        );
+      } else {
+        SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
+      }
+    }
+  }
 }
 
 function hashToUnit(value: number): number {

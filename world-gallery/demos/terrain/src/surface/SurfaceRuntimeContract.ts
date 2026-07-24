@@ -6,10 +6,14 @@ export interface SurfaceMaterialSpec {
   readonly kind: "vegetation" | "pbr";
   readonly albedo?: string;
   readonly normal?: string;
+  readonly metallicSmoothness?: string;
+  readonly occlusion?: string;
   readonly baseColor: readonly [r: number, g: number, b: number, a: number];
   readonly secondColor: readonly [r: number, g: number, b: number, a: number];
   readonly alphaCutoff: number;
+  readonly metallic?: number;
   readonly roughness: number;
+  readonly occlusionStrength?: number;
   readonly normalScale: number;
   readonly wind: {
     readonly enabled: boolean;
@@ -20,6 +24,7 @@ export interface SurfaceMaterialSpec {
   };
   readonly colorVariation: {
     readonly enabled: boolean;
+    readonly mode: "world-noise-2d" | "world-noise-3d" | "vertex-gradient" | "uv-gradient";
     readonly scale: number;
     readonly offset: number;
     readonly fade: number;
@@ -57,12 +62,15 @@ export interface SurfacePrototypeSpec {
   readonly id: string;
   readonly category: SurfaceCategory;
   readonly lods: readonly SurfacePrototypeLodSpec[];
+  readonly lodCrossfade: boolean;
   readonly maxDistance: number;
   readonly impostor: boolean;
 }
 
 /** Compiled instance manifest plus all runtime prototype resources. */
 export interface SurfaceRuntimeManifest extends CompiledSurfaceManifest {
+  readonly lodDitherTexture: string;
+  readonly lodCrossfadeDuration: number;
   readonly prototypeLibrary: readonly SurfacePrototypeSpec[];
   readonly materials: readonly SurfaceMaterialSpec[];
   readonly debugMasks?: readonly SurfaceDebugMaskSpec[];
@@ -108,6 +116,7 @@ export interface SurfaceRuntimeSnapshot {
   readonly rendererBatches: number;
   readonly visibleRanges: number;
   readonly visibleInstances: number;
+  readonly transitioningRanges: number;
   readonly lodCounts: readonly number[];
   readonly categoryCounts: Readonly<Record<SurfaceCategory, number>>;
   readonly impostorInstances: number;

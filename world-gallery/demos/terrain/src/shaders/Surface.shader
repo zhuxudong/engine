@@ -29,7 +29,13 @@ Shader "Terrain/Surface" {
         vec3 worldNormal;
         vec4 worldTangent;
         vec4 instanceColor;
+        vec3 localPosition;
         vec3 positionVS;
+        vec4 positionCS;
+        #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
+          vec3 probeIrradiance;
+          float probeWeight;
+        #endif
       };
 
       #include "ShaderLibrary/Common/Common.glsl"
@@ -37,13 +43,20 @@ Shader "Terrain/Surface" {
       #include "ShaderLibrary/Common/Fog.glsl"
       #include "ShaderLibrary/Shadow/Shadow.glsl"
       #include "ShaderLibrary/Lighting/Light.glsl"
+      #include "ShaderLibrary/PBR/LightDirectPBR.glsl"
+      #include "ShaderLibrary/PBR/LightIndirectPBR.glsl"
 
       sampler2D material_Albedo;
       sampler2D material_Normal;
+      sampler2D material_MetallicSmoothness;
+      sampler2D material_Occlusion;
+      sampler2D material_LodDither;
       vec4 material_BaseColor;
       vec4 material_SecondColor;
       float material_AlphaCutoff;
+      float material_Metallic;
       float material_Roughness;
+      float material_OcclusionStrength;
       float material_NormalScale;
       float material_Time;
       float material_WindForce;
@@ -56,6 +69,7 @@ Shader "Terrain/Surface" {
       float material_GlobalWavesScale;
       float material_GlobalFlowDensity;
       int material_ColorVariationEnabled;
+      int material_ColorVariationMode;
       float material_ColorNoiseScale;
       float material_ColorOffset;
       float material_ColorFade;
@@ -63,7 +77,12 @@ Shader "Terrain/Surface" {
       float material_Translucency;
       vec3 material_TranslucencyColor;
       float material_FadeDistance;
-      float material_LodFade;
+      float material_FadeFalloff;
+      vec3 renderer_SurfaceLocalPosition;
+      vec4 renderer_SurfaceLocalRotation;
+      vec3 renderer_SurfaceLocalScale;
+      float renderer_SurfaceLodFade;
+      int renderer_SurfaceLodFadeEnabled;
       int material_DebugView;
 
       VertexShader = vert;
@@ -77,7 +96,15 @@ Shader "Terrain/Surface" {
         return value - floor(value * (1.0 / 289.0)) * 289.0;
       }
 
+      vec2 mod289(vec2 value) {
+        return value - floor(value * (1.0 / 289.0)) * 289.0;
+      }
+
       vec4 permute(vec4 value) {
+        return mod289(((value * 34.0) + 1.0) * value);
+      }
+
+      vec3 permute(vec3 value) {
         return mod289(((value * 34.0) + 1.0) * value);
       }
 
@@ -134,6 +161,40 @@ Shader "Terrain/Surface" {
         return 42.0 * dot(m * m, vec4(dot(x0, g0), dot(x1, g1), dot(x2, g2), dot(x3, g3)));
       }
 
+      float surfaceNoise2D(vec2 value) {
+        const vec4 C = vec4(
+          0.211324865405187,
+          0.366025403784439,
+          -0.577350269189626,
+          0.024390243902439
+        );
+        vec2 cell = floor(value + dot(value, C.yy));
+        vec2 x0 = value - cell + dot(cell, C.xx);
+        vec2 i1 = x0.x > x0.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+        vec4 x12 = x0.xyxy + C.xxzz;
+        x12.xy -= i1;
+        cell = mod289(cell);
+        vec3 p = permute(
+          permute(cell.y + vec3(0.0, i1.y, 1.0)) +
+          cell.x + vec3(0.0, i1.x, 1.0)
+        );
+        vec3 m = max(
+          0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)),
+          0.0
+        );
+        m *= m;
+        m *= m;
+        vec3 x = 2.0 * fract(p * C.www) - 1.0;
+        vec3 h = abs(x) - 0.5;
+        vec3 ox = floor(x + 0.5);
+        vec3 a0 = x - ox;
+        m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+        vec3 gradient;
+        gradient.x = a0.x * x0.x + h.x * x0.y;
+        gradient.yz = a0.yz * x12.xz + h.yz * x12.yw;
+        return 130.0 * dot(m, gradient);
+      }
+
       vec3 rotateByQuaternion(vec3 value, vec4 rotation) {
         return value + 2.0 * cross(rotation.xyz, cross(rotation.xyz, value) + rotation.w * value);
       }
@@ -147,10 +208,22 @@ Shader "Terrain/Surface" {
       }
 
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal, out vec4 worldTangent) {
-        vec3 scaledPosition = attributes.POSITION * attributes.INSTANCE_SCALE_WIND.xyz;
-        vec3 localNormal = normalize(attributes.NORMAL / max(attributes.INSTANCE_SCALE_WIND.xyz, vec3(0.0001)));
+        vec3 prototypePosition = renderer_SurfaceLocalPosition +
+          rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
+        vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+        vec3 localNormal = normalize(
+          rotateByQuaternion(
+            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
+            renderer_SurfaceLocalRotation
+          ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+        );
         localNormal = normalize(mix(localNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
-        vec3 localTangent = normalize(attributes.TANGENT.xyz * attributes.INSTANCE_SCALE_WIND.xyz);
+        vec3 localTangent = normalize(
+          rotateByQuaternion(
+            attributes.TANGENT.xyz * renderer_SurfaceLocalScale,
+            renderer_SurfaceLocalRotation
+          ) * attributes.INSTANCE_SCALE_WIND.xyz
+        );
         vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
           rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
         worldNormal = normalize(rotateByQuaternion(localNormal, attributes.INSTANCE_ROTATION));
@@ -171,30 +244,22 @@ Shader "Terrain/Surface" {
         }
 
         if (material_FadeDistance > 0.0) {
-          float cameraDistance = length(worldPosition - camera_Position);
-          float fade = 1.0 - smoothstep(material_FadeDistance, material_FadeDistance + 5.0, cameraDistance);
-          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fade);
+          float eyeDepth = -(renderer_MVMat * vec4(
+            attributes.INSTANCE_POSITION_HASH.xyz +
+              rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION),
+            1.0
+          )).z;
+          float cameraDepthFade = (
+            eyeDepth - camera_ProjectionParams.y - material_FadeDistance
+          ) / 5.0;
+          float fadeMask = clamp(
+            mix(1.0 - cameraDepthFade, cameraDepthFade, material_FadeFalloff * 0.5),
+            0.0,
+            1.0
+          );
+          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fadeMask);
         }
         return worldPosition;
-      }
-
-      vec3 diffuseIrradiance(vec3 normal) {
-        vec3 irradiance = scene_EnvMapLight.diffuse * PI;
-        #ifdef SCENE_USE_SH
-          irradiance = max(
-            scene_EnvSH[0] +
-              scene_EnvSH[1] * normal.y +
-              scene_EnvSH[2] * normal.z +
-              scene_EnvSH[3] * normal.x +
-              scene_EnvSH[4] * (normal.y * normal.x) +
-              scene_EnvSH[5] * (normal.y * normal.z) +
-              scene_EnvSH[6] * (3.0 * normal.z * normal.z - 1.0) +
-              scene_EnvSH[7] * (normal.z * normal.x) +
-              scene_EnvSH[8] * (normal.x * normal.x - normal.y * normal.y),
-            vec3(0.0)
-          );
-        #endif
-        return irradiance;
       }
 
       Varyings vert(Attributes attributes) {
@@ -207,9 +272,23 @@ Shader "Terrain/Surface" {
         output.worldNormal = surfaceNormal;
         output.worldTangent = surfaceTangent;
         output.instanceColor = attributes.INSTANCE_COLOR;
+        output.localPosition = attributes.POSITION;
         output.positionVS = (renderer_MVMat * vec4(surfacePosition, 1.0)).xyz;
-        gl_Position = camera_VPMat * vec4(surfacePosition, 1.0);
+        output.positionCS = camera_VPMat * vec4(surfacePosition, 1.0);
+        #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
+          output.probeIrradiance = vec3(0.0);
+          output.probeWeight = 0.0;
+        #endif
+        gl_Position = output.positionCS;
         return output;
+      }
+
+      void applyLodCrossfade() {
+        if (renderer_SurfaceLodFadeEnabled != 0) {
+          float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
+          float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
+          if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
+        }
       }
 
       vec3 normalFromTexture(Varyings varyings) {
@@ -221,47 +300,106 @@ Shader "Terrain/Surface" {
         return normalize(tangent * sampled.x + bitangent * sampled.y + normal * sampled.z);
       }
 
+      vec3 shadeSurface(
+        Varyings varyings,
+        vec3 albedo,
+        vec3 normal,
+        vec4 metallicSmoothness,
+        float occlusion
+      ) {
+        SurfaceData surfaceData;
+        surfaceData.albedoColor = albedo;
+        surfaceData.emissiveColor = vec3(0.0);
+        surfaceData.metallic = metallicSmoothness.r * material_Metallic;
+        surfaceData.roughness = 1.0 - metallicSmoothness.a * (1.0 - material_Roughness);
+        surfaceData.ambientOcclusion = mix(1.0, occlusion, material_OcclusionStrength);
+        surfaceData.opacity = 1.0;
+        surfaceData.IOR = 1.5;
+        surfaceData.position = varyings.worldPosition;
+        surfaceData.positionCS = varyings.positionCS;
+        surfaceData.normal = normal * (gl_FrontFacing ? 1.0 : -1.0);
+        surfaceData.viewDir = normalize(camera_Position - varyings.worldPosition);
+        surfaceData.dotNV = saturate(dot(surfaceData.normal, surfaceData.viewDir));
+        surfaceData.specularIntensity = 1.0;
+        surfaceData.specularColor = vec3(1.0);
+
+        BSDFData bsdfData;
+        initBSDFData(surfaceData, bsdfData);
+        float shadowAttenuation = 1.0;
+        #if defined(SCENE_DIRECT_LIGHT_COUNT) && defined(NEED_CALCULATE_SHADOWS)
+          shadowAttenuation = sampleShadowMap(
+            varyings.worldPosition,
+            getShadowCoord(varyings.worldPosition)
+          );
+        #endif
+
+        vec3 diffuse = vec3(0.0);
+        vec3 specular = vec3(0.0);
+        evaluateDirectRadiance(
+          varyings,
+          surfaceData,
+          bsdfData,
+          shadowAttenuation,
+          diffuse,
+          specular
+        );
+        evaluateIBL(varyings, surfaceData, bsdfData, diffuse, specular);
+
+        #ifdef SCENE_DIRECT_LIGHT_COUNT
+          if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
+            DirectLight directLight = getDirectLight(0);
+            vec3 lightDirection = -directLight.direction;
+            float backLight = saturate(
+              -dot(surfaceData.viewDir, lightDirection) - 0.3
+            ) * material_Translucency;
+            diffuse += directLight.color * shadowAttenuation *
+              material_TranslucencyColor * albedo * backLight;
+          }
+        #endif
+        return diffuse + specular;
+      }
+
       void frag(Varyings varyings) {
+        applyLodCrossfade();
         vec4 textureColor = texture2DSRGB(material_Albedo, varyings.uv);
+        vec4 metallicSmoothness = texture2D(material_MetallicSmoothness, varyings.uv);
+        float occlusion = texture2D(material_Occlusion, varyings.uv).g;
+        vec3 surfaceColor = material_BaseColor.rgb;
+        if (material_ColorVariationEnabled != 0) {
+          float overlay;
+          if (material_ColorVariationMode == 0) {
+            overlay = surfaceNoise2D(varyings.worldPosition.xz * material_ColorNoiseScale) *
+              0.5 + 0.5;
+          } else if (material_ColorVariationMode == 1) {
+            overlay = surfaceNoise3D(varyings.worldPosition * material_ColorNoiseScale) * 0.5 + 0.5;
+          } else if (material_ColorVariationMode == 2) {
+            overlay = varyings.localPosition.y;
+          } else {
+            overlay = varyings.uv.y;
+          }
+          float shifted = overlay + (1.0 - material_ColorOffset);
+          float blend = clamp(
+            mix(shifted, 1.0 - shifted, material_ColorFade + 0.5),
+            0.0,
+            1.0
+          );
+          surfaceColor = mix(material_BaseColor.rgb, material_SecondColor.rgb, blend);
+        }
         vec4 baseColor = vec4(
-          textureColor.rgb * material_BaseColor.rgb * varyings.instanceColor.rgb,
+          textureColor.rgb * surfaceColor * varyings.instanceColor.rgb,
           textureColor.a
         );
         if (baseColor.a < material_AlphaCutoff) discard;
-
-        if (material_ColorVariationEnabled != 0) {
-          float noise = surfaceNoise3D(varyings.worldPosition * material_ColorNoiseScale) * 0.5 + 0.5;
-          float width = max(abs(material_ColorFade), 0.0001);
-          float blend = smoothstep(material_ColorOffset - width, material_ColorOffset + width, noise);
-          baseColor.rgb *= mix(vec3(1.0), material_SecondColor.rgb, blend);
-        }
 
         vec3 normal = normalFromTexture(varyings);
         vec4 outputColor;
         if (material_DebugView == 1) {
           outputColor = vec4(normal * 0.5 + 0.5, 1.0);
         } else {
-          vec3 lighting = baseColor.rgb * diffuseIrradiance(normal) * scene_EnvMapLight.diffuseIntensity / PI;
-          #ifdef SCENE_DIRECT_LIGHT_COUNT
-            if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
-              DirectLight directLight = getDirectLight(0);
-              vec3 lightDirection = -directLight.direction;
-              float shadowAttenuation = 1.0;
-              #ifdef NEED_CALCULATE_SHADOWS
-                shadowAttenuation = sampleShadowMap(varyings.worldPosition, getShadowCoord(varyings.worldPosition));
-              #endif
-              vec3 viewDirection = normalize(camera_Position - varyings.worldPosition);
-              vec3 halfDirection = normalize(lightDirection + viewDirection);
-              float lambert = saturate(dot(normal, lightDirection));
-              float gloss = max(1.0 - material_Roughness, 0.001);
-              float specular = pow(saturate(dot(normal, halfDirection)), mix(4.0, 128.0, gloss));
-              specular *= mix(0.01, 0.12, gloss);
-              float backLight = pow(saturate(dot(-lightDirection, viewDirection)), 4.0) * material_Translucency;
-              lighting += directLight.color * shadowAttenuation *
-                (baseColor.rgb * lambert + vec3(specular) + material_TranslucencyColor * baseColor.rgb * backLight);
-            }
-          #endif
-          outputColor = vec4(lighting, baseColor.a);
+          outputColor = vec4(
+            shadeSurface(varyings, baseColor.rgb, normal, metallicSmoothness, occlusion),
+            baseColor.a
+          );
           #if SCENE_FOG_MODE != 0
             outputColor = fog(outputColor, varyings.positionVS);
           #endif
@@ -295,6 +433,7 @@ Shader "Terrain/Surface" {
       #include "ShaderLibrary/Common/Transform.glsl"
 
       sampler2D material_Albedo;
+      sampler2D material_LodDither;
       float material_AlphaCutoff;
       float material_Time;
       float material_WindForce;
@@ -307,6 +446,12 @@ Shader "Terrain/Surface" {
       float material_GlobalWavesScale;
       float material_GlobalFlowDensity;
       float material_FadeDistance;
+      float material_FadeFalloff;
+      vec3 renderer_SurfaceLocalPosition;
+      vec4 renderer_SurfaceLocalRotation;
+      vec3 renderer_SurfaceLocalScale;
+      float renderer_SurfaceLodFade;
+      int renderer_SurfaceLodFadeEnabled;
       vec2 scene_ShadowBias;
       vec3 scene_LightDirection;
 
@@ -391,9 +536,19 @@ Shader "Terrain/Surface" {
       }
 
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal) {
+        vec3 prototypePosition = renderer_SurfaceLocalPosition +
+          rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
         vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
-          rotateByQuaternion(attributes.POSITION * attributes.INSTANCE_SCALE_WIND.xyz, attributes.INSTANCE_ROTATION);
-        worldNormal = normalize(rotateByQuaternion(attributes.NORMAL, attributes.INSTANCE_ROTATION));
+          rotateByQuaternion(prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz, attributes.INSTANCE_ROTATION);
+        worldNormal = normalize(
+          rotateByQuaternion(
+            rotateByQuaternion(
+              attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
+              renderer_SurfaceLocalRotation
+            ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001)),
+            attributes.INSTANCE_ROTATION
+          )
+        );
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
             attributes.INSTANCE_SCALE_WIND.w;
@@ -405,9 +560,23 @@ Shader "Terrain/Surface" {
             (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
         }
         if (material_FadeDistance > 0.0) {
-          float cameraDistance = length(worldPosition - camera_Position);
-          float fade = 1.0 - smoothstep(material_FadeDistance, material_FadeDistance + 5.0, cameraDistance);
-          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fade);
+          float eyeDepth = -(renderer_MVMat * vec4(
+            attributes.INSTANCE_POSITION_HASH.xyz +
+              rotateByQuaternion(
+                prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz,
+                attributes.INSTANCE_ROTATION
+              ),
+            1.0
+          )).z;
+          float cameraDepthFade = (
+            eyeDepth - camera_ProjectionParams.y - material_FadeDistance
+          ) / 5.0;
+          float fadeMask = clamp(
+            mix(1.0 - cameraDepthFade, cameraDepthFade, material_FadeFalloff * 0.5),
+            0.0,
+            1.0
+          );
+          worldPosition = mix(attributes.INSTANCE_POSITION_HASH.xyz, worldPosition, fadeMask);
         }
         return worldPosition;
       }
@@ -436,6 +605,11 @@ Shader "Terrain/Surface" {
       #endif
 
       void frag(Varyings varyings) {
+        if (renderer_SurfaceLodFadeEnabled != 0) {
+          float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
+          float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
+          if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
+        }
         if (texture2D(material_Albedo, varyings.uv).a < material_AlphaCutoff) discard;
         #ifdef ENGINE_NO_DEPTH_TEXTURE
           gl_FragColor = packDepth(gl_FragCoord.z);
