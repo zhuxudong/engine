@@ -33,8 +33,11 @@ import { loadLayerTextures } from "./src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
 import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader";
 import { loadTerrainData } from "./src/loader/TerrainDataLoader";
+import surfaceShaderSource from "./src/shaders/Surface.shader?raw";
+import terrainShaderSource from "./src/shaders/Terrain.shader?raw";
 import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
 import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
+import { SurfaceWorld } from "./src/surface/SurfaceWorld";
 
 export {
   TERRAIN_DEBUG_VIEWS,
@@ -135,7 +138,8 @@ async function boot(): Promise<void> {
       : await WebGLEngine.create(configuration);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
-  const terrainShaderStartup = await registerTerrainShader(engine, backend);
+  Shader.create(terrainShaderSource);
+  Shader.create(surfaceShaderSource);
 
   const scene = engine.sceneManager.activeScene;
   const root = scene.createRootEntity("terrain-demo");
@@ -199,6 +203,14 @@ async function boot(): Promise<void> {
     manifest.clipmap.meshSize,
     manifest.clipmap.meshLods
   );
+  setStatus("loading deterministic surface instances");
+  const surfaceWorld = await SurfaceWorld.create(
+    engine,
+    root.createChild("surface-world"),
+    camera,
+    new URL("./data/surface/surface-manifest.json", import.meta.url).href
+  );
+  const surfaceDefaults = surfaceWorld.getTuning();
   const waterDebug = new TerrainWaterDebug(engine, root, terrainWaterBounds(terrainData));
   const waterDebugState: TerrainWaterDebugSnapshot = { enabled: false, height: 10 };
   waterDebug.setState(waterDebugState.enabled, waterDebugState.height);
@@ -306,6 +318,18 @@ async function boot(): Promise<void> {
         tonemappingEffect.mode.value = values.postProcess.tonemappingMode;
       }
     },
+    getSurface() {
+      return surfaceWorld.getTuning();
+    },
+    setSurface(values) {
+      surfaceWorld.setTuning(values);
+    },
+    inspectSurface() {
+      return surfaceWorld.inspect();
+    },
+    setSurfaceDebugView(view) {
+      surfaceWorld.setTuning({ debugView: view });
+    },
     resetTuning() {
       const defaults = createTuningSnapshot(manifest);
       for (const layer of defaults.layers) {
@@ -323,6 +347,7 @@ async function boot(): Promise<void> {
       waterDebugState.enabled = false;
       waterDebugState.height = 10;
       waterDebug.setState(waterDebugState.enabled, waterDebugState.height);
+      surfaceWorld.setTuning(surfaceDefaults);
     },
     inspect() {
       const segmentCounts = new Array<number>(manifest.clipmap.meshLods).fill(0);
@@ -376,9 +401,9 @@ async function boot(): Promise<void> {
 
   if (document.body.dataset.terrainInspector === "true") mountTerrainInspector(api);
   engine.run();
-  const surfaceSnapshot = surfaceSystem.inspect();
   setStatus(
-    `ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments · ${surfaceSnapshot.instanceCount} surface instances · ${backend}`
+    `ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments · ` +
+      `${surfaceWorld.inspect().totalInstances.toLocaleString("en-US")} surface instances`
   );
 }
 

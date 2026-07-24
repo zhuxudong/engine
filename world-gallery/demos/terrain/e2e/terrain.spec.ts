@@ -27,8 +27,12 @@ declare global {
     __terrainShaderDiagnostics: ShaderDiagnostic[];
     /** WebGL draw calls captured before the engine starts. */
     __terrainDrawCalls: number;
+    /** Instance counts submitted by explicit surface batches. */
+    __surfaceInstanceDraws: number[];
     /** Terrain shaders after Galacean's ShaderLab-to-GLSL lowering. */
     __terrainGeneratedShaders: GeneratedShaderSource[];
+    /** Surface shaders after Galacean's ShaderLab-to-GLSL lowering. */
+    __surfaceGeneratedShaders: GeneratedShaderSource[];
   }
 }
 
@@ -138,8 +142,12 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
   await page.goto("/demos/terrain/index.html?view=clipmap-lod&pose=top");
   await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments");
   await expect(page.locator('[aria-label="Terrain material inspector"]')).toBeVisible();
-  await expect(page.locator(".debug-inspector__preview img")).toHaveCount(4);
-  expect(await page.locator(".debug-inspector__preview img").evaluateAll((images) => images.every((image) => {
+  const previewImages = page.locator(".debug-inspector__preview img");
+  await expect(previewImages).toHaveCount(9);
+  for (let index = 0; index < (await previewImages.count()); index++) {
+    await previewImages.nth(index).scrollIntoViewIfNeeded();
+  }
+  await expect.poll(() => previewImages.evaluateAll((images) => images.every((image) => {
     const preview = image as HTMLImageElement;
     return preview.complete && preview.naturalWidth > 0;
   }))).toBe(true);
@@ -203,6 +211,66 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     await attachScreenshot(page, testInfo, "rendering-controls");
     await page.evaluate((state) => window.terrainDebug!.setRendering(state), original);
     expect(await page.evaluate(() => window.terrainDebug!.getRendering())).toEqual(original);
+  });
+
+  await test.step("surface cells submit deterministic instanced batches", async () => {
+    const compiled = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(compiled.totalInstances).toBe(48_890);
+    expect(compiled.totalRanges).toBe(649);
+    expect(compiled.categoryCounts).toEqual({
+      grass: 39_680,
+      flower: 597,
+      shrub: 4_817,
+      tree: 864,
+      rock: 2_932,
+      cliff: 0
+    });
+    expect(compiled.sourceRules.find((rule) => rule.category === "tree")).toMatchObject({
+      mode: "scatter",
+      spacing: 24,
+      cellSize: 256
+    });
+    expect(compiled.debugMasks.map((mask) => mask.id)).toEqual(["grass", "flower", "shrub", "tree", "rock"]);
+    const generatedSurfaceShaders = await page.evaluate(() => window.__surfaceGeneratedShaders);
+    expect(
+      generatedSurfaceShaders.some(
+        (shader) =>
+          shader.stage === "vertex" &&
+          shader.source.includes("worldPosition = surfacePosition") &&
+          shader.source.includes("worldNormal = surfaceNormal")
+      )
+    ).toBe(true);
+    expect(
+      generatedSurfaceShaders.every(
+        (shader) =>
+          !shader.source.includes("worldPosition = worldPosition") &&
+          !shader.source.includes("worldNormal = worldNormal")
+      )
+    ).toBe(true);
+
+    await page.evaluate(async () => {
+      window.terrainDebug!.setPose("first-person");
+      window.terrainDebug!.setSurface({ wind: { enabled: false } });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    const surfaceFrame = await readFrameFingerprint(page);
+    expect(await page.evaluate(() => window.__surfaceInstanceDraws.some((count) => count > 1))).toBe(true);
+
+    await page.evaluate(() =>
+      window.terrainDebug!.setSurface({
+        enabled: { grass: false, flower: false, shrub: false, tree: false, rock: false, cliff: false }
+      })
+    );
+    expect((await page.evaluate(() => window.terrainDebug!.inspectSurface())).visibleInstances).toBe(0);
+    expect(await readFrameFingerprint(page)).not.toBe(surfaceFrame);
+
+    await page.evaluate(() => {
+      window.terrainDebug!.resetTuning();
+      window.terrainDebug!.setSurfaceDebugView("normal");
+    });
+    expect((await page.evaluate(() => window.terrainDebug!.getSurface())).debugView).toBe("normal");
+    await attachScreenshot(page, testInfo, "surface-normal");
+    await page.evaluate(() => window.terrainDebug!.setSurfaceDebugView("surface"));
   });
 
   await test.step("world-position varying survives shader lowering", async () => {
@@ -612,13 +680,23 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
     const diagnostics: ShaderDiagnostic[] = [];
     Object.defineProperty(window, "__terrainShaderDiagnostics", { value: diagnostics });
     Object.defineProperty(window, "__terrainDrawCalls", { value: 0, writable: true });
+    const surfaceInstanceDraws: number[] = [];
+    Object.defineProperty(window, "__surfaceInstanceDraws", { value: surfaceInstanceDraws });
     const generatedShaders: GeneratedShaderSource[] = [];
     Object.defineProperty(window, "__terrainGeneratedShaders", { value: generatedShaders });
+    const generatedSurfaceShaders: GeneratedShaderSource[] = [];
+    Object.defineProperty(window, "__surfaceGeneratedShaders", { value: generatedSurfaceShaders });
     const prototype = WebGL2RenderingContext.prototype;
     const shaderSource = prototype.shaderSource;
     prototype.shaderSource = function (shader, source): void {
       if (source.includes("material_RegionMap")) {
         generatedShaders.push({
+          stage: this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment",
+          source
+        });
+      }
+      if (source.includes("INSTANCE_POSITION_HASH") || source.includes("material_DebugView")) {
+        generatedSurfaceShaders.push({
           stage: this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment",
           source
         });
@@ -648,6 +726,7 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
     const drawElementsInstanced = prototype.drawElementsInstanced;
     prototype.drawElementsInstanced = function (...args): void {
       window.__terrainDrawCalls++;
+      surfaceInstanceDraws.push(args[4]);
       drawElementsInstanced.apply(this, args);
     };
   });

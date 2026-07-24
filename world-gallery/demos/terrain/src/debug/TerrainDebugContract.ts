@@ -1,5 +1,10 @@
 import type { MSAASamples, TonemappingMode } from "@galacean/engine";
 import type { TerrainClipmapSegmentSnapshot } from "../clipmap/TerrainClipmap";
+import type {
+  SurfaceRuntimeSnapshot,
+  SurfaceRuntimeTuning,
+  SurfaceRuntimeTuningUpdate
+} from "../surface/SurfaceRuntimeContract";
 import {
   TerrainDebugView,
   type TerrainAutoShaderTuning,
@@ -400,6 +405,14 @@ export interface TerrainDebugApi {
   getRendering(): TerrainRenderingSnapshot;
   /** Updates live scene rendering state and preserves engine capability clamping. */
   setRendering(tuning: TerrainRenderingTuning): void;
+  /** Returns runtime-only surface visibility, density, wind, LOD and debug controls. */
+  getSurface(): SurfaceRuntimeTuning;
+  /** Updates surface runtime filters without changing deterministic placements. */
+  setSurface(tuning: SurfaceRuntimeTuningUpdate): void;
+  /** Captures compiled, visible, culled, LOD and category surface counts. */
+  inspectSurface(): SurfaceRuntimeSnapshot;
+  /** Selects the shared instanced-surface shader output. */
+  setSurfaceDebugView(view: SurfaceRuntimeTuning["debugView"]): void;
   /** Restores manifest defaults. */
   resetTuning(): void;
   /** Returns the rendered clipmap topology. */

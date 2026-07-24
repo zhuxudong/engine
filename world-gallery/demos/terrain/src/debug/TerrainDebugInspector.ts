@@ -1,6 +1,8 @@
 import { MSAASamples, TonemappingMode } from "@galacean/engine";
 import { DebugInspector } from "./DebugInspector";
 import { TERRAIN_DEBUG_VIEW_INFO } from "./TerrainDebugContract";
+import type { SurfaceCategory } from "../surface/SurfaceContract";
+import type { SurfaceRuntimeTuning } from "../surface/SurfaceRuntimeContract";
 import type {
   TerrainBackgroundMode,
   TerrainCameraPoseName,
@@ -24,6 +26,15 @@ const TONEMAPPING_OPTIONS = {
   "ACES / 电影": TonemappingMode.ACES
 } as const;
 
+const SURFACE_CATEGORY_LABELS: Readonly<Record<SurfaceCategory, string>> = {
+  grass: "Grass / 草",
+  flower: "Flowers / 花",
+  shrub: "Shrubs / 灌木",
+  tree: "Trees / 树木",
+  rock: "Rocks / 岩石",
+  cliff: "Cliffs / 悬崖"
+};
+
 /**
  * Mounts the terrain inspector over the production demo.
  * @param api Ready production terrain debug contract.
@@ -31,6 +42,8 @@ const TONEMAPPING_OPTIONS = {
 export function mountTerrainInspector(api: TerrainDebugApi): void {
   const inspector = new DebugInspector("Terrain material inspector");
   const snapshot = api.getTuning();
+  const surfaceState = cloneSurfaceTuning(api.getSurface());
+  const surfaceSnapshot = api.inspectSurface();
   const initialLayer = api.layers[Math.min(1, api.layers.length - 1)]?.id ?? 0;
   const query = new URLSearchParams(location.search);
   const requestedView = query.get("view") as TerrainDebugViewName | null;
@@ -42,10 +55,12 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     reset: () => {
       api.resetTuning();
       replaceInspectorState(api, snapshot, layerState, materialState, worldState, worldNoiseState);
+      replaceSurfaceState(surfaceState, api.getSurface());
       Object.assign(waterState, api.getWaterDebug());
       inspector.gui.updateDisplay();
       selectLayer(sceneState.layer);
       syncWorldNoiseVisibility();
+      updateSurfaceReadout();
     }
   };
   const layerState: TerrainDebugLayerTuningSnapshot = { ...snapshot.layers[initialLayer] };
@@ -58,6 +73,7 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
   const selectPreview = new Map<number, () => void>();
   const renderingFolder = inspector.folder("Rendering / 渲染", true);
   const terrainFolder = inspector.folder("Terrain / 地形", true);
+  const surfaceFolder = inspector.folder("Surface / 地表", true);
 
   const syncRenderingState = (): void => {
     replaceRenderingState(renderingState, api.getRendering());
@@ -155,6 +171,100 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     "Tonemapping mode / 色调映射模式",
     "写入 TonemappingEffect.mode：Neutral 偏保留色相与饱和度，ACES 使用更电影化的近似。"
   ).onChange((value: number) => updateRendering({ postProcess: { tonemappingMode: Number(value) as TonemappingMode } }));
+
+  const surfaceVisibilityFolder = inspector.subfolder(surfaceFolder, "Visibility & density / 可见性与密度", true);
+  for (const category of Object.keys(SURFACE_CATEGORY_LABELS) as SurfaceCategory[]) {
+    const categoryFolder = inspector.subfolder(surfaceVisibilityFolder, SURFACE_CATEGORY_LABELS[category], true);
+    annotate(
+      categoryFolder.add(surfaceState.enabled, category),
+      "Enabled / 显示",
+      "只筛选已经离线编译的确定性实例，不会重新生成位置。"
+    ).onChange((enabled: boolean) => {
+      api.setSurface({ enabled: { [category]: enabled } });
+      updateSurfaceReadout();
+    });
+    annotate(
+      categoryFolder.add(surfaceState.density, category, 0, 1, 0.01),
+      "Density multiplier / 密度倍率",
+      "按稳定实例顺序保留前 N%；相同值每次刷新得到相同结果。"
+    ).onChange((density: number) => {
+      api.setSurface({ density: { [category]: density } });
+      updateSurfaceReadout();
+    });
+    const rule = surfaceSnapshot.sourceRules.find((candidate) => candidate.category === category);
+    const count = surfaceSnapshot.categoryCounts[category];
+    inspector.addReadout(categoryFolder, "Compiled inputs / 编译输入")(
+      rule
+        ? [
+            `instances: ${count.toLocaleString("en-US")}`,
+            `mode: ${rule.mode}`,
+            `density: ${rule.densityPerSquareMetre}/m²`,
+            `spacing: ${rule.spacing}m`,
+            `scale XZ: ${rule.scale.horizontal[0]}..${rule.scale.horizontal[1]}`,
+            `scale Y: ${rule.scale.vertical[0]}..${rule.scale.vertical[1]}`,
+            `cell: ${rule.cellSize}m`
+          ].join("\n")
+        : `instances: ${count.toLocaleString("en-US")}\nno compiled rule`
+    );
+  }
+
+  const surfaceWindFolder = inspector.subfolder(surfaceFolder, "Wind / 风动", true);
+  annotate(surfaceWindFolder.add(surfaceState.wind, "enabled"), "Enabled / 启用", "关闭后冻结植被顶点位移，实例位置不变。")
+    .onChange((enabled: boolean) => api.setSurface({ wind: { enabled } }));
+  annotate(
+    surfaceWindFolder.add(surfaceState.wind, "strength", 0, 2, 0.01),
+    "Strength / 强度",
+    "乘到每个材质的源风力；0 表示无位移。"
+  ).onChange((strength: number) => api.setSurface({ wind: { strength } }));
+
+  const surfaceLodFolder = inspector.subfolder(surfaceFolder, "LOD & culling / 层级与剔除", true);
+  annotate(
+    surfaceLodFolder.add(surfaceState.lod, "enabled"),
+    "Mesh LOD / 网格层级",
+    "按投影高度选择 prototype 的真实 mesh LOD；关闭后固定 LOD0。"
+  ).onChange((enabled: boolean) => {
+    api.setSurface({ lod: { enabled } });
+    updateSurfaceReadout();
+  });
+  annotate(
+    surfaceLodFolder.add(surfaceState.lod, "distanceScale", 0.25, 2, 0.01),
+    "Distance scale / 距离倍率",
+    "同时缩放 prototype 最大可见距离与 LOD 阈值；值越小越早剔除和降级。"
+  ).onChange((distanceScale: number) => {
+    api.setSurface({ lod: { distanceScale } });
+    updateSurfaceReadout();
+  });
+  const setSurfaceReadout = inspector.addReadout(surfaceLodFolder, "Runtime cells / 运行时 cell");
+
+  const surfaceDebugFolder = inspector.subfolder(surfaceFolder, "Debug / 调试", true);
+  annotate(
+    surfaceDebugFolder.add(surfaceState, "debugView", {
+      "Surface / 材质": "surface",
+      "World normal / 世界法线": "normal"
+    }),
+    "Debug output / 调试输出",
+    "切换所有地表实例的生产材质或世界法线输出。"
+  ).onChange((view: SurfaceRuntimeTuning["debugView"]) => api.setSurfaceDebugView(view));
+  for (const mask of surfaceSnapshot.debugMasks) {
+    inspector.addImagePreview(surfaceDebugFolder, {
+      label: `${mask.id} density mask / ${mask.id} 密度掩码`,
+      src: mask.url
+    });
+  }
+
+  function updateSurfaceReadout(): void {
+    const current = api.inspectSurface();
+    setSurfaceReadout(
+      [
+        `visible: ${current.visibleInstances.toLocaleString("en-US")} / ${current.totalInstances.toLocaleString("en-US")}`,
+        `cells: ${current.visibleRanges} / ${current.totalRanges}`,
+        `renderer batches: ${current.rendererBatches}`,
+        `LOD: ${current.lodCounts.map((count, index) => `${index}=${count.toLocaleString("en-US")}`).join(", ")}`,
+        `impostor: ${current.impostorInstances.toLocaleString("en-US")}`
+      ].join("\n")
+    );
+  }
+  updateSurfaceReadout();
 
   const worldFolder = inspector.subfolder(terrainFolder, "World background / 世界背景", true);
   annotate(
@@ -399,4 +509,28 @@ function replaceRenderingState(target: TerrainRenderingSnapshot, source: Terrain
   Object.assign(target.lighting, source.lighting);
   Object.assign(target.camera, source.camera);
   Object.assign(target.postProcess, source.postProcess);
+}
+
+function cloneSurfaceTuning(source: SurfaceRuntimeTuning): {
+  enabled: Record<SurfaceCategory, boolean>;
+  density: Record<SurfaceCategory, number>;
+  wind: { enabled: boolean; strength: number; direction: [number, number, number] };
+  lod: { enabled: boolean; distanceScale: number };
+  debugView: SurfaceRuntimeTuning["debugView"];
+} {
+  return {
+    enabled: { ...source.enabled },
+    density: { ...source.density },
+    wind: { ...source.wind, direction: [...source.wind.direction] },
+    lod: { ...source.lod },
+    debugView: source.debugView
+  };
+}
+
+function replaceSurfaceState(target: ReturnType<typeof cloneSurfaceTuning>, source: SurfaceRuntimeTuning): void {
+  Object.assign(target.enabled, source.enabled);
+  Object.assign(target.density, source.density);
+  Object.assign(target.wind, source.wind, { direction: [...source.wind.direction] });
+  Object.assign(target.lod, source.lod);
+  target.debugView = source.debugView;
 }
