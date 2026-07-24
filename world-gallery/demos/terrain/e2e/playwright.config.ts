@@ -21,13 +21,19 @@ export default defineConfig({
   use: {
     baseURL: baseUrl.origin,
     viewport: { width: 1024, height: 576 },
+    launchOptions: {
+      args: [
+        "--enable-unsafe-webgpu",
+        ...(process.platform === "darwin" ? ["--use-angle=metal"] : [])
+      ]
+    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },
   webServer: configuredUrl
     ? undefined
     : {
-        command: `pnpm exec vite serve . --config vite.config.js --host ${baseUrl.hostname} --port ${port}`,
+        command: `pnpm run predev && pnpm exec vite serve . --config vite.config.js --host ${baseUrl.hostname} --port ${port}`,
         cwd: galleryRoot,
         url: baseUrl.origin,
         reuseExistingServer: !process.env.CI,
