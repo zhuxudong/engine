@@ -1,5 +1,15 @@
 export type { IShaderCompiler } from "./IShaderCompiler";
 export type {
+  IShaderProgramSource,
+  IShaderReflection,
+  IShaderReflectionCondition,
+  IShaderResourceReflection,
+  IShaderStructReflection,
+  IShaderUniformReflection,
+  IShaderVertexInputReflection,
+  ShaderReflectionType
+} from "./IShaderProgramSource";
+export type {
   Condition,
   DefinedCondition,
   NotDefinedCondition,

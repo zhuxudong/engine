@@ -192,7 +192,8 @@ export class CascadedShadowCasterPass extends PipelinePass {
         light.shadowNearPlaneOffset,
         shadowTileResolution,
         shadowSliceData,
-        shadowMatrices
+        shadowMatrices,
+        rhi.renderTargetOrigin
       );
       if (shadowCascades > 1) {
         ShadowUtils.applySliceTransform(
@@ -264,7 +265,7 @@ export class CascadedShadowCasterPass extends PipelinePass {
     }
 
     // set zero matrix to project the index out of max cascade
-    for (var i = shadowCascades * 16, n = shadowMatrices.length; i < n; i++) {
+    for (let i = shadowCascades * 16, n = shadowMatrices.length; i < n; i++) {
       shadowMatrices[i] = 0.0;
     }
 

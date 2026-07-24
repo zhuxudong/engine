@@ -1,4 +1,5 @@
 import { Matrix, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
+import type { IShaderReflection, IShaderUniformReflection } from "@galacean/engine-design";
 import { Logger } from "../base/Logger";
 import { Engine } from "../Engine";
 import { Renderer } from "../Renderer";
@@ -39,12 +40,15 @@ export class ShaderFactory {
     bool: { size: 4, align: 4 },
     vec2: { size: 8, align: 8 },
     ivec2: { size: 8, align: 8 },
+    uvec2: { size: 8, align: 8 },
     bvec2: { size: 8, align: 8 },
     vec3: { size: 12, align: 16 },
     ivec3: { size: 12, align: 16 },
+    uvec3: { size: 12, align: 16 },
     bvec3: { size: 12, align: 16 },
     vec4: { size: 16, align: 16 },
     ivec4: { size: 16, align: 16 },
+    uvec4: { size: 16, align: 16 },
     bvec4: { size: 16, align: 16 },
     mat4: { size: 64, align: 16 },
     mat3x4: { size: 48, align: 16 }
@@ -115,12 +119,15 @@ mat3 _normalMatFromModel(mat3 m) {
       bool: packScalar,
       vec2: packVec2,
       ivec2: packVec2,
+      uvec2: packVec2,
       bvec2: packVec2,
       vec3: packVec3,
       ivec3: packVec3,
+      uvec3: packVec3,
       bvec3: packVec3,
       vec4: packVec4,
       ivec4: packVec4,
+      uvec4: packVec4,
       bvec4: packVec4,
       mat4: (v: Float32Array | Int32Array, o: number, val: Matrix) => {
         const e = val.elements;
@@ -241,6 +248,68 @@ mat3 _normalMatFromModel(mat3 m) {
     return { vertexSource, fragmentSource, instanceLayout };
   }
 
+  /**
+   * Inject the WebGPU renderer-instance uniform block into generated WGSL.
+   * @param engine - Owning engine.
+   * @param vertexSource - Macro-resolved WGSL vertex source.
+   * @param fragmentSource - Macro-resolved WGSL fragment source.
+   * @param reflection - Macro-resolved ShaderLab reflection.
+   * @returns Rewritten WGSL, filtered reflection, and instance packing layout.
+   * @internal
+   */
+  static injectInstanceWGSL(
+    engine: Engine,
+    vertexSource: string,
+    fragmentSource: string,
+    reflection: IShaderReflection
+  ): {
+    vertexSource: string;
+    fragmentSource: string;
+    reflection: IShaderReflection;
+    instanceLayout: InstanceBufferLayout;
+  } {
+    const fieldMap: Record<number, string> = Object.create(null);
+    const instanceUniforms = new Map<string, IShaderUniformReflection>();
+    const derivedUniforms = ShaderFactory._builtinRendererUniforms;
+
+    for (const uniform of reflection.uniforms) {
+      const name = uniform.name;
+      const derived = derivedUniforms[name];
+      const isRendererUniform =
+        derived !== undefined || ShaderProperty._getShaderPropertyGroup(name) === ShaderDataGroup.Renderer;
+      if (!isRendererUniform) {
+        continue;
+      }
+      instanceUniforms.set(name, uniform);
+      if (!derived) {
+        const storageType =
+          name === "renderer_ModelMat" ? "mat3x4" : ShaderFactory._wgslInstanceStorageType(uniform.type);
+        if (!storageType) {
+          throw new Error(
+            `WebGPU GPU instancing does not support renderer uniform "${name}" of type "${uniform.type}".`
+          );
+        }
+        fieldMap[ShaderProperty.getByName(name)._uniqueId] = storageType;
+      }
+    }
+
+    const instanceLayout = ShaderFactory._buildLayout(engine, fieldMap);
+    const location = ShaderFactory._nextWGSLVaryingLocation(vertexSource, fragmentSource);
+    const declaration = ShaderFactory._buildWGSLInstanceDeclaration(instanceLayout);
+    vertexSource = ShaderFactory._rewriteWGSLInstanceUniforms(vertexSource, instanceUniforms, true, location);
+    fragmentSource = ShaderFactory._rewriteWGSLInstanceUniforms(fragmentSource, instanceUniforms, false, location);
+
+    return {
+      vertexSource: `${declaration}\n${vertexSource}`,
+      fragmentSource: `${declaration}\n${fragmentSource}`,
+      reflection: {
+        ...reflection,
+        uniforms: reflection.uniforms.filter((uniform) => !instanceUniforms.has(uniform.name))
+      },
+      instanceLayout
+    };
+  }
+
   private static _scanInstanceUniforms(source: string, fieldMap: Record<number, string>): string {
     const builtinUniforms = ShaderFactory._builtinRendererUniforms;
     const std140Map = ShaderFactory._std140TypeInfoMap;
@@ -263,6 +332,27 @@ mat3 _normalMatFromModel(mat3 m) {
       fieldMap[ShaderProperty.getByName(name)._uniqueId] = storageType;
       return "";
     });
+  }
+
+  private static _wgslInstanceStorageType(type: string): string | undefined {
+    return (
+      {
+        f32: "float",
+        i32: "int",
+        u32: "uint",
+        bool: "bool",
+        "vec2<f32>": "vec2",
+        "vec3<f32>": "vec3",
+        "vec4<f32>": "vec4",
+        "vec2<i32>": "ivec2",
+        "vec3<i32>": "ivec3",
+        "vec4<i32>": "ivec4",
+        "vec2<u32>": "uvec2",
+        "vec3<u32>": "uvec3",
+        "vec4<u32>": "uvec4",
+        "mat4x4<f32>": "mat4"
+      } as Record<string, string>
+    )[type];
   }
 
   private static _buildLayout(engine: Engine, fieldMap: Record<number, string>): InstanceBufferLayout {
@@ -339,6 +429,151 @@ mat3 _normalMatFromModel(mat3 m) {
       `layout(std140) uniform ${ShaderFactory.RENDERER_INSTANCE_BLOCK_NAME} {\n` +
       `    RendererInstanceStruct rendererData[INSTANCE_MAX_COUNT];\n};\n`
     );
+  }
+
+  private static _buildWGSLInstanceDeclaration(layout: InstanceBufferLayout): string {
+    const fields = layout.instanceFields.map(({ type, property }) => {
+      const wgslType = (
+        {
+          float: "f32",
+          int: "i32",
+          uint: "u32",
+          bool: "u32",
+          vec2: "vec2<f32>",
+          ivec2: "vec2<i32>",
+          uvec2: "vec2<u32>",
+          bvec2: "vec2<u32>",
+          vec3: "vec3<f32>",
+          ivec3: "vec3<i32>",
+          uvec3: "vec3<u32>",
+          bvec3: "vec3<u32>",
+          vec4: "vec4<f32>",
+          ivec4: "vec4<i32>",
+          uvec4: "vec4<u32>",
+          bvec4: "vec4<u32>",
+          mat4: "mat4x4<f32>",
+          mat3x4: "mat3x4<f32>"
+        } as Record<string, string>
+      )[type];
+      if (!wgslType) {
+        throw new Error(`WebGPU GPU instancing has no WGSL storage type for "${type}".`);
+      }
+      return `  ${property.name}: ${wgslType},`;
+    });
+    return `struct GSRendererInstance {
+${fields.join("\n")}
+}
+struct GSRendererInstanceBlock {
+  rendererData: array<GSRendererInstance, ${layout.instanceMaxCount}>,
+}
+@group(1) @binding(0) var<uniform> gsRendererInstances: GSRendererInstanceBlock;
+
+fn gs_rendererModelMatrix() -> mat4x4<f32> {
+  let model = gsRendererInstances.rendererData[u32(_gsInstanceIndex)].renderer_ModelMat;
+  return mat4x4<f32>(
+    vec4<f32>(model[0].x, model[1].x, model[2].x, 0.0),
+    vec4<f32>(model[0].y, model[1].y, model[2].y, 0.0),
+    vec4<f32>(model[0].z, model[1].z, model[2].z, 0.0),
+    vec4<f32>(model[0].w, model[1].w, model[2].w, 1.0)
+  );
+}
+
+fn gs_rendererNormalMatrix() -> mat4x4<f32> {
+  let model = gs_rendererModelMatrix();
+  let matrix = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+  let c0 = cross(matrix[1], matrix[2]);
+  let c1 = cross(matrix[2], matrix[0]);
+  let c2 = cross(matrix[0], matrix[1]);
+  let direction = select(1.0, -1.0, dot(matrix[0], c0) < 0.0);
+  return mat4x4<f32>(
+    vec4<f32>(c0 * direction, 0.0),
+    vec4<f32>(c1 * direction, 0.0),
+    vec4<f32>(c2 * direction, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 1.0)
+  );
+}`;
+  }
+
+  private static _rewriteWGSLInstanceUniforms(
+    source: string,
+    uniforms: ReadonlyMap<string, IShaderUniformReflection>,
+    vertex: boolean,
+    varyingLocation: number
+  ): string {
+    for (const name of uniforms.keys()) {
+      source = source.replace(new RegExp(`^\\s*${ShaderFactory._escapeRegExp(name)}\\s*:[^\\n]+\\n?`, "m"), "");
+    }
+    source = source.replace(
+      /struct GSUniforms\s*\{\s*\}\s*@group\(0\)\s*@binding\(0\)\s*var<uniform>\s+gsUniforms:\s*GSUniforms;\s*/,
+      ""
+    );
+
+    for (const [name] of uniforms) {
+      const access =
+        name === "renderer_ModelMat"
+          ? "gs_rendererModelMatrix()"
+          : name === "renderer_MVMat"
+            ? "(gsUniforms.camera_ViewMat * gs_rendererModelMatrix())"
+            : name === "renderer_MVPMat"
+              ? "(gsUniforms.camera_VPMat * gs_rendererModelMatrix())"
+              : name === "renderer_NormalMat"
+                ? "gs_rendererNormalMatrix()"
+                : `gsRendererInstances.rendererData[u32(_gsInstanceIndex)].${name}`;
+      source = source.replace(new RegExp(`\\bgsUniforms\\.${ShaderFactory._escapeRegExp(name)}\\b`, "g"), access);
+    }
+
+    if (vertex) {
+      if (!source.includes("@builtin(instance_index) instanceIndex: u32")) {
+        source = source.replace(
+          "struct GSVertexInput {",
+          "struct GSVertexInput {\n  @builtin(instance_index) instanceIndex: u32,"
+        );
+      }
+      if (!source.includes("var<private> _gsInstanceIndex: i32;")) {
+        source = `var<private> _gsInstanceIndex: i32;\n${source}`;
+      }
+      source = source.replace(
+        "struct GSVertexOutput {",
+        `struct GSVertexOutput {\n  @location(${varyingLocation}) @interpolate(flat) gsInstanceIndex: u32,`
+      );
+      if (!source.includes("_gsInstanceIndex = i32(input.instanceIndex);")) {
+        source = source.replace(
+          /(^|\n)(\s*)gs_vertexEntry\(\);/,
+          "$1$2_gsInstanceIndex = i32(input.instanceIndex);\n$2gs_vertexEntry();"
+        );
+      }
+      source = source.replace(
+        /(^|\n)(\s*)var output: GSVertexOutput;/,
+        "$1$2var output: GSVertexOutput;\n$2output.gsInstanceIndex = input.instanceIndex;"
+      );
+    } else {
+      if (!source.includes("var<private> _gsInstanceIndex: i32;")) {
+        source = `var<private> _gsInstanceIndex: i32;\n${source}`;
+      }
+      source = source.replace(
+        "struct GSFragmentInput {",
+        `struct GSFragmentInput {\n  @location(${varyingLocation}) @interpolate(flat) gsInstanceIndex: u32,`
+      );
+      source = source.replace(
+        /(^|\n)(\s*)gs_fragmentEntry\(\);/,
+        "$1$2_gsInstanceIndex = i32(input.gsInstanceIndex);\n$2gs_fragmentEntry();"
+      );
+    }
+    return source;
+  }
+
+  private static _nextWGSLVaryingLocation(...sources: string[]): number {
+    let maxLocation = -1;
+    for (const source of sources) {
+      for (const match of source.matchAll(/@location\((\d+)\)/g)) {
+        maxLocation = Math.max(maxLocation, Number(match[1]));
+      }
+    }
+    return maxLocation + 1;
+  }
+
+  private static _escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   private static _buildFieldDefines(fields: InstanceFieldInfo[], idExpr: string): string {

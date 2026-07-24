@@ -169,6 +169,17 @@ describe("Shader", () => {
       expect(shader.subShaders[0].passes[1]._platformTarget).to.equal(ShaderLanguage.GLSLES300);
       expect(shader.subShaders[0].getTagValue("ReplacementTag")).to.equal("transparent");
 
+      const defaultTargetSource = testShaderCompilerCode.replace("Test-Default", "Test-Default-ImplicitTarget");
+      const parseShaderPass = vi.spyOn(shaderCompiler, "_parseShaderPass");
+      const defaultTargetShader = Shader.create(defaultTargetSource);
+      expect(defaultTargetShader).to.be.an.instanceOf(Shader);
+      expect(
+        new Set(parseShaderPass.mock.calls.map(([, , , target]) => target))
+      ).toEqual(new Set([ShaderLanguage.GLSLES100]));
+      // @ts-ignore
+      expect(defaultTargetShader.subShaders[0].passes[1]._shaderTargets[ShaderLanguage.WGSL]).toBeUndefined();
+      parseShaderPass.mockRestore();
+
       // Test that throw error, if shader was created with same name in shaderCompiler.
       // expect(() => {
       //   Shader.create(testShaderCompilerCode);

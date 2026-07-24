@@ -27,6 +27,8 @@ export class Shader implements IReferable {
 
   /** @internal */
   static _shaderCompiler?: IShaderCompiler;
+  /** @internal */
+  static _defaultPlatformTarget: ShaderLanguage = ShaderLanguage.GLSLES100;
 
   private static _shaderMap: Record<string, Shader> = Object.create(null);
 
@@ -45,7 +47,7 @@ export class Shader implements IReferable {
    * ```
    *
    * @param shaderSource - Shader code
-   * @param platformTarget - Shader platform target, @defaultValue ShaderLanguage.GLSLES300
+   * @param platformTarget - Shader platform target, @defaultValue Engine backend target
    * @param path - Shader location path, used to resolve relative `#include` paths in ShaderLab source
    * @returns Shader
    *
@@ -79,7 +81,7 @@ export class Shader implements IReferable {
     const shaderMap = Shader._shaderMap;
 
     if (shaderPassesOrSubShadersOrPlatformTarget == undefined) {
-      shaderPassesOrSubShadersOrPlatformTarget = ShaderLanguage.GLSLES100;
+      shaderPassesOrSubShadersOrPlatformTarget = Shader._defaultPlatformTarget;
     }
 
     if (typeof shaderPassesOrSubShadersOrPlatformTarget === "number") {
@@ -118,8 +120,9 @@ export class Shader implements IReferable {
             passSource.name,
             shaderPassSource.vertexShaderInstructions,
             shaderPassSource.fragmentShaderInstructions,
-            shaderPassesOrSubShadersOrPlatformTarget as ShaderLanguage,
-            passSource.tags
+            shaderPassesOrSubShadersOrPlatformTarget,
+            passSource.tags,
+            shaderPassSource.reflection
           );
 
           Shader._applyRenderStates(
