@@ -1,6 +1,7 @@
 // Gallery dev server. Each demos/<feature>/index.html is its own previewable page (iframe-isolated, so a
-// heavy or broken demo can't take down the others); the landing index.html lists them. No build-time
-// codegen — Vite serves the HTML entries directly, and the landing discovers demos via import.meta.glob.
+// heavy or broken demo can't take down the others); the landing index.html lists them. Terrain shader
+// artifacts are served from `public/compiledShaders` so ShaderLoader can select the sibling `.shaderc`
+// or `.wgslc` file without a bundler-specific runtime path.
 const path = require("path");
 
 // Suppress the browser context menu on every demo page from one place (mirrors examples/template/iframe.ejs),

@@ -26,6 +26,23 @@ export interface TerrainHeightAtlasSpec {
   maxMetres: number;
 }
 
+/**
+ * Galacean-authored surface classification written into the unused control-word bits 3 through 6 at load time.
+ * The imported control payload remains unmodified on disk.
+ */
+export interface TerrainSurfaceFeatureAreaSpec {
+  /** Reserved control-word bit used by this feature area, from 3 through 6. */
+  bit: number;
+  /** Inclusive world-space X bounds in metres. */
+  minX: number;
+  /** Inclusive world-space X bounds in metres. */
+  maxX: number;
+  /** Inclusive world-space Z bounds in metres. */
+  minZ: number;
+  /** Inclusive world-space Z bounds in metres. */
+  maxZ: number;
+}
+
 /** terrain texture-asset values consumed by the core sampler. */
 export interface TerrainLayerSpec {
   id: number;
@@ -55,6 +72,8 @@ export interface TerrainMaterialSpec {
     threshold: number;
   };
   sampling: {
+    linearControlBlend: boolean;
+    normalMapMaxLod: number;
     blendSharpness: number;
     mipmapBias: number;
     biasDistance: number;
@@ -66,6 +85,7 @@ export interface TerrainMaterialSpec {
     near: number;
     far: number;
     reduction: number;
+    triScaleReduction: number;
   };
   macroVariation: {
     enabled: boolean;
@@ -123,6 +143,8 @@ export interface TerrainManifest {
     vertexSpacing: number;
     heightAtlas: TerrainHeightAtlasSpec;
     regions: TerrainRegionSpec[];
+    /** Optional Galacean-only classification areas for terrain surface systems. */
+    surfaceFeatures?: TerrainSurfaceFeatureAreaSpec[];
   };
   clipmap: TerrainClipmapSpec;
   world: TerrainWorldSpec;
@@ -205,6 +227,23 @@ function validateManifest(manifest: TerrainManifest, url: string): void {
   if (!Array.isArray(terrain.regions) || terrain.regions.length === 0) {
     throw new Error("[TerrainManifest] terrain.regions must not be empty");
   }
+  if (terrain.surfaceFeatures) {
+    for (const feature of terrain.surfaceFeatures) {
+      if (!Number.isInteger(feature.bit) || feature.bit < 3 || feature.bit > 6) {
+        throw new Error("[TerrainManifest] terrain.surfaceFeatures.bit must be an unused control bit in 3..6");
+      }
+      if (
+        !Number.isFinite(feature.minX) ||
+        !Number.isFinite(feature.maxX) ||
+        !Number.isFinite(feature.minZ) ||
+        !Number.isFinite(feature.maxZ) ||
+        feature.maxX < feature.minX ||
+        feature.maxZ < feature.minZ
+      ) {
+        throw new Error("[TerrainManifest] terrain.surfaceFeatures bounds must be finite and increasing");
+      }
+    }
+  }
   if (
     !Number.isInteger(clipmap?.meshSize) ||
     clipmap.meshSize < 8 ||
@@ -218,6 +257,12 @@ function validateManifest(manifest: TerrainManifest, url: string): void {
   }
   if (!Array.isArray(layers) || layers.length === 0 || layers.length > 32) {
     throw new Error("[TerrainManifest] layers must contain 1..32 texture assets");
+  }
+  if (typeof manifest.material?.sampling?.linearControlBlend !== "boolean") {
+    throw new Error("[TerrainManifest] material.sampling.linearControlBlend must be boolean");
+  }
+  if (!Number.isInteger(manifest.material.sampling.normalMapMaxLod) || manifest.material.sampling.normalMapMaxLod < 0 || manifest.material.sampling.normalMapMaxLod >= clipmap.meshLods) {
+    throw new Error("[TerrainManifest] material.sampling.normalMapMaxLod must select an active clipmap LOD");
   }
 
   const halfMap = terrain.regionMapSize / 2;
@@ -265,6 +310,9 @@ function validateManifest(manifest: TerrainManifest, url: string): void {
   const { near, far } = manifest.material.dualScaling;
   if (!(near >= 0) || !(far > near)) {
     throw new Error("[TerrainManifest] dualScaling.far must be greater than dualScaling.near");
+  }
+  if (!(manifest.material.dualScaling.triScaleReduction >= 0.001 && manifest.material.dualScaling.triScaleReduction <= 1)) {
+    throw new Error("[TerrainManifest] dualScaling.triScaleReduction must be in 0.001..1");
   }
 }
 

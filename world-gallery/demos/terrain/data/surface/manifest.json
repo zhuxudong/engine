@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "prototypes": [
+    {
+      "id": "tree",
+      "asset": "./tree.glb",
+      "localBounds": { "minY": -0.3, "maxY": 6 },
+      "distribution": {
+        "spacing": 42,
+        "jitter": 0.82,
+        "density": 0.36,
+        "scale": [0.85, 1.15],
+        "heightOffset": 0,
+        "seed": 17,
+        "area": { "minX": 132, "maxX": 900, "minZ": -910, "maxZ": -132 }
+      },
+      "terrain": {
+        "minHeight": -20,
+        "maxHeight": 130,
+        "minNormalY": 0.78,
+        "overlayLayers": [1],
+        "featureBits": [3]
+      }
+    },
+    {
+      "id": "tree-tall",
+      "asset": "./tree-tall.glb",
+      "localBounds": { "minY": -0.3, "maxY": 8.995 },
+      "distribution": {
+        "spacing": 86,
+        "jitter": 0.78,
+        "density": 0.32,
+        "scale": [0.85, 1.1],
+        "heightOffset": 0,
+        "seed": 23,
+        "area": { "minX": 132, "maxX": 900, "minZ": -910, "maxZ": -132 }
+      },
+      "terrain": {
+        "minHeight": -20,
+        "maxHeight": 130,
+        "minNormalY": 0.82,
+        "overlayLayers": [1],
+        "featureBits": [3]
+      }
+    }
+  ]
+}

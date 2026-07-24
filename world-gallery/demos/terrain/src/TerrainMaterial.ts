@@ -45,7 +45,9 @@ export enum TerrainDebugView {
   Wireframe = 27,
   ColorMap = 28,
   RoughMap = 29,
-  DetileRotationAxis = 30
+  DetileRotationAxis = 30,
+  SurfaceFeatures = 31,
+  WorldMaterialScale = 32
 }
 
 /** Mutable per-layer inputs exposed to the terrain diagnostics surface. */
@@ -66,6 +68,10 @@ export interface TerrainLayerTuning {
 
 /** Mutable sampling inputs exposed to the terrain diagnostics surface. */
 export interface TerrainSamplingTuning {
+  /** Whether nearby control cells use the reference four-corner material blend. */
+  linearControlBlend?: boolean;
+  /** Highest geometry-clipmap LOD that retains sampled normal and roughness detail. */
+  normalMapMaxLod?: number;
   /** terrain height-aware material blend sharpness. */
   blendSharpness?: number;
   /** Derivative multiplier used before textureGrad. */
@@ -106,6 +112,8 @@ export interface TerrainDualScalingTuning {
   texture?: number;
   /** Reduced texture scale used after the near/far transition. */
   reduction?: number;
+  /** World-background material-coordinate scale applied with dual scaling. */
+  triScaleReduction?: number;
   /** Camera distance at which the far-scale blend starts. */
   near?: number;
   /** Camera distance at which the far-scale blend completes. */
@@ -169,6 +177,10 @@ export class TerrainMaterial extends BaseMaterial {
   private static readonly _autoMacro = ShaderMacro.getByName("TERRAIN_AUTO_SHADER");
   private static readonly _dualMacro = ShaderMacro.getByName("TERRAIN_DUAL_SCALING");
   private static readonly _macroVariationMacro = ShaderMacro.getByName("TERRAIN_MACRO_VARIATION");
+  private static readonly _linearControlBlendMacro = ShaderMacro.getByName("TERRAIN_LINEAR_CONTROL_BLEND");
+  private static readonly _materialDetailMacro = ShaderMacro.getByName("TERRAIN_MATERIAL_DETAIL");
+  private static readonly _directLightingMacro = ShaderMacro.getByName("TERRAIN_DIRECT_LIGHTING");
+  private static readonly _indirectLightingMacro = ShaderMacro.getByName("TERRAIN_INDIRECT_LIGHTING");
   private static readonly _debugMacro = ShaderMacro.getByName("TERRAIN_DEBUG");
 
   private static readonly _heightMaps = ShaderProperty.getByName("material_HeightMaps");
@@ -212,6 +224,7 @@ export class TerrainMaterial extends BaseMaterial {
 
   private static readonly _dualTexture = ShaderProperty.getByName("material_DualTexture");
   private static readonly _dualReduction = ShaderProperty.getByName("material_DualReduction");
+  private static readonly _triReduction = ShaderProperty.getByName("material_TriReduction");
   private static readonly _dualNear = ShaderProperty.getByName("material_DualNear");
   private static readonly _dualFar = ShaderProperty.getByName("material_DualFar");
 
@@ -259,6 +272,9 @@ export class TerrainMaterial extends BaseMaterial {
     this._uploadLayerParameters();
     this.shaderData.setInt(TerrainMaterial._layerCount, 0);
     this.shaderData.setInt(TerrainMaterial._backgroundMode, 0);
+    this._setMacro(TerrainMaterial._materialDetailMacro, true);
+    this._setMacro(TerrainMaterial._directLightingMacro, true);
+    this._setMacro(TerrainMaterial._indirectLightingMacro, true);
     this.setDebugView(TerrainDebugView.Surface);
     this.shaderData.setInt(TerrainMaterial._debugLayer, 0);
   }
@@ -398,10 +414,12 @@ export class TerrainMaterial extends BaseMaterial {
     this.shaderData.setFloat(TerrainMaterial._mipmapBias, spec.sampling.mipmapBias);
     this.shaderData.setFloat(TerrainMaterial._biasDistance, spec.sampling.biasDistance);
     this.shaderData.setFloat(TerrainMaterial._depthBlur, spec.sampling.depthBlur);
+    this._setMacro(TerrainMaterial._linearControlBlendMacro, spec.sampling.linearControlBlend);
 
     const dual = spec.dualScaling;
     this.shaderData.setInt(TerrainMaterial._dualTexture, dual.texture);
     this.shaderData.setFloat(TerrainMaterial._dualReduction, dual.reduction);
+    this.shaderData.setFloat(TerrainMaterial._triReduction, dual.triScaleReduction);
     this.shaderData.setFloat(TerrainMaterial._dualNear, dual.near);
     this.shaderData.setFloat(TerrainMaterial._dualFar, dual.far);
     this._dualNearValue = dual.near;
@@ -427,6 +445,30 @@ export class TerrainMaterial extends BaseMaterial {
   setDebugView(view: TerrainDebugView): void {
     this._setMacro(TerrainMaterial._debugMacro, view !== TerrainDebugView.Surface);
     this.shaderData.setInt(TerrainMaterial._debugView, view);
+  }
+
+  /**
+   * Selects the compiled near or far terrain-material path.
+   * @param enabled Whether this material samples normal/roughness textures and evaluates detailed direct lighting.
+   */
+  setMaterialDetailEnabled(enabled: boolean): void {
+    this._setMacro(TerrainMaterial._materialDetailMacro, enabled);
+  }
+
+  /**
+   * Enables or removes baked diffuse terrain lighting at shader-variant granularity.
+   * @param enabled Whether baked ambient-light sampling is included in the terrain shader.
+   */
+  setIndirectLightingEnabled(enabled: boolean): void {
+    this._setMacro(TerrainMaterial._indirectLightingMacro, enabled);
+  }
+
+  /**
+   * Enables or removes direct-light and shadow evaluation at shader-variant granularity.
+   * @param enabled Whether direct-light evaluation is included in the terrain shader.
+   */
+  setDirectLightingEnabled(enabled: boolean): void {
+    this._setMacro(TerrainMaterial._directLightingMacro, enabled);
   }
 
   /**
@@ -468,6 +510,9 @@ export class TerrainMaterial extends BaseMaterial {
    * @throws If a numeric value is non-finite.
    */
   setSamplingTuning(tuning: TerrainSamplingTuning): void {
+    if (tuning.linearControlBlend !== undefined) {
+      this._setMacro(TerrainMaterial._linearControlBlendMacro, tuning.linearControlBlend);
+    }
     if (tuning.blendSharpness !== undefined)
       this.shaderData.setFloat(TerrainMaterial._blendSharpness, this._range("blendSharpness", tuning.blendSharpness, 0, 1));
     if (tuning.mipmapBias !== undefined) {
@@ -528,6 +573,12 @@ export class TerrainMaterial extends BaseMaterial {
       }
       if (dual.reduction !== undefined) {
         this.shaderData.setFloat(TerrainMaterial._dualReduction, this._range("dualScaling.reduction", dual.reduction, 0.001, 1));
+      }
+      if (dual.triScaleReduction !== undefined) {
+        this.shaderData.setFloat(
+          TerrainMaterial._triReduction,
+          this._range("dualScaling.triScaleReduction", dual.triScaleReduction, 0.001, 1)
+        );
       }
       const near = dual.near === undefined ? this._dualNearValue : this._range("dualScaling.near", dual.near, 0, 1000);
       const far = dual.far === undefined ? this._dualFarValue : this._range("dualScaling.far", dual.far, 0, 1000);

@@ -12,6 +12,10 @@
       "minMetres": -54,
       "maxMetres": 365
     },
+    "surfaceFeatures": [
+      { "bit": 3, "minX": 132, "maxX": 900, "minZ": -910, "maxZ": -600 },
+      { "bit": 3, "minX": 132, "maxX": 900, "minZ": -500, "maxZ": -132 }
+    ],
     "regions": [
       {
         "location": [0, -2],
@@ -90,8 +94,10 @@
       "enabled": true,
       "threshold": 0.87
     },
-    "sampling": {
-      "blendSharpness": 0.5,
+  "sampling": {
+    "linearControlBlend": false,
+    "normalMapMaxLod": 1,
+    "blendSharpness": 0.5,
       "mipmapBias": 1,
       "biasDistance": 512,
       "depthBlur": 0
@@ -101,7 +107,8 @@
       "texture": 0,
       "near": 100,
       "far": 170,
-      "reduction": 0.3
+      "reduction": 0.3,
+      "triScaleReduction": 0.3
     },
     "macroVariation": {
       "enabled": true,

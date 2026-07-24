@@ -10,6 +10,7 @@ import {
   type TerrainSamplingTuning,
   type TerrainWorldNoiseTuning
 } from "../TerrainMaterial";
+import type { SurfaceSystemSnapshot } from "../surface/SurfaceSystem";
 
 export type { TerrainWorldNoiseTuning } from "../TerrainMaterial";
 
@@ -45,17 +46,43 @@ export const TERRAIN_DEBUG_VIEWS = {
   "layer-source": TerrainDebugView.LayerSource,
   "layer-detiled": TerrainDebugView.LayerDetiled,
   "detile-rotation-axis": TerrainDebugView.DetileRotationAxis,
-  "dual-factor": TerrainDebugView.DualFactor
+  "dual-factor": TerrainDebugView.DualFactor,
+  "surface-features": TerrainDebugView.SurfaceFeatures,
+  "world-material-scale": TerrainDebugView.WorldMaterialScale
 } as const;
 
 /** Production shader debug-view name. */
 export type TerrainDebugViewName = keyof typeof TERRAIN_DEBUG_VIEWS;
 
 /** Named deterministic camera pose. */
-export type TerrainCameraPoseName = "overview" | "oblique" | "slope" | "dual" | "top" | "seam" | "background-seam";
+export type TerrainCameraPoseName =
+  | "overview"
+  | "oblique"
+  | "slope"
+  | "dual"
+  | "surface"
+  | "first-person"
+  | "top"
+  | "seam"
+  | "background-seam";
 
 /** terrain world background modes implemented by the Galacean core path. */
 export type TerrainBackgroundMode = "none" | "flat" | "noise";
+
+/** How the terrain ShaderLab source reached the engine. */
+export type TerrainShaderRegistrationMode = "precompiled" | "runtime";
+
+/** Observable timing and target data for terrain ShaderLab registration. */
+export interface TerrainShaderStartupSnapshot {
+  /** Whether the terrain uses the build artifact or the runtime compiler. */
+  readonly mode: TerrainShaderRegistrationMode;
+  /** Backend target encoded by the terrain artifact or runtime codegen. */
+  readonly platforms: readonly ("gles100" | "wgsl")[];
+  /** Time spent registering the selected shader artifact or runtime source, excluding raw-source module loading. */
+  readonly registrationMs: number;
+  /** Time spent fetching the raw source module in runtime comparison mode. */
+  readonly runtimeSourceLoadMs?: number;
+}
 
 /** Top-level inspector group for a terrain diagnostic. */
 export type TerrainDebugViewGroup = "surface" | "data" | "sampling" | "geometry";
@@ -74,7 +101,11 @@ export interface TerrainDebugViewInfo {
 
 /** Descriptions for each production shader diagnostic. */
 export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugViewInfo> = {
-  surface: { label: "Surface / 材质颜色", group: "surface", description: "terrain material accumulation 的未照明 albedo；这是主地形画面。" },
+  surface: {
+    label: "Surface / 最终材质",
+    group: "surface",
+    description: "最终地形光照：terrain albedo、纹理法线、粗糙度、方向光阴影接收与烘焙环境漫反射。"
+  },
   checkerboard: { label: "Checkerboard / 世界棋盘", group: "geometry", description: "世界坐标棋盘；用于确认 clipmap 覆盖与坐标连续性。" },
   grey: { label: "Grey / 灰色基线", group: "geometry", description: "不读取任何 terrain 数据或纹理的几何基线。" },
   height: {
@@ -111,6 +142,16 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
   },
   "control-angle": { label: "Control rotation / 控制旋转", group: "data", description: "原始 control word 的 rotation index 灰度值。" },
   "control-scale": { label: "Control scale / 控制缩放", group: "data", description: "原始 control word 解码后的 UV scale 灰度值。" },
+  "surface-features": {
+    label: "Surface features / 地表标记",
+    group: "data",
+    description: "Galacean 地表系统使用的 control 保留 bits 3–6：绿=bit 3（当前树木）、蓝=bit 4、红=bit 5、白=bit 6；原始导入文件不写入这些位。"
+  },
+  "world-material-scale": {
+    label: "World material scale / 世界材质缩放",
+    group: "sampling",
+    description: "区域内保持原始材质尺度（蓝）；区域外在 world-noise 过渡带之后平滑过渡到 Tri scale reduction（红），避免 region 与 world 的 UV 相位突变。"
+  },
   autoshader: {
     label: "Autoshader flag / 自动材质标志",
     group: "data",
@@ -139,7 +180,7 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
   "rough-map": {
     label: "Roughness map / 区域粗糙度图",
     group: "data",
-    description: "terrain _color_maps 的 alpha 灰阶；PBR 路径将它混入最终 roughness。"
+    description: "terrain _color_maps 的 alpha 灰阶；与 texture asset 的 roughness 合成为最终地形粗糙度。"
   },
   "detile-cell": { label: "Detile cell / 去重复单元", group: "sampling", description: "选定 layer 的 terrain detile cell 和单元边界。", usesLayer: true },
   "sampling-mip": {
@@ -189,6 +230,8 @@ export interface TerrainProbeSnapshot {
     readonly angleIndex: number;
     readonly scaleIndex: number;
     readonly scale: number;
+    /** Four Galacean surface-feature flags decoded from reserved control bits 3 through 6. */
+    readonly surfaceFeatures: number;
     readonly hole: boolean;
     readonly navigation: boolean;
     readonly autoshader: boolean;
@@ -241,6 +284,16 @@ export interface TerrainWaterDebugSnapshot {
   height: number;
 }
 
+/** Direct-light and baked-environment visibility exposed to terrain diagnostics. */
+export interface TerrainLightingSnapshot {
+  /** Whether the shadow-casting directional light is active. */
+  directLight: boolean;
+  /** Whether the directional light renders and samples its shadow map. */
+  shadows: boolean;
+  /** Whether the sky background and baked ambient light are active. */
+  environment: boolean;
+}
+
 /** Full mutable copy of the terrain inputs exposed by the inspector. */
 export interface TerrainDebugTuningSnapshot {
   /** Per-texture asset inputs. */
@@ -281,10 +334,20 @@ export interface TerrainDebugApi {
   setWorldBackground(mode: TerrainBackgroundMode): void;
   /** Updates terrain world-noise settings. */
   setWorldNoiseTuning(tuning: TerrainWorldNoiseTuning): void;
+  /** Returns the terrain ShaderLab registration path and measured CPU work. */
+  getShaderStartup(): TerrainShaderStartupSnapshot;
   /** Returns independent water-pcg diagnostic state. */
   getWaterDebug(): TerrainWaterDebugSnapshot;
   /** Updates independent water-pcg diagnostic state. */
   setWaterDebug(tuning: Partial<TerrainWaterDebugSnapshot>): void;
+  /** Returns direct-light and baked-environment visibility. */
+  getLighting(): TerrainLightingSnapshot;
+  /** Updates direct-light and baked-environment visibility. */
+  setLighting(tuning: Partial<TerrainLightingSnapshot>): void;
+  /** Returns the generated terrain-conforming surface-system state. */
+  getSurface(): SurfaceSystemSnapshot;
+  /** Updates surface-system visibility without changing placement inputs. */
+  setSurface(tuning: Pick<SurfaceSystemSnapshot, "enabled">): void;
   /** Restores manifest defaults. */
   resetTuning(): void;
   /** Returns the rendered clipmap topology. */
@@ -306,5 +369,7 @@ declare global {
   interface Window {
     /** Terrain diagnostics available after the demo reaches its ready state. */
     terrainDebug?: TerrainDebugApi;
+    /** Rendering backend selected before the engine and canvas context are created. */
+    terrainBackend?: "webgl2" | "webgpu";
   }
 }

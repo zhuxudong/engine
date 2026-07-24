@@ -1,6 +1,20 @@
-import { Camera, Color, Entity, Shader, Vector3, WebGLEngine } from "@galacean/engine";
+import {
+  AssetType,
+  Camera,
+  Engine,
+  Entity,
+  PostProcess,
+  Shader,
+  ShaderLanguage,
+  TonemappingEffect,
+  TonemappingMode,
+  Vector3,
+  WebGLEngine,
+  WebGPUEngine
+} from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
-import { OrbitControl } from "@galacean/engine-toolkit-controls";
+import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
+import { Stats } from "@galacean/engine-toolkit-stats";
 import { TerrainClipmap } from "./src/clipmap/TerrainClipmap";
 import { TerrainMaterial, type TerrainLayerTuning, type TerrainMaterialTuning } from "./src/TerrainMaterial";
 import {
@@ -10,8 +24,10 @@ import {
   type TerrainDebugApi,
   type TerrainDebugTuningSnapshot,
   type TerrainDebugViewName,
+  type TerrainLightingSnapshot,
   type TerrainMaterialTuningSnapshot,
   type TerrainProbeSnapshot,
+  type TerrainShaderStartupSnapshot,
   type TerrainWorldNoiseTuning,
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
@@ -20,8 +36,9 @@ import { loadLayerTextures } from "./src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
 import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader";
 import { loadTerrainData } from "./src/loader/TerrainDataLoader";
-import terrainShaderSource from "./src/shaders/Terrain.shader?raw";
 import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
+import { SurfaceSystem } from "./src/surface/SurfaceSystem";
+import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
 
 export {
   TERRAIN_DEBUG_VIEWS,
@@ -32,17 +49,25 @@ export {
   type TerrainDebugApi,
   type TerrainDebugLayerSnapshot,
   type TerrainDebugLayerTuningSnapshot,
+  type TerrainLightingSnapshot,
   type TerrainDebugTuningSnapshot,
   type TerrainDebugViewGroup,
   type TerrainDebugViewInfo,
   type TerrainDebugViewName,
   type TerrainMaterialTuningSnapshot,
   type TerrainProbeSnapshot,
+  type TerrainShaderRegistrationMode,
+  type TerrainShaderStartupSnapshot,
   type TerrainWorldNoiseTuning,
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
 
-const CAMERA_POSES = {
+interface CameraPose {
+  position: readonly [x: number, y: number, z: number];
+  target: readonly [x: number, y: number, z: number];
+}
+
+const CAMERA_POSES: Record<TerrainCameraPoseName, CameraPose> = {
   overview: {
     position: [1740, 1120, 1580],
     target: [512, 35, -512]
@@ -59,6 +84,14 @@ const CAMERA_POSES = {
     position: [512, 90, -430],
     target: [512, 0, -650]
   },
+  surface: {
+    position: [590, 85, -690],
+    target: [660, 45, -600]
+  },
+  "first-person": {
+    position: [590, 25, -690],
+    target: [660, 25, -600]
+  },
   top: {
     position: [512, 3500, -448],
     target: [512, 0, -512]
@@ -71,9 +104,12 @@ const CAMERA_POSES = {
     position: [1024, 900, -1536],
     target: [1024, 0, -1536]
   }
-} as const;
+};
 
 const status = document.querySelector<HTMLDivElement>("#status");
+const backendSelector = document.querySelector<HTMLSelectElement>("#backend");
+
+type TerrainBackend = "webgl2" | "webgpu";
 
 void boot().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
@@ -82,27 +118,45 @@ void boot().catch((error: unknown) => {
 });
 
 async function boot(): Promise<void> {
-  setStatus("initializing engine");
-  const engine = await WebGLEngine.create({ canvas: "canvas", shaderCompiler: new ShaderCompiler() });
+  const backend = resolveBackend();
+  configureBackendSelector(backend);
+  window.terrainBackend = backend;
+  setStatus(`initializing ${backend}`);
+  const configuration = { canvas: "canvas", shaderCompiler: new ShaderCompiler() };
+  const engine =
+    backend === "webgpu"
+      ? await WebGPUEngine.create(configuration)
+      : await WebGLEngine.create(configuration);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
-  Shader.create(terrainShaderSource);
+  const terrainShaderStartup = await registerTerrainShader(engine, backend);
 
   const scene = engine.sceneManager.activeScene;
-  scene.background.solidColor = new Color(0.58, 0.72, 0.84, 1);
   const root = scene.createRootEntity("terrain-demo");
   const cameraEntity = root.createChild("camera");
   const camera = cameraEntity.addComponent(Camera);
   camera.fieldOfView = 75;
   camera.nearClipPlane = 1;
   camera.farClipPlane = 20000;
-  const orbit = cameraEntity.addComponent(OrbitControl);
-  orbit.minDistance = 20;
-  orbit.maxDistance = 10000;
-  applyCameraPose(cameraEntity, orbit, "overview");
+  camera.enableHDR = true;
+  camera.enablePostProcess = true;
+  if (new URLSearchParams(window.location.search).has("stats")) {
+    configureStatsForDiagnostics(cameraEntity.addComponent(Stats));
+    installStatsPanelStyle();
+  }
+  const postProcess = root.createChild("terrain-tonemapping").addComponent(PostProcess);
+  postProcess.addEffect(TonemappingEffect).mode.value = TonemappingMode.Neutral;
+  let cameraControl: OrbitControl | FreeControl = createOrbitControl(cameraEntity);
+  applyCameraPose(cameraEntity, "overview");
 
   setStatus("loading manifest and region arrays");
   const manifestUrl = new URL("./data/manifest.json", import.meta.url).href;
+  const environment = await createTerrainEnvironment(
+    engine,
+    scene,
+    root,
+    new URL("./data/environment/terrain-sky.ambLight", import.meta.url).href
+  );
   const manifest = await loadManifest(engine, manifestUrl);
   const [terrainData, layerTextures, macroNoise] = await Promise.all([
     loadTerrainData(engine, manifest, manifestUrl),
@@ -110,13 +164,19 @@ async function boot(): Promise<void> {
     loadMacroNoiseTexture(engine, new URL(manifest.material.macroVariation.noiseTexture, manifestUrl).href)
   ]);
 
-  const material = new TerrainMaterial(engine);
-  material.bindTerrain(terrainData, manifest.clipmap.meshSize);
-  material.setLayerLibrary(layerTextures.albedoHeight, layerTextures.normalRoughness, manifest.layers);
-  material.configure(manifest.material, macroNoise);
-  material.configureWorldNoise(manifest.world.noise);
-  material.setBackgroundMode(backgroundModeToShader(manifest.world.background));
-  material.setDebugLayer(Math.min(1, manifest.layers.length - 1));
+  const detailedMaterial = new TerrainMaterial(engine);
+  const simplifiedMaterial = new TerrainMaterial(engine);
+  const terrainMaterials = [detailedMaterial, simplifiedMaterial] as const;
+  for (const terrainMaterial of terrainMaterials) {
+    terrainMaterial.bindTerrain(terrainData, manifest.clipmap.meshSize);
+    terrainMaterial.setLayerLibrary(layerTextures.albedoHeight, layerTextures.normalRoughness, manifest.layers);
+    terrainMaterial.configure(manifest.material, macroNoise);
+    terrainMaterial.configureWorldNoise(manifest.world.noise);
+    terrainMaterial.setBackgroundMode(backgroundModeToShader(manifest.world.background));
+    terrainMaterial.setDebugLayer(Math.min(1, manifest.layers.length - 1));
+  }
+  detailedMaterial.setMaterialDetailEnabled(true);
+  simplifiedMaterial.setMaterialDetailEnabled(false);
   const tuning = createTuningSnapshot(manifest);
 
   const clipmap = new TerrainClipmap(
@@ -124,13 +184,24 @@ async function boot(): Promise<void> {
     root.createChild("geometry-clipmap"),
     camera,
     terrainData,
-    material,
+    detailedMaterial,
+    simplifiedMaterial,
+    manifest.material.sampling.normalMapMaxLod,
     manifest.clipmap.meshSize,
     manifest.clipmap.meshLods
   );
   const waterDebug = new TerrainWaterDebug(engine, root, terrainWaterBounds(terrainData));
   const waterDebugState: TerrainWaterDebugSnapshot = { enabled: false, height: 10 };
   waterDebug.setState(waterDebugState.enabled, waterDebugState.height);
+  setStatus("loading surface assets and terrain-conforming instances");
+  const surfaceSystem = await SurfaceSystem.create({
+    engine,
+    parent: root,
+    terrain: terrainData,
+    manifestUrl: new URL("./data/surface/manifest.json", import.meta.url).href
+  });
+  const firstPersonPose = surfaceSystem.getFirstPersonPose();
+  if (firstPersonPose) CAMERA_POSES["first-person"] = firstPersonPose;
 
   const api: TerrainDebugApi = {
     ready: true,
@@ -141,38 +212,44 @@ async function boot(): Promise<void> {
       if (!Object.hasOwn(TERRAIN_DEBUG_VIEWS, view)) throw new Error(`[terrain-debug] unknown view ${view}`);
       const debugView = TERRAIN_DEBUG_VIEWS[view];
       clipmap.setWireframe(view === "clipmap-lod" || view === "wireframe");
-      material.setDebugView(debugView);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugView(debugView);
     },
     setPose(pose) {
       if (!Object.hasOwn(CAMERA_POSES, pose)) throw new Error(`[terrain-debug] unknown pose ${pose}`);
-      applyCameraPose(cameraEntity, orbit, pose);
+      cameraControl.destroy();
+      cameraControl = pose === "first-person" ? createFreeControl(cameraEntity) : createOrbitControl(cameraEntity);
+      applyCameraPose(cameraEntity, pose);
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
     setDebugLayer(layer) {
-      material.setDebugLayer(layer);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugLayer(layer);
     },
     getTuning() {
       return cloneTuningSnapshot(tuning);
     },
     setLayerTuning(layer, values) {
-      material.setLayerTuning(layer, values);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layer, values);
       Object.assign(tuning.layers[layer], values);
     },
     setSamplingTuning(values) {
-      material.setSamplingTuning(values);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setSamplingTuning(values);
+      if (values.normalMapMaxLod !== undefined) clipmap.setMaterialDetailLod(values.normalMapMaxLod);
       Object.assign(tuning.sampling, values);
     },
     setMaterialTuning(values) {
-      material.setMaterialTuning(values);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setMaterialTuning(values);
       replaceMaterialTuning(tuning.material, values);
     },
     setWorldBackground(mode) {
-      material.setBackgroundMode(backgroundModeToShader(mode));
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setBackgroundMode(backgroundModeToShader(mode));
       tuning.world.background = mode;
     },
     setWorldNoiseTuning(values) {
-      material.setWorldNoiseTuning(values);
+      for (const terrainMaterial of terrainMaterials) terrainMaterial.setWorldNoiseTuning(values);
       replaceWorldNoiseTuning(tuning.world.noise, values);
+    },
+    getShaderStartup() {
+      return { ...terrainShaderStartup, platforms: [...terrainShaderStartup.platforms] };
     },
     getWaterDebug() {
       return { ...waterDebugState };
@@ -182,16 +259,37 @@ async function boot(): Promise<void> {
       if (values.height !== undefined) waterDebugState.height = values.height;
       waterDebug.setState(waterDebugState.enabled, waterDebugState.height);
     },
+    getLighting() {
+      return environment.getLighting();
+    },
+    setLighting(values: Partial<TerrainLightingSnapshot>) {
+      environment.setLighting(values);
+      if (values.directLight !== undefined) {
+        for (const terrainMaterial of terrainMaterials) terrainMaterial.setDirectLightingEnabled(values.directLight);
+      }
+      if (values.environment !== undefined) {
+        for (const terrainMaterial of terrainMaterials) terrainMaterial.setIndirectLightingEnabled(values.environment);
+      }
+    },
+    getSurface() {
+      return surfaceSystem.inspect();
+    },
+    setSurface(values) {
+      surfaceSystem.setEnabled(values.enabled);
+    },
     resetTuning() {
       const defaults = createTuningSnapshot(manifest);
       for (const layer of defaults.layers) {
         const { layer: layerId, ...values } = layer;
-        material.setLayerTuning(layerId, values);
+        for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layerId, values);
       }
-      material.setSamplingTuning(defaults.sampling);
-      material.setMaterialTuning(defaults.material);
-      material.configureWorldNoise(defaults.world.noise);
-      material.setBackgroundMode(backgroundModeToShader(defaults.world.background));
+      for (const terrainMaterial of terrainMaterials) {
+        terrainMaterial.setSamplingTuning(defaults.sampling);
+        terrainMaterial.setMaterialTuning(defaults.material);
+        terrainMaterial.configureWorldNoise(defaults.world.noise);
+        terrainMaterial.setBackgroundMode(backgroundModeToShader(defaults.world.background));
+      }
+      clipmap.setMaterialDetailLod(defaults.sampling.normalMapMaxLod);
       replaceTuningSnapshot(tuning, defaults);
       waterDebugState.enabled = false;
       waterDebugState.height = 10;
@@ -231,6 +329,7 @@ async function boot(): Promise<void> {
           angleIndex: (raw >>> 10) & 0xf,
           scaleIndex,
           scale: 0.9 - (((scaleIndex + 3) % 8) + 1) * 0.1,
+          surfaceFeatures: (raw >>> 3) & 0xf,
           hole: (raw & 0x4) !== 0,
           navigation: (raw & 0x2) !== 0,
           autoshader: (raw & 0x1) !== 0
@@ -248,15 +347,141 @@ async function boot(): Promise<void> {
 
   if (document.body.dataset.terrainInspector === "true") mountTerrainInspector(api);
   engine.run();
-  setStatus(`ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments`);
+  const surfaceSnapshot = surfaceSystem.inspect();
+  setStatus(
+    `ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments · ${surfaceSnapshot.instanceCount} surface instances · ${backend}`
+  );
 }
 
-function applyCameraPose(cameraEntity: Entity, orbit: OrbitControl, poseName: TerrainCameraPoseName): void {
+function resolveBackend(): TerrainBackend {
+  return new URLSearchParams(location.search).get("backend") === "webgpu"
+    ? "webgpu"
+    : "webgl2";
+}
+
+async function registerTerrainShader(engine: Engine, backend: TerrainBackend): Promise<TerrainShaderStartupSnapshot> {
+  const target = backend === "webgpu" ? ShaderLanguage.WGSL : ShaderLanguage.GLSLES100;
+  const useRuntimeCompiler = new URLSearchParams(location.search).get("shader") === "runtime";
+
+  if (useRuntimeCompiler) {
+    const sourceLoadStarted = performance.now();
+    const { default: terrainShaderSource } = await import("./src/shaders/Terrain.shader?raw");
+    const runtimeSourceLoadMs = performance.now() - sourceLoadStarted;
+    const registrationStarted = performance.now();
+    Shader.create(terrainShaderSource);
+    return {
+      mode: "runtime",
+      platforms: [target === ShaderLanguage.WGSL ? "wgsl" : "gles100"],
+      registrationMs: performance.now() - registrationStarted,
+      runtimeSourceLoadMs
+    };
+  }
+
+  const registrationStarted = performance.now();
+  await engine.resourceManager.load({
+    url: new URL("/compiledShaders/terrain/Terrain.shaderc", location.origin).href,
+    type: AssetType.Shader
+  });
+  return {
+    mode: "precompiled",
+    platforms: [shaderPlatformName(target)],
+    registrationMs: performance.now() - registrationStarted
+  };
+}
+
+function shaderPlatformName(target: number): "gles100" | "wgsl" {
+  if (target === ShaderLanguage.GLSLES100) return "gles100";
+  if (target === ShaderLanguage.WGSL) return "wgsl";
+  throw new Error(`[terrain] unsupported compiled shader target: ${target}`);
+}
+
+function configureBackendSelector(backend: TerrainBackend): void {
+  if (!backendSelector) {
+    return;
+  }
+  backendSelector.value = backend;
+  backendSelector.addEventListener("change", () => {
+    const url = new URL(location.href);
+    url.searchParams.set("backend", backendSelector.value);
+    location.href = url.href;
+  });
+}
+
+function installStatsPanelStyle(): void {
+  const style = document.createElement("style");
+  style.textContent = `
+    body .gl-perf {
+      top: auto;
+      bottom: 12px;
+      left: 12px;
+      z-index: 10;
+      min-width: 156px;
+      padding: 9px 11px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 4px;
+      background: rgba(12, 15, 18, 0.82);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      color: #f3f5f7;
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    body .gl-perf dl {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 3px 14px;
+    }
+
+    body .gl-perf dt,
+    body .gl-perf dd {
+      color: inherit;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    body .gl-perf dd {
+      padding: 0;
+      text-align: right;
+      color: #76d6a5;
+      font-variant-numeric: tabular-nums;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function configureStatsForDiagnostics(stats: Stats): void {
+  const configure = () => {
+    const core = (stats as unknown as { monitor?: { core?: { samplingFrames: number } } }).monitor?.core;
+    if (!core) {
+      requestAnimationFrame(configure);
+      return;
+    }
+    // The toolkit defers its first sample for 60 seconds; diagnostics need live values.
+    core.samplingFrames = 0;
+  };
+  requestAnimationFrame(configure);
+}
+
+function createOrbitControl(cameraEntity: Entity): OrbitControl {
+  const control = cameraEntity.addComponent(OrbitControl);
+  control.minDistance = 20;
+  control.maxDistance = 10000;
+  return control;
+}
+
+function createFreeControl(cameraEntity: Entity): FreeControl {
+  const control = cameraEntity.addComponent(FreeControl);
+  control.movementSpeed = 8;
+  control.floorMock = false;
+  return control;
+}
+
+function applyCameraPose(cameraEntity: Entity, poseName: TerrainCameraPoseName): void {
   const pose = CAMERA_POSES[poseName];
   cameraEntity.transform.setPosition(pose.position[0], pose.position[1], pose.position[2]);
   const target = new Vector3(pose.target[0], pose.target[1], pose.target[2]);
   cameraEntity.transform.lookAt(target);
-  orbit.target.copyFrom(target);
+  const orbit = cameraEntity.getComponent(OrbitControl);
+  if (orbit) orbit.target.copyFrom(target);
 }
 
 function backgroundModeToShader(mode: TerrainBackgroundMode): 0 | 1 | 2 {

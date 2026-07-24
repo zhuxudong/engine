@@ -37,6 +37,9 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
   const worldState = { background: snapshot.world.background };
   const worldNoiseState = createWorldNoiseState(snapshot);
   const waterState = api.getWaterDebug();
+  const lightingState = api.getLighting();
+  const surfaceState = api.getSurface();
+  const maximumNormalMapLod = api.inspect().meshLods - 1;
   const selectPreview = new Map<number, () => void>();
   const terrainFolder = inspector.folder("Terrain / 地形", true);
 
@@ -50,10 +53,36 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     api.setView(view);
     setViewExplanation(TERRAIN_DEBUG_VIEW_INFO[view].description);
   });
-  annotate(sceneFolder.add(sceneState, "pose", api.poses), "Camera pose / 相机视角", "固定相机位置，用于可重复截图。").onChange(
+  annotate(sceneFolder.add(sceneState, "pose", api.poses), "Camera pose / 相机视角", "固定相机位置用于可重复截图；First-person 切换为 WASD/鼠标自由移动。").onChange(
     (pose: string) => api.setPose(pose as TerrainCameraPoseName)
   );
   annotate(sceneFolder.add(sceneState, "reset"), "Reset terrain values / 重置地形参数", "恢复 manifest 默认参数。");
+
+  const lightingFolder = inspector.subfolder(terrainFolder, "Lighting / 光照", true);
+  annotate(
+    lightingFolder.add(lightingState, "directLight"),
+    "Direct light / 直接光",
+    "启用方向光与阴影接收；关闭后只保留烘焙环境光。"
+  ).onChange((value: boolean) => api.setLighting({ directLight: value }));
+  annotate(
+    lightingFolder.add(lightingState, "shadows"),
+    "Shadows / 阴影",
+    "让方向光生成并采样级联阴影图；关闭后保留同一盏方向光，只移除阴影投射与接收，用于区分光照与阴影图成本。"
+  ).onChange((value: boolean) => api.setLighting({ shadows: value }));
+  annotate(
+    lightingFolder.add(lightingState, "environment"),
+    "Environment / 环境",
+    "切换天空盒背景和离线烘焙 `.ambLight` 的环境漫反射；关闭后只保留直接光。"
+  ).onChange((value: boolean) => api.setLighting({ environment: value }));
+
+  const surfaceFolder = inspector.subfolder(terrainFolder, "Surface system / 地表系统", true);
+  const setSurfaceReadout = inspector.addReadout(surfaceFolder, "Generated instances / 生成实例");
+  annotate(
+    surfaceFolder.add(surfaceState, "enabled"),
+    "Enabled / 启用",
+    "显示或隐藏由 control feature bit、height、slope 与 control overlay 共同筛选的静态 glTF 树木；不会改变地形材质。"
+  ).onChange((enabled: boolean) => api.setSurface({ enabled }));
+  setSurfaceReadout(formatSurfaceSnapshot(surfaceState));
 
   const worldFolder = inspector.subfolder(terrainFolder, "World background / 世界背景", true);
   annotate(
@@ -118,17 +147,32 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingShift: value }));
   annotate(layerFolder.add(layerState, "normalDepth", 0, 2, 0.01), "Normal depth / 法线强度", "纹理法线对最终材质法线的强度。")
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { normalDepth: value }));
-  annotate(layerFolder.add(layerState, "aoStrength", 0, 2, 0.01), "AO strength / AO 强度", "纹理 height alpha 参与 AO 的权重；当前 unlit 画面仅保留参数契约。")
+  annotate(layerFolder.add(layerState, "aoStrength", 0, 2, 0.01), "AO strength / AO 强度", "纹理 height alpha 与 normal map 上朝分量共同衰减烘焙环境光；不改变直接光。")
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { aoStrength: value }));
-  annotate(layerFolder.add(layerState, "roughnessMod", -1, 1, 0.01), "Roughness offset / 粗糙度偏移", "加到 normal/roughness alpha；当前 unlit 画面仅保留参数契约。")
+  annotate(
+    layerFolder.add(layerState, "roughnessMod", -1, 1, 0.01),
+    "Roughness offset / 粗糙度偏移",
+    "加到 normal/roughness alpha；随后与 color map alpha 合成为最终地形粗糙度。"
+  )
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { roughnessMod: value }));
-  annotate(layerFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01), "Blend sharpness / 高度混合锐度", "控制纹理 height alpha 对 base/overlay 混合的锐度。")
+  const samplingFolder = inspector.subfolder(terrainFolder, "Sampling / 采样", true);
+  annotate(
+    samplingFolder.add(snapshot.sampling, "linearControlBlend"),
+    "Reference control blend / 参考控制图混合",
+    "开启时按四个 control texel 混合材质，匹配源码近景路径；关闭时只采样当前 texel，避免近景四倍材质采样。默认关闭以保证实时帧率。"
+  ).onChange((value: boolean) => api.setSamplingTuning({ linearControlBlend: value }));
+  annotate(
+    samplingFolder.add(snapshot.sampling, "normalMapMaxLod", 0, maximumNormalMapLod, 1),
+    "Surface detail LOD / 表面细节层级",
+    "最高 GeoLOD 环使用独立编译的 normal/roughness 与细节直接光材质；更远环切换到不含 normal textureGrad 的简化材质，避免仅靠运行时分支仍保留远景采样。"
+  ).onChange((value: number) => api.setSamplingTuning({ normalMapMaxLod: value }));
+  annotate(samplingFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01), "Blend sharpness / 高度混合锐度", "控制纹理 height alpha 对 base/overlay 混合的锐度。")
     .onChange((value: number) => api.setSamplingTuning({ blendSharpness: value }));
-  annotate(layerFolder.add(snapshot.sampling, "mipmapBias", 0.5, 1.5, 0.01), "Mipmap bias / Mip 偏差", "缩放 textureGrad 导数；更大更早使用低分辨率 Mip。")
+  annotate(samplingFolder.add(snapshot.sampling, "mipmapBias", 0.5, 1.5, 0.01), "Mipmap bias / Mip 偏差", "缩放 textureGrad 导数；更大更早使用低分辨率 Mip。")
     .onChange((value: number) => api.setSamplingTuning({ mipmapBias: value }));
-  annotate(layerFolder.add(snapshot.sampling, "biasDistance", 0, 16384, 1), "Bias distance / 偏差起距", "相机超过此距离后，Mip 导数向 Depth blur 过渡。")
+  annotate(samplingFolder.add(snapshot.sampling, "biasDistance", 0, 16384, 1), "Bias distance / 偏差起距", "相机超过此距离后，Mip 导数向 Depth blur 过渡。")
     .onChange((value: number) => api.setSamplingTuning({ biasDistance: value }));
-  annotate(layerFolder.add(snapshot.sampling, "depthBlur", 0, 35, 0.1), "Depth blur / 远距模糊", "远距 Mip 导数附加值；用于抑制远处纹理闪烁。")
+  annotate(samplingFolder.add(snapshot.sampling, "depthBlur", 0, 35, 0.1), "Depth blur / 远距模糊", "远距 Mip 导数附加值；用于抑制远处纹理闪烁。")
     .onChange((value: number) => api.setSamplingTuning({ depthBlur: value }));
 
   const autoFolder = inspector.subfolder(terrainFolder, "Auto shader / 自动材质", true);
@@ -150,6 +194,8 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     .onChange((value: number) => api.setMaterialTuning({ dualScaling: { texture: Number(value) } }));
   annotate(dualFolder.add(materialState.dualScaling, "reduction", 0.001, 1, 0.001), "Scale reduction / 尺度缩减", "第二尺度相对于原始 UV 的缩减系数。")
     .onChange((value: number) => api.setMaterialTuning({ dualScaling: { reduction: value } }));
+  annotate(dualFolder.add(materialState.dualScaling, "triScaleReduction", 0.001, 1, 0.001), "World background scale / 世界背景缩放", "区域外 world background 同时缩放材质 UV、去重复单元与导数；与近远双尺度过渡无关。")
+    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { triScaleReduction: value } }));
   annotate(dualFolder.add(materialState.dualScaling, "near", 0, 1000, 1), "Near / 近距", "双尺度过渡开始的相机距离。")
     .onChange((value: number) => api.setMaterialTuning({ dualScaling: { near: value, far: materialState.dualScaling.far } }));
   annotate(dualFolder.add(materialState.dualScaling, "far", 1, 1000, 1), "Far / 远距", "双尺度过渡结束的相机距离。")
@@ -284,4 +330,16 @@ function hexToRgb(value: string): [number, number, number] {
   const hex = value.replace("#", "");
   if (!/^[0-9a-f]{6}$/i.test(hex)) throw new Error(`[terrain-debug] invalid color ${value}`);
   return [Number.parseInt(hex.slice(0, 2), 16) / 255, Number.parseInt(hex.slice(2, 4), 16) / 255, Number.parseInt(hex.slice(4, 6), 16) / 255];
+}
+
+function formatSurfaceSnapshot(snapshot: ReturnType<TerrainDebugApi["getSurface"]>): string {
+  const counts = Object.entries(snapshot.counts)
+    .map(([id, count]) => {
+      const rule = snapshot.rules[id];
+      const features = rule.featureBits.length ? `bits ${rule.featureBits.join(",")}` : "no feature bit";
+      const overlays = rule.overlayLayers.length ? `overlay ${rule.overlayLayers.join(",")}` : "any overlay";
+      return `${id}: ${count} · ${features} · ${overlays}\n  density ${rule.density}, every ${rule.spacing}m · slope ≥ ${rule.minNormalY}\n  height ${rule.heightRange[0]}..${rule.heightRange[1]}m · scale ${rule.scale[0]}..${rule.scale[1]}`;
+    })
+    .join("\n");
+  return `instancing: ${snapshot.instancing}\n${counts}\ntotal: ${snapshot.instanceCount}`;
 }
