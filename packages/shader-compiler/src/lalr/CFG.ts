@@ -442,9 +442,7 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
         NoneTerminal.assignment_expression
       ]
     ],
-    // #if _VERBOSE
     ASTNode.ConditionalExpression.pool
-    // #endif
   ),
 
   ...GrammarUtils.createProductionWithOptions(
@@ -571,9 +569,7 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
       [NoneTerminal.multiplicative_expression, ETokenType.SLASH, NoneTerminal.unary_expression],
       [NoneTerminal.multiplicative_expression, ETokenType.PERCENT, NoneTerminal.unary_expression]
     ],
-    // #if _VERBOSE
     ASTNode.MultiplicativeExpression.pool
-    // #endif
   ),
 
   ...GrammarUtils.createProductionWithOptions(
@@ -963,9 +959,7 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
   ...GrammarUtils.createProductionWithOptions(
     NoneTerminal.expression_statement,
     [[ETokenType.SEMICOLON], [NoneTerminal.expression, ETokenType.SEMICOLON]],
-    // #if _VERBOSE
     ASTNode.ExpressionStatement.pool
-    // #endif
   ),
 
   // dangling else ambiguity
@@ -983,9 +977,7 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
         NoneTerminal.statement
       ]
     ],
-    // #if _VERBOSE
     ASTNode.SelectionStatement.pool
-    // #endif
   ),
 
   ...GrammarUtils.createProductionWithOptions(
@@ -1001,9 +993,7 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
         NoneTerminal.statement
       ]
     ],
-    // #if _VERBOSE
     ASTNode.IterationStatement.pool
-    // #endif
   ),
 
   ...GrammarUtils.createProductionWithOptions(

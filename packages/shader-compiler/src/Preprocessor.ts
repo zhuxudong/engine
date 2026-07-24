@@ -44,6 +44,27 @@ export class Preprocessor {
     );
   }
 
+  /**
+   * Collect canonical guards declared by registered include chunks.
+   * @param includeMap - Shader include source map.
+   * @returns Guard macro names owned by include chunks.
+   * @internal
+   */
+  static collectIncludeGuardMacros(includeMap: IncludeMap): Set<string> {
+    const guards = new Set<string>();
+    for (const name in includeMap) {
+      const chunk = includeMap[name];
+      if (!chunk) {
+        continue;
+      }
+      const match = /^\s*#ifndef\s+([A-Za-z_]\w*)\s*\r?\n\s*#define\s+([A-Za-z_]\w*)\b/.exec(chunk);
+      if (match && match[1] === match[2]) {
+        guards.add(match[1]);
+      }
+    }
+    return guards;
+  }
+
   private static _replace(
     includeName: string,
     basePathForIncludeKey: string,

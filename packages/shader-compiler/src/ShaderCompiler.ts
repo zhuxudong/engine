@@ -2,7 +2,7 @@ import { Color } from "@galacean/engine-math";
 import { ShaderLanguage } from "@galacean/engine-core";
 import type { IPrecompiledShader, IRenderStates, IShaderSource } from "@galacean/engine-design";
 import type { IShaderProgramSource } from "@galacean/engine-design/types/shader-compiler/IShaderProgramSource";
-import { GLES100Visitor, GLES300Visitor } from "./codeGen";
+import { GLES100Visitor, GLES300Visitor, WGSLVisitor } from "./codeGen";
 import { ShaderPosition, ShaderRange } from "./common";
 import { Lexer } from "./lexer";
 import { ShaderInstructionEncoder } from "./ShaderInstructionEncoder";
@@ -22,11 +22,13 @@ export class ShaderCompiler {
 
   private _includeMap: IncludeMap = {};
   private readonly _chunkOutputCache: ChunkOutputCache = new Map();
+  private _includeGuardMacros = new Set<string>();
 
   /** Replace the `#include` lookup table and clear the derived chunk cache. */
   _setIncludeMap(includeMap: IncludeMap): void {
     this._includeMap = includeMap;
     this._chunkOutputCache.clear();
+    this._includeGuardMacros = Preprocessor.collectIncludeGuardMacros(includeMap);
   }
 
   static createPosition(index: number, line?: number, column?: number): ShaderPosition {
@@ -90,7 +92,12 @@ export class ShaderCompiler {
       return undefined;
     }
 
-    const codeGen = backend === ShaderLanguage.GLSLES100 ? GLES100Visitor.getVisitor() : GLES300Visitor.getVisitor();
+    const codeGen =
+      backend === ShaderLanguage.GLSLES100
+        ? GLES100Visitor.getVisitor()
+        : backend === ShaderLanguage.GLSLES300
+          ? GLES300Visitor.getVisitor()
+          : WGSLVisitor.getVisitor().setIncludeGuardMacros(this._includeGuardMacros);
 
     const ret = codeGen.visitShaderProgram(program, vertexEntry, fragmentEntry);
     ShaderCompiler._processingPassText = undefined;
@@ -130,10 +137,9 @@ export class ShaderCompiler {
           platformTarget,
           basePathForIncludeKey
         );
-
         if (!programSource) {
           throw new Error(
-            `Shader pass "${shaderSource.name}.${sub.name}.${pass.name}" precompile failed, please check the shader source code.`
+            `Shader pass "${shaderSource.name}.${sub.name}.${pass.name}" ${ShaderLanguage[platformTarget]} precompile failed, please check the shader source code.`
           );
         }
 
@@ -143,7 +149,8 @@ export class ShaderCompiler {
           tags: pass.tags,
           renderStates: this._serializeRenderStates(pass.renderStates),
           vertexShaderInstructions: programSource.vertexShaderInstructions,
-          fragmentShaderInstructions: programSource.fragmentShaderInstructions
+          fragmentShaderInstructions: programSource.fragmentShaderInstructions,
+          reflection: programSource.reflection
         };
       })
     }));

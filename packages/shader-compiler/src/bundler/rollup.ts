@@ -4,22 +4,22 @@ import { runFull, startWatcher, normalizePath } from "./precompile";
 export interface ShaderPrecompileOptions {
   /** Directory containing `.shader` source files. */
   input: string;
-  /** Directory where `.shaderc` outputs are written. */
+  /** Directory where `.shaderc` and `.wgslc` outputs are written. */
   output: string;
-  /** Remove `.shaderc` whose source no longer exists. Default `true`. */
+  /** Remove compiled shader artifacts whose source no longer exists. Default `true`. */
   clean?: boolean;
   /** Emit an aggregated `<output>/index.ts`. Default `true`. */
   emitIndex?: boolean;
   /** Emit raw-source indexes (`.shader` + `.glsl`) into the input tree. */
   emitSources?: boolean;
-  /** Shader platform target. Default `0`. */
+  /** Single shader platform target. Omit to emit the default GLES100 and WGSL targets. */
   platformTarget?: number;
 }
 
 export interface ShaderPluginOptions {
   /**
    * Override the default include pattern. The plugin always matches `.glsl`,
-   * `.shader`, and `.shaderc` extensions; this option exists for advanced
+   * `.shader`, `.shaderc`, and `.wgslc` extensions; this option exists for advanced
    * cases where the host bundler needs to gate by additional path constraints.
    * Returning `false` skips a file.
    */
@@ -28,7 +28,7 @@ export interface ShaderPluginOptions {
   /**
    * When set, the plugin runs an initial full precompile in `buildStart` and,
    * in watch mode, starts a background file watcher that incrementally
-   * regenerates `.shaderc` outputs when `.shader` / `.glsl` files change.
+   * regenerates shader artifacts when `.shader` / `.glsl` files change.
    * Without this option the plugin only does file-extension transforms —
    * pre-compile must be triggered separately via the `shader-precompile` CLI.
    */
@@ -38,11 +38,11 @@ export interface ShaderPluginOptions {
 /**
  * Pure transformer: take a file's id + source and emit JS module source.
  *
- * - `.shaderc`        → exports the embedded JSON literal as the default export.
+ * - `.shaderc`/`.wgslc` → exports the embedded JSON literal as the default export.
  * - `.shader`/`.glsl` → exports the raw source as a string literal.
  */
 function transformAsModule(code: string, id: string): { code: string; map: { mappings: string } } {
-  if (id.endsWith(".shaderc")) {
+  if (id.endsWith(".shaderc") || id.endsWith(".wgslc")) {
     return { code: `export default ${code};`, map: { mappings: "" } };
   }
   return { code: `export default ${JSON.stringify(code)};`, map: { mappings: "" } };
@@ -51,10 +51,10 @@ function transformAsModule(code: string, id: string): { code: string; map: { map
 /**
  * Rollup plugin that transforms shader assets into JS modules.
  *
- * - Always: transforms `.glsl` / `.shader` / `.shaderc` files.
+ * - Always: transforms `.glsl` / `.shader` / `.shaderc` / `.wgslc` files.
  * - When `precompile` option is set: runs a full precompile in buildStart and,
  *   in watch mode, starts a background watcher that mirrors `.shader` source
- *   changes into `.shaderc` outputs and refreshes the aggregated index.
+ *   changes into shader artifacts and refreshes the aggregated index.
  */
 export function shaderCompiler(options: ShaderPluginOptions = {}): Plugin {
   const { filter, precompile } = options;
@@ -84,7 +84,7 @@ export function shaderCompiler(options: ShaderPluginOptions = {}): Plugin {
 
     transform(code: string, id: string) {
       const normalized = normalizePath(id);
-      if (!normalized.match(/\.(glsl|shader|shaderc)$/)) return null;
+      if (!normalized.match(/\.(glsl|shader|shaderc|wgslc)$/)) return null;
       if (filter && !filter(normalized)) return null;
       return { code: transformAsModule(code, normalized).code };
     }

@@ -1235,6 +1235,27 @@ describe("ShaderCompiler Precompile", async () => {
   // 6. Shader._createFromPrecompiled()
   // ─────────────────────────────────────────────────────────
   describe("Shader._createFromPrecompiled()", () => {
+    it("precompiles a single WGSL artifact", () => {
+      const precompiled = shaderCompiler._precompile(PBRSource, ShaderLanguage.WGSL);
+      const testData = { ...precompiled, name: "TestPBR_WGSLPrecompiled" };
+      const shader = Shader._createFromPrecompiled(testData);
+
+      expect(precompiled.platformTarget).toBe(ShaderLanguage.WGSL);
+      expect(precompiled.subShaders[0].passes.some((pass) => !pass.isUsePass && pass.reflection)).toBe(true);
+      expect(shader.name).toBe("TestPBR_WGSLPrecompiled");
+      for (let subShaderIndex = 0; subShaderIndex < precompiled.subShaders.length; subShaderIndex++) {
+        const sourcePasses = precompiled.subShaders[subShaderIndex].passes;
+        const passes = shader.subShaders[subShaderIndex].passes;
+        for (let passIndex = 0; passIndex < sourcePasses.length; passIndex++) {
+          if (sourcePasses[passIndex].isUsePass) continue;
+          // @ts-ignore
+          expect(passes[passIndex]._platformTarget).toBe(ShaderLanguage.WGSL);
+        }
+      }
+
+      shader.destroy(true);
+    });
+
     it("should create Shader with correct name and subShader count", () => {
       const precompiled = shaderCompiler._precompile(PBRSource, ShaderLanguage.GLSLES100);
       const testData = { ...precompiled, name: "TestPBR_CFP_1" };

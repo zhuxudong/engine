@@ -165,15 +165,28 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.for_init_statement)
   export class ForInitStatement extends TreeNode {}
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.iteration_statement)
-  export class IterationStatement extends TreeNode {}
+  export class IterationStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitIterationStatement(this));
+    }
+  }
 
   @ASTNodeDecorator(NoneTerminal.selection_statement)
-  export class SelectionStatement extends TreeNode {}
+  export class SelectionStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitSelectionStatement(this));
+    }
+  }
 
   @ASTNodeDecorator(NoneTerminal.expression_statement)
-  export class ExpressionStatement extends TreeNode {}
-  // #endif
+  export class ExpressionStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitExpressionStatement(this));
+    }
+  }
 
   export abstract class ExpressionAstNode extends TreeNode {
     protected _type?: GalaceanDataType;
@@ -646,6 +659,10 @@ export namespace ASTNode {
         sa.symbolTableStack.insert(varSymbol);
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitParameterDeclaration(this));
+    }
   }
 
   @ASTNodeDecorator(NoneTerminal.parameter_declarator)
@@ -938,6 +955,8 @@ export namespace ASTNode {
     }
   }
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.multiplicative_expression)
   export class MultiplicativeExpression extends ExpressionAstNode {
     override init(): void {
@@ -953,8 +972,13 @@ export namespace ASTNode {
         //   }
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitMultiplicativeExpression(this));
+    }
   }
 
+  // #if _VERBOSE
   @ASTNodeDecorator(NoneTerminal.additive_expression)
   export class AdditiveExpression extends ExpressionAstNode {
     override init(): void {
@@ -1068,6 +1092,8 @@ export namespace ASTNode {
     }
   }
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.conditional_expression)
   export class ConditionalExpression extends ExpressionAstNode {
     override semanticAnalyze(sa: SemanticAnalyzer): void {
@@ -1075,8 +1101,11 @@ export namespace ASTNode {
         this.type = (<LogicalOrExpression>this.children[0]).type;
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitConditionalExpression(this));
+    }
   }
-  // #endif
 
   @ASTNodeDecorator(NoneTerminal.struct_specifier)
   export class StructSpecifier extends TreeNode {
@@ -1329,11 +1358,7 @@ export namespace ASTNode {
     }
 
     override codeGen(visitor: CodeGenVisitor): string {
-      if (this.isStatic) {
-        return super.codeGen(visitor);
-      } else {
-        return this.setCache(visitor.visitGlobalVariableDeclaration(this));
-      }
+      return this.setCache(visitor.visitVariableDeclaration(this));
     }
   }
 

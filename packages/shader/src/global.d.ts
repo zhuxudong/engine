@@ -13,3 +13,9 @@ declare module "*.shaderc" {
   const value: IPrecompiledShader;
   export default value;
 }
+
+declare module "*.wgslc" {
+  import { IPrecompiledShader } from "@galacean/engine-design";
+  const value: IPrecompiledShader;
+  export default value;
+}
