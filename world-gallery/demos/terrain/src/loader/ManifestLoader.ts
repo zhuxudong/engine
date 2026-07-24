@@ -72,8 +72,7 @@ export interface TerrainMaterialSpec {
     threshold: number;
   };
   sampling: {
-    linearControlBlend: boolean;
-    normalMapMaxLod: number;
+    bilerpEnabled: boolean;
     blendSharpness: number;
     mipmapBias: number;
     biasDistance: number;

@@ -203,18 +203,9 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     "加到 normal/roughness alpha；随后与 color map alpha 合成为最终地形粗糙度。"
   )
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { roughnessMod: value }));
-  const samplingFolder = inspector.subfolder(terrainFolder, "Sampling / 采样", true);
-  annotate(
-    samplingFolder.add(snapshot.sampling, "linearControlBlend"),
-    "Reference control blend / 参考控制图混合",
-    "开启时按四个 control texel 混合材质，匹配源码近景路径；关闭时只采样当前 texel，避免近景四倍材质采样。默认关闭以保证实时帧率。"
-  ).onChange((value: boolean) => api.setSamplingTuning({ linearControlBlend: value }));
-  annotate(
-    samplingFolder.add(snapshot.sampling, "normalMapMaxLod", 0, maximumNormalMapLod, 1),
-    "Surface detail LOD / 表面细节层级",
-    "最高 GeoLOD 环使用独立编译的 normal/roughness 与细节直接光材质；更远环切换到不含 normal textureGrad 的简化材质，避免仅靠运行时分支仍保留远景采样。"
-  ).onChange((value: number) => api.setSamplingTuning({ normalMapMaxLod: value }));
-  annotate(samplingFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01), "Blend sharpness / 高度混合锐度", "控制纹理 height alpha 对 base/overlay 混合的锐度。")
+  annotate(layerFolder.add(snapshot.sampling, "bilerpEnabled"), "Bilerp / 四点插值", "开启后仅在放大采样的 loaded region 从四个 control texel 插值；默认开启以消除近处单 texel 的方块感。")
+    .onChange((value: boolean) => api.setSamplingTuning({ bilerpEnabled: value }));
+  annotate(layerFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01), "Blend sharpness / 高度混合锐度", "控制纹理 height alpha 对 base/overlay 混合的锐度。")
     .onChange((value: number) => api.setSamplingTuning({ blendSharpness: value }));
   annotate(samplingFolder.add(snapshot.sampling, "mipmapBias", 0.5, 1.5, 0.01), "Mipmap bias / Mip 偏差", "缩放 textureGrad 导数；更大更早使用低分辨率 Mip。")
     .onChange((value: number) => api.setSamplingTuning({ mipmapBias: value }));
