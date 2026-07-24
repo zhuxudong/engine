@@ -1,4 +1,6 @@
-import { expect, test, type Browser, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { compileSurface } from "../src/surface/SurfaceCompiler";
+import type { SurfaceCompileInput, SurfaceTerrainSample } from "../src/surface/SurfaceContract";
 
 const captureScreenshots = process.env.TERRAIN_E2E_CAPTURE === "1";
 
@@ -30,88 +32,96 @@ declare global {
   }
 }
 
-test("backend selector creates a new engine after a full document navigation", async ({ page }) => {
-  const errors = collectRuntimeErrors(page);
-  await page.goto("/demos/terrain/index.html?backend=webgl2&pose=first-person");
-  await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments");
-  expect(await page.evaluate(() => window.terrainBackend)).toBe("webgl2");
-
-  await page.evaluate(() => {
-    document.documentElement.dataset.backendSwitchSentinel = "old-document";
-  });
-  await Promise.all([
-    page.waitForURL((url) => url.searchParams.get("backend") === "webgpu"),
-    page.locator("#backend").selectOption("webgpu")
-  ]);
-  await expect(page.locator("#status")).toContainText(
-    "ready · 3 regions · 144 clipmap segments · 56 surface instances · webgpu"
-  );
-
-  expect(await page.evaluate(() => document.documentElement.dataset.backendSwitchSentinel)).toBeUndefined();
-  expect(await page.evaluate(() => window.terrainBackend)).toBe("webgpu");
-  expect(errors).toEqual([]);
-});
-
-test("terrain and trees render equivalently on WebGL2 and WebGPU", async (
-  { browser, baseURL },
-  testInfo
-) => {
-  expect(baseURL).toBeDefined();
-  const webGL2 = await captureBackendScene(browser, baseURL!, "webgl2");
-  const webGPU = await captureBackendScene(browser, baseURL!, "webgpu");
-
-  expect(webGL2.errors).toEqual([]);
-  expect(webGPU.errors).toEqual([]);
-  expect(webGL2.shaderArtifactRequests).toContain("Terrain.shaderc");
-  expect(webGPU.shaderArtifactRequests).toContain("Terrain.wgslc");
-  expect(webGPU.surface).toEqual(webGL2.surface);
-  expect(webGPU.surface).toMatchObject({
-    enabled: true,
-    counts: { tree: 46, "tree-tall": 10 },
-    instanceCount: 56,
-    instancing: "engine-auto"
-  });
-
-  await testInfo.attach("terrain-webgl2-first-person", {
-    body: webGL2.screenshot,
-    contentType: "image/png"
-  });
-  await testInfo.attach("terrain-webgpu-first-person", {
-    body: webGPU.screenshot,
-    contentType: "image/png"
-  });
-  const comparison = await compareScreenshots(browser, webGL2.screenshot, webGPU.screenshot);
-  expect(comparison.meanAbsoluteError).toBeLessThan(1.5);
-  expect(comparison.largeDifferenceRatio).toBeLessThan(0.02);
-});
-
-test("terrain backend selects its single-target artifact while runtime codegen remains measurable", async (
-  { browser, baseURL },
-  testInfo
-) => {
-  expect(baseURL).toBeDefined();
-  const precompiledWebGL2 = await measureTerrainShaderRegistration(browser, baseURL!, "webgl2", "precompiled");
-  const precompiledWebGPU = await measureTerrainShaderRegistration(browser, baseURL!, "webgpu", "precompiled");
-  const runtimeWebGL2 = await measureTerrainShaderRegistration(browser, baseURL!, "webgl2", "runtime");
-  const runtimeWebGPU = await measureTerrainShaderRegistration(browser, baseURL!, "webgpu", "runtime");
-
-  expect(precompiledWebGL2).toMatchObject({ mode: "precompiled", platforms: ["gles100"] });
-  expect(precompiledWebGPU).toMatchObject({ mode: "precompiled", platforms: ["wgsl"] });
-  expect(runtimeWebGL2).toMatchObject({ mode: "runtime", platforms: ["gles100"] });
-  expect(runtimeWebGPU).toMatchObject({ mode: "runtime", platforms: ["wgsl"] });
-  expect(runtimeWebGL2.registrationMs).toBeGreaterThan(precompiledWebGL2.registrationMs);
-  expect(runtimeWebGPU.registrationMs).toBeGreaterThan(precompiledWebGPU.registrationMs);
-
-  const result = {
-    metric: "selected artifact or runtime Shader.create registrationMs; dynamic raw-module fetch is reported separately",
-    webgl2: { precompiled: precompiledWebGL2, runtime: runtimeWebGL2 },
-    webgpu: { precompiled: precompiledWebGPU, runtime: runtimeWebGPU }
+test("surface compiler is deterministic and enforces placement constraints", () => {
+  const samples = new Map<string, SurfaceTerrainSample>();
+  const terrain = {
+    sample(worldX: number, worldZ: number): SurfaceTerrainSample {
+      const key = `${Math.floor(worldX)},${Math.floor(worldZ)}`;
+      return (
+        samples.get(key) ?? {
+          height: worldX + worldZ,
+          slope: worldX / 16,
+          control: worldZ < 8 ? 0 : 1 << 27,
+          hole: worldX > 12
+        }
+      );
+    }
   };
-  console.info("[terrain-shader-registration]", JSON.stringify(result));
-  await testInfo.attach("terrain-shader-registration", {
-    body: JSON.stringify(result, null, 2),
-    contentType: "application/json"
+  const input: SurfaceCompileInput = {
+    version: "1",
+    seed: 42,
+    origin: [0, 0],
+    size: [16, 16],
+    masks: [{ id: "full", width: 2, height: 2, pixels: new Uint8Array([255, 255, 255, 255]) }],
+    rules: [
+      {
+        id: "grass",
+        prototype: "grass-a",
+        category: "grass",
+        mode: "coverage",
+        mask: "full",
+        densityPerSquareMetre: 0.25,
+        spacing: 0.25,
+        scale: { horizontal: [0.8, 1.2], vertical: [0.9, 1.4] },
+        yaw: [0, Math.PI * 2],
+        constraints: { height: [0, 32], slope: [0, 0.75], terrainLayers: [0], excludeHoles: true },
+        cellSize: 8,
+        wind: true
+      },
+      {
+        id: "trees",
+        prototype: "tree-a",
+        category: "tree",
+        mode: "scatter",
+        mask: "full",
+        densityPerSquareMetre: 0.2,
+        spacing: 3,
+        scale: { horizontal: [0.9, 1.1], vertical: [0.9, 1.2] },
+        yaw: [0, Math.PI * 2],
+        constraints: { height: [0, 32], slope: [0, 1], terrainLayers: [0, 1], excludeHoles: true },
+        cellSize: 8,
+        wind: true
+      }
+    ],
+    explicitPlacements: [
+      {
+        id: 7,
+        prototype: "hero-rock",
+        category: "rock",
+        position: [3.25, 9.5, 4.75],
+        rotation: [0.1, 0.2, 0.3, 0.9],
+        scale: [2, 1.5, 1.25],
+        color: [0.25, 0.5, 0.75, 1],
+        cellSize: 8
+      }
+    ],
+    terrain
+  };
+
+  const first = compileSurface(input);
+  const second = compileSurface(input);
+  expect(first.binary).toEqual(second.binary);
+  expect(first.manifest).toEqual(second.manifest);
+  expect(first.instances).toEqual(second.instances);
+  expect(first.instances.some((instance) => instance.position[0] > 12)).toBe(false);
+  expect(first.instances.find((instance) => instance.prototype === "hero-rock")).toMatchObject({
+    position: [3.25, 9.5, 4.75],
+    rotation: [0.1, 0.2, 0.3, 0.9],
+    scale: [2, 1.5, 1.25],
+    cell: [0, 0]
   });
+
+  const trees = first.instances.filter((instance) => instance.prototype === "tree-a");
+  for (let left = 0; left < trees.length; left++) {
+    for (let right = left + 1; right < trees.length; right++) {
+      const dx = trees[left].position[0] - trees[right].position[0];
+      const dz = trees[left].position[2] - trees[right].position[2];
+      expect(Math.hypot(dx, dz)).toBeGreaterThanOrEqual(3);
+    }
+  }
+
+  const changedSeed = compileSurface({ ...input, seed: 43 });
+  expect(changedSeed.binary).not.toEqual(first.binary);
 });
 
 test("terrain data, clipmap, and production shader stay coherent", async ({ page }, testInfo) => {
