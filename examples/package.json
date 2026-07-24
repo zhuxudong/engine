@@ -9,7 +9,9 @@
   "debug": "src/index.ts",
   "scripts": {
     "b:types": "tsc",
-    "dev": "vite serve . --config vite.config.js"
+    "dev": "vite serve . --config vite.config.js",
+    "test:webgpu-benchmark:e2e": "playwright test --config e2e/webgpu-benchmark/playwright.config.ts",
+    "typecheck:webgpu-benchmark": "tsc --noEmit -p tsconfig.webgpu-benchmark.json"
   },
   "dependencies": {
     "@galacean/engine": "workspace:*",
