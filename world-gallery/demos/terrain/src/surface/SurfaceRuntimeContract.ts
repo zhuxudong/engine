@@ -1,9 +1,29 @@
 import type { CompiledSurfaceManifest, SurfaceCategory, SurfaceRule } from "./SurfaceContract";
 
+/** World-space triplanar coverage values exported from a source surface material. */
+export interface SurfaceCoverageSpec {
+  readonly albedo: string;
+  readonly normal: string;
+  readonly metallicSmoothness?: string;
+  readonly mask?: string;
+  readonly color: readonly [r: number, g: number, b: number, a: number];
+  readonly tiling: number;
+  readonly normalScale: number;
+  readonly metallic: number;
+  readonly roughness: number;
+  readonly smoothnessSource: "albedo-alpha" | "metallic-alpha";
+  readonly overlayMethod: "perturbed-normal" | "vertex-normal";
+  readonly offset: number;
+  readonly balance: number;
+  readonly maskContrast: number;
+  readonly normalBlending: number;
+  readonly maskTiling: readonly [x: number, y: number];
+}
+
 /** Material parameters consumed by the instanced surface shader. */
 export interface SurfaceMaterialSpec {
   readonly id: string;
-  readonly kind: "vegetation" | "pbr";
+  readonly kind: "vegetation" | "pbr" | "impostor";
   readonly albedo?: string;
   readonly normal?: string;
   readonly metallicSmoothness?: string;
@@ -15,6 +35,7 @@ export interface SurfaceMaterialSpec {
   readonly roughness: number;
   readonly occlusionStrength?: number;
   readonly normalScale: number;
+  readonly coverage?: SurfaceCoverageSpec;
   readonly wind: {
     readonly enabled: boolean;
     readonly force: number;

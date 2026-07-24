@@ -54,7 +54,13 @@ function validateManifest(manifest: SurfaceRuntimeManifest): void {
     }
   }
   for (const material of manifest.materials) {
+    const coverage = material.coverage;
     if (
+      (
+        material.kind !== "vegetation" &&
+        material.kind !== "pbr" &&
+        material.kind !== "impostor"
+      ) ||
       (material.metallic ?? 0) < 0 ||
       (material.metallic ?? 0) > 1 ||
       material.roughness < 0 ||
@@ -67,6 +73,36 @@ function validateManifest(manifest: SurfaceRuntimeManifest): void {
       material.colorVariation.mode !== "uv-gradient"
     ) {
       throw new Error(`[SurfaceManifest] invalid color variation mode in ${material.id}`);
+    }
+    if (
+      coverage &&
+      (
+        !coverage.albedo ||
+        !coverage.normal ||
+        !(coverage.tiling > 0) ||
+        coverage.normalScale < 0 ||
+        coverage.metallic < 0 ||
+        coverage.metallic > 1 ||
+        coverage.roughness < 0 ||
+        coverage.roughness > 1 ||
+        (
+          coverage.smoothnessSource !== "albedo-alpha" &&
+          coverage.smoothnessSource !== "metallic-alpha"
+        ) ||
+        (
+          coverage.overlayMethod !== "perturbed-normal" &&
+          coverage.overlayMethod !== "vertex-normal"
+        ) ||
+        !Number.isFinite(coverage.offset) ||
+        !Number.isFinite(coverage.balance) ||
+        coverage.maskContrast < 0 ||
+        coverage.maskContrast > 1 ||
+        coverage.normalBlending < 0 ||
+        coverage.normalBlending > 1 ||
+        coverage.maskTiling.some((value) => !(value > 0))
+      )
+    ) {
+      throw new Error(`[SurfaceManifest] invalid triplanar coverage in ${material.id}`);
     }
   }
   let expectedOffset = 0;

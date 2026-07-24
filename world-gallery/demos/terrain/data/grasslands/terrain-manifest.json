@@ -1,0 +1,290 @@
+{
+  "version": "1",
+  "terrain": {
+    "regionSize": 1024,
+    "regionMapSize": 8,
+    "vertexSpacing": 0.9765625,
+    "heightAtlas": {
+      "url": "./terrain/height-atlas.r16",
+      "format": "r16-unorm-le",
+      "width": 1024,
+      "height": 9216,
+      "minMetres": 0,
+      "maxMetres": 600
+    },
+    "regions": [
+      {
+        "location": [
+          0,
+          0
+        ],
+        "heightOffsetY": 0,
+        "controlMap": "./terrain/regions/control_0_0.bin",
+        "colorMap": "./terrain/regions/color_0_0.png"
+      },
+      {
+        "location": [
+          1,
+          0
+        ],
+        "heightOffsetY": 1024,
+        "controlMap": "./terrain/regions/control_1_0.bin",
+        "colorMap": "./terrain/regions/color_1_0.png"
+      },
+      {
+        "location": [
+          2,
+          0
+        ],
+        "heightOffsetY": 2048,
+        "controlMap": "./terrain/regions/control_2_0.bin",
+        "colorMap": "./terrain/regions/color_2_0.png"
+      },
+      {
+        "location": [
+          0,
+          1
+        ],
+        "heightOffsetY": 3072,
+        "controlMap": "./terrain/regions/control_0_1.bin",
+        "colorMap": "./terrain/regions/color_0_1.png"
+      },
+      {
+        "location": [
+          1,
+          1
+        ],
+        "heightOffsetY": 4096,
+        "controlMap": "./terrain/regions/control_1_1.bin",
+        "colorMap": "./terrain/regions/color_1_1.png"
+      },
+      {
+        "location": [
+          2,
+          1
+        ],
+        "heightOffsetY": 5120,
+        "controlMap": "./terrain/regions/control_2_1.bin",
+        "colorMap": "./terrain/regions/color_2_1.png"
+      },
+      {
+        "location": [
+          0,
+          2
+        ],
+        "heightOffsetY": 6144,
+        "controlMap": "./terrain/regions/control_0_2.bin",
+        "colorMap": "./terrain/regions/color_0_2.png"
+      },
+      {
+        "location": [
+          1,
+          2
+        ],
+        "heightOffsetY": 7168,
+        "controlMap": "./terrain/regions/control_1_2.bin",
+        "colorMap": "./terrain/regions/color_1_2.png"
+      },
+      {
+        "location": [
+          2,
+          2
+        ],
+        "heightOffsetY": 8192,
+        "controlMap": "./terrain/regions/control_2_2.bin",
+        "colorMap": "./terrain/regions/color_2_2.png"
+      }
+    ]
+  },
+  "clipmap": {
+    "meshSize": 48,
+    "meshLods": 8
+  },
+  "world": {
+    "background": "none",
+    "noise": {
+      "fragmentNormals": false,
+      "regionBlend": 0.3,
+      "maxOctaves": 8,
+      "minOctaves": 4,
+      "lodDistance": 8000,
+      "scale": 4,
+      "height": 300,
+      "offset": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "layers": [
+    {
+      "id": 0,
+      "name": "Grass",
+      "albedoHeight": "./textures/terrain/grass-albedosmoothness.png",
+      "normalRoughness": "./textures/terrain/grass-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 2,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 1,
+      "name": "MudStones",
+      "albedoHeight": "./textures/terrain/mudstones-albedosmoothness.png",
+      "normalRoughness": "./textures/terrain/mudstones-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 3,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 2,
+      "name": "Sand",
+      "albedoHeight": "./textures/terrain/sand-albedosmoothness.png",
+      "normalRoughness": "./textures/terrain/sand-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 3,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 3,
+      "name": "Mud",
+      "albedoHeight": "./textures/terrain/mud-albedosmoothness.png",
+      "normalRoughness": "./textures/terrain/mud-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 3,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 4,
+      "name": "MudStonesGrass",
+      "albedoHeight": "./textures/terrain/mudstonesgrass-albedosmoothness.png",
+      "normalRoughness": "./textures/terrain/mudstonesgrass-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 2,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 5,
+      "name": "Grass_Blue",
+      "albedoHeight": "./textures/terrain/grass-blue.png",
+      "normalRoughness": "./textures/terrain/grass-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 1,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    },
+    {
+      "id": 6,
+      "name": "Grass_Yellow",
+      "albedoHeight": "./textures/terrain/grass-yellow.png",
+      "normalRoughness": "./textures/terrain/grass-normal.png",
+      "albedoColor": [
+        1,
+        1,
+        1
+      ],
+      "uvScale": 0.5,
+      "detilingRotation": 0.161,
+      "detilingShift": 0,
+      "normalDepth": 1,
+      "aoStrength": 1,
+      "roughnessMod": 0
+    }
+  ],
+  "material": {
+    "autoShader": {
+      "enabled": false,
+      "baseTexture": 0,
+      "overlayTexture": 1,
+      "slope": 0.45,
+      "heightReduction": 0.05
+    },
+    "projection": {
+      "enabled": false,
+      "threshold": 0.87
+    },
+    "sampling": {
+      "bilerpEnabled": true,
+      "blendSharpness": 0.5,
+      "mipmapBias": 1,
+      "biasDistance": 512,
+      "depthBlur": 0
+    },
+    "dualScaling": {
+      "enabled": false,
+      "texture": 0,
+      "near": 100,
+      "far": 170,
+      "reduction": 0.3
+    },
+    "macroVariation": {
+      "enabled": false,
+      "noiseTexture": "./textures/macro-variation.png",
+      "color1": [
+        1,
+        1,
+        1
+      ],
+      "color2": [
+        1,
+        1,
+        1
+      ],
+      "slope": 0.333,
+      "noise1Scale": 0.04,
+      "noise1Angle": 0,
+      "noise1Offset": [
+        0,
+        0
+      ],
+      "noise2Scale": 0.076
+    }
+  }
+}

@@ -51,6 +51,12 @@ Shader "Terrain/Surface" {
       sampler2D material_MetallicSmoothness;
       sampler2D material_Occlusion;
       sampler2D material_LodDither;
+      #ifdef MATERIAL_SURFACE_COVERAGE
+        sampler2D material_CoverageAlbedo;
+        sampler2D material_CoverageNormal;
+        sampler2D material_CoverageMetallicSmoothness;
+        sampler2D material_CoverageMask;
+      #endif
       vec4 material_BaseColor;
       vec4 material_SecondColor;
       float material_AlphaCutoff;
@@ -58,6 +64,20 @@ Shader "Terrain/Surface" {
       float material_Roughness;
       float material_OcclusionStrength;
       float material_NormalScale;
+      #ifdef MATERIAL_SURFACE_COVERAGE
+        vec4 material_CoverageColor;
+        float material_CoverageTiling;
+        float material_CoverageNormalScale;
+        float material_CoverageMetallic;
+        float material_CoverageRoughness;
+        int material_CoverageSmoothnessSource;
+        int material_CoverageOverlayMethod;
+        float material_CoverageOffset;
+        float material_CoverageBalance;
+        float material_CoverageMaskContrast;
+        float material_CoverageNormalBlending;
+        vec2 material_CoverageMaskTiling;
+      #endif
       float material_Time;
       float material_WindForce;
       float material_WindWavesScale;
@@ -199,6 +219,12 @@ Shader "Terrain/Surface" {
         return value + 2.0 * cross(rotation.xyz, cross(rotation.xyz, value) + rotation.w * value);
       }
 
+      void billboardBasis(out vec3 right, out vec3 up, out vec3 forward) {
+        right = normalize(vec3(camera_ViewMat[0][0], camera_ViewMat[1][0], camera_ViewMat[2][0]));
+        up = vec3(0.0, 1.0, 0.0);
+        forward = -normalize(vec3(camera_ViewMat[0][2], camera_ViewMat[1][2], camera_ViewMat[2][2]));
+      }
+
       float windWeight(Attributes attributes) {
         #ifdef RENDERER_ENABLE_VERTEXCOLOR
           return attributes.COLOR_0.r;
@@ -211,6 +237,35 @@ Shader "Terrain/Surface" {
         vec3 prototypePosition = renderer_SurfaceLocalPosition +
           rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
         vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+        #ifdef RENDERER_SURFACE_BILLBOARD
+          vec3 billboardRight;
+          vec3 billboardUp;
+          vec3 billboardForward;
+          billboardBasis(billboardRight, billboardUp, billboardForward);
+          vec3 localNormal = normalize(
+            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+          );
+          vec3 localTangent = normalize(
+            attributes.TANGENT.xyz * renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz
+          );
+          vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            billboardRight * scaledPosition.x +
+            billboardUp * scaledPosition.y +
+            billboardForward * scaledPosition.z;
+          worldNormal = normalize(
+            billboardRight * localNormal.x +
+            billboardUp * localNormal.y +
+            billboardForward * localNormal.z
+          );
+          worldTangent = vec4(
+            normalize(
+              billboardRight * localTangent.x +
+              billboardUp * localTangent.y +
+              billboardForward * localTangent.z
+            ),
+            attributes.TANGENT.w
+          );
+        #else
         vec3 localNormal = normalize(
           rotateByQuaternion(
             attributes.NORMAL / max(abs(renderer_SurfaceLocalScale), vec3(0.0001)),
@@ -231,6 +286,7 @@ Shader "Terrain/Surface" {
           normalize(rotateByQuaternion(localTangent, attributes.INSTANCE_ROTATION)),
           attributes.TANGENT.w
         );
+        #endif
 
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
@@ -291,27 +347,155 @@ Shader "Terrain/Surface" {
         }
       }
 
+      void surfaceBasis(Varyings varyings, out vec3 normal, out vec3 tangent, out vec3 bitangent) {
+        normal = normalize(varyings.worldNormal);
+        tangent = normalize(varyings.worldTangent.xyz - normal * dot(normal, varyings.worldTangent.xyz));
+        bitangent = normalize(cross(normal, tangent)) * varyings.worldTangent.w;
+      }
+
+      vec3 unpackNormal(vec4 packedNormal, float scale) {
+        vec3 normal = packedNormal.xyz * 2.0 - 1.0;
+        normal.xy *= scale;
+        return normal;
+      }
+
+      vec3 tangentToWorld(vec3 tangentNormal, vec3 normal, vec3 tangent, vec3 bitangent) {
+        return normalize(
+          tangent * tangentNormal.x +
+          bitangent * tangentNormal.y +
+          normal * tangentNormal.z
+        );
+      }
+
+      #ifdef MATERIAL_SURFACE_COVERAGE
+        vec3 triplanarWeights(vec3 worldNormal) {
+          vec3 weights = pow(abs(worldNormal), vec3(10.0));
+          return weights / (weights.x + weights.y + weights.z + 0.00001);
+        }
+
+        vec4 sampleTriplanarColor(
+          sampler2D textureMap,
+          vec3 worldPosition,
+          vec3 worldNormal,
+          float tiling
+        ) {
+          vec3 weights = triplanarWeights(worldNormal);
+          vec3 normalSign = sign(worldNormal);
+          vec4 xProjection = texture2DSRGB(
+            textureMap,
+            tiling * worldPosition.zy * vec2(normalSign.x, 1.0)
+          );
+          vec4 yProjection = texture2DSRGB(
+            textureMap,
+            tiling * worldPosition.xz * vec2(normalSign.y, 1.0)
+          );
+          vec4 zProjection = texture2DSRGB(
+            textureMap,
+            tiling * worldPosition.xy * vec2(-normalSign.z, 1.0)
+          );
+          return xProjection * weights.x + yProjection * weights.y + zProjection * weights.z;
+        }
+
+        vec4 sampleTriplanarLinear(
+          sampler2D textureMap,
+          vec3 worldPosition,
+          vec3 worldNormal,
+          float tiling
+        ) {
+          vec3 weights = triplanarWeights(worldNormal);
+          vec3 normalSign = sign(worldNormal);
+          vec4 xProjection = texture2D(
+            textureMap,
+            tiling * worldPosition.zy * vec2(normalSign.x, 1.0)
+          );
+          vec4 yProjection = texture2D(
+            textureMap,
+            tiling * worldPosition.xz * vec2(normalSign.y, 1.0)
+          );
+          vec4 zProjection = texture2D(
+            textureMap,
+            tiling * worldPosition.xy * vec2(-normalSign.z, 1.0)
+          );
+          return xProjection * weights.x + yProjection * weights.y + zProjection * weights.z;
+        }
+
+        vec3 sampleTriplanarNormal(vec3 worldPosition, vec3 worldNormal) {
+          vec3 weights = triplanarWeights(worldNormal);
+          vec3 normalSign = sign(worldNormal);
+          vec3 xSample = unpackNormal(
+            texture2D(
+              material_CoverageNormal,
+              material_CoverageTiling * worldPosition.zy * vec2(normalSign.x, 1.0)
+            ),
+            material_CoverageNormalScale
+          );
+          vec3 ySample = unpackNormal(
+            texture2D(
+              material_CoverageNormal,
+              material_CoverageTiling * worldPosition.xz * vec2(normalSign.y, 1.0)
+            ),
+            material_CoverageNormalScale
+          );
+          vec3 zSample = unpackNormal(
+            texture2D(
+              material_CoverageNormal,
+              material_CoverageTiling * worldPosition.xy * vec2(-normalSign.z, 1.0)
+            ),
+            material_CoverageNormalScale
+          );
+          vec3 xProjection = vec3(
+            xSample.xy * vec2(normalSign.x, 1.0) + worldNormal.zy,
+            worldNormal.x
+          ).zyx;
+          vec3 yProjection = vec3(
+            ySample.xy * vec2(normalSign.y, 1.0) + worldNormal.xz,
+            worldNormal.y
+          ).xzy;
+          vec3 zProjection = vec3(
+            zSample.xy * vec2(-normalSign.z, 1.0) + worldNormal.xy,
+            worldNormal.z
+          );
+          return normalize(
+            xProjection * weights.x +
+            yProjection * weights.y +
+            zProjection * weights.z
+          );
+        }
+
+        vec3 blendNormals(vec3 baseNormal, vec3 coverageNormal) {
+          return normalize(vec3(
+            baseNormal.xy * coverageNormal.z + coverageNormal.xy * baseNormal.z,
+            baseNormal.z * coverageNormal.z
+          ));
+        }
+      #endif
+
       vec3 normalFromTexture(Varyings varyings) {
-        vec3 sampled = texture2D(material_Normal, varyings.uv).xyz * 2.0 - 1.0;
-        sampled.xy *= material_NormalScale;
-        vec3 normal = normalize(varyings.worldNormal);
-        vec3 tangent = normalize(varyings.worldTangent.xyz - normal * dot(normal, varyings.worldTangent.xyz));
-        vec3 bitangent = normalize(cross(normal, tangent)) * varyings.worldTangent.w;
-        return normalize(tangent * sampled.x + bitangent * sampled.y + normal * sampled.z);
+        vec3 normal;
+        vec3 tangent;
+        vec3 bitangent;
+        surfaceBasis(varyings, normal, tangent, bitangent);
+        return tangentToWorld(
+          unpackNormal(texture2D(material_Normal, varyings.uv), material_NormalScale),
+          normal,
+          tangent,
+          bitangent
+        );
       }
 
       vec3 shadeSurface(
         Varyings varyings,
         vec3 albedo,
         vec3 normal,
-        vec4 metallicSmoothness,
+        float metallic,
+        float roughness,
         float occlusion
       ) {
         SurfaceData surfaceData;
         surfaceData.albedoColor = albedo;
         surfaceData.emissiveColor = vec3(0.0);
-        surfaceData.metallic = metallicSmoothness.r * material_Metallic;
-        surfaceData.roughness = 1.0 - metallicSmoothness.a * (1.0 - material_Roughness);
+        surfaceData.metallic = metallic;
+        surfaceData.roughness = roughness;
         surfaceData.ambientOcclusion = mix(1.0, occlusion, material_OcclusionStrength);
         surfaceData.opacity = 1.0;
         surfaceData.IOR = 1.5;
@@ -392,12 +576,91 @@ Shader "Terrain/Surface" {
         if (baseColor.a < material_AlphaCutoff) discard;
 
         vec3 normal = normalFromTexture(varyings);
+        float metallic = metallicSmoothness.r * material_Metallic;
+        float roughness = 1.0 - metallicSmoothness.a * (1.0 - material_Roughness);
+        #ifdef MATERIAL_SURFACE_COVERAGE
+          vec3 vertexNormal;
+          vec3 tangent;
+          vec3 bitangent;
+          surfaceBasis(varyings, vertexNormal, tangent, bitangent);
+          float overlayNormal = mix(
+            normal.y,
+            vertexNormal.y,
+            float(material_CoverageOverlayMethod)
+          );
+          float offsetNormal = overlayNormal + (1.0 - material_CoverageOffset);
+          float slopeCoverage = mix(
+            offsetNormal,
+            1.0 - offsetNormal,
+            material_CoverageBalance
+          );
+          float maskSample = texture2D(
+            material_CoverageMask,
+            varyings.uv * material_CoverageMaskTiling
+          ).g;
+          float contrastMask = mix(
+            1.0 - maskSample,
+            maskSample,
+            material_CoverageMaskContrast
+          );
+          float coverageMask = clamp(slopeCoverage * clamp(contrastMask, 0.0, 1.0), 0.0, 1.0);
+          vec4 coverageColor = sampleTriplanarColor(
+            material_CoverageAlbedo,
+            varyings.worldPosition,
+            vertexNormal,
+            material_CoverageTiling
+          );
+          vec4 coverageMetallicSmoothness = sampleTriplanarLinear(
+            material_CoverageMetallicSmoothness,
+            varyings.worldPosition,
+            vertexNormal,
+            material_CoverageTiling
+          );
+          baseColor.rgb = mix(
+            baseColor.rgb,
+            material_CoverageColor.rgb * coverageColor.rgb * varyings.instanceColor.rgb,
+            coverageMask
+          );
+          float coverageSmoothness = mix(
+            coverageMetallicSmoothness.a,
+            coverageColor.a,
+            float(material_CoverageSmoothnessSource)
+          ) * (1.0 - material_CoverageRoughness);
+          metallic = mix(
+            metallic,
+            coverageMetallicSmoothness.r * material_CoverageMetallic,
+            coverageMask
+          );
+          roughness = 1.0 - mix(1.0 - roughness, coverageSmoothness, coverageMask);
+
+          vec3 baseTangentNormal = unpackNormal(
+            texture2D(material_Normal, varyings.uv),
+            material_NormalScale
+          );
+          vec3 coverageWorldNormal = sampleTriplanarNormal(varyings.worldPosition, vertexNormal);
+          vec3 coverageTangentNormal = vec3(
+            dot(tangent, coverageWorldNormal),
+            dot(bitangent, coverageWorldNormal),
+            dot(vertexNormal, coverageWorldNormal)
+          );
+          vec3 blendedTangentNormal = mix(
+            blendNormals(baseTangentNormal, coverageTangentNormal),
+            coverageTangentNormal,
+            1.0 - material_CoverageNormalBlending
+          );
+          normal = tangentToWorld(
+            normalize(mix(baseTangentNormal, blendedTangentNormal, coverageMask)),
+            vertexNormal,
+            tangent,
+            bitangent
+          );
+        #endif
         vec4 outputColor;
         if (material_DebugView == 1) {
           outputColor = vec4(normal * 0.5 + 0.5, 1.0);
         } else {
           outputColor = vec4(
-            shadeSurface(varyings, baseColor.rgb, normal, metallicSmoothness, occlusion),
+            shadeSurface(varyings, baseColor.rgb, normal, metallic, roughness, occlusion),
             baseColor.a
           );
           #if SCENE_FOG_MODE != 0
@@ -527,6 +790,12 @@ Shader "Terrain/Surface" {
         return value + 2.0 * cross(rotation.xyz, cross(rotation.xyz, value) + rotation.w * value);
       }
 
+      void billboardBasis(out vec3 right, out vec3 up, out vec3 forward) {
+        right = normalize(vec3(camera_ViewMat[0][0], camera_ViewMat[1][0], camera_ViewMat[2][0]));
+        up = vec3(0.0, 1.0, 0.0);
+        forward = -normalize(vec3(camera_ViewMat[0][2], camera_ViewMat[1][2], camera_ViewMat[2][2]));
+      }
+
       float windWeight(Attributes attributes) {
         #ifdef RENDERER_ENABLE_VERTEXCOLOR
           return attributes.COLOR_0.r;
@@ -538,6 +807,25 @@ Shader "Terrain/Surface" {
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal) {
         vec3 prototypePosition = renderer_SurfaceLocalPosition +
           rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
+        #ifdef RENDERER_SURFACE_BILLBOARD
+          vec3 billboardRight;
+          vec3 billboardUp;
+          vec3 billboardForward;
+          billboardBasis(billboardRight, billboardUp, billboardForward);
+          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+          vec3 localNormal = normalize(
+            attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
+          );
+          vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            billboardRight * scaledPosition.x +
+            billboardUp * scaledPosition.y +
+            billboardForward * scaledPosition.z;
+          worldNormal = normalize(
+            billboardRight * localNormal.x +
+            billboardUp * localNormal.y +
+            billboardForward * localNormal.z
+          );
+        #else
         vec3 worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
           rotateByQuaternion(prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz, attributes.INSTANCE_ROTATION);
         worldNormal = normalize(
@@ -549,6 +837,7 @@ Shader "Terrain/Surface" {
             attributes.INSTANCE_ROTATION
           )
         );
+        #endif
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
             attributes.INSTANCE_SCALE_WIND.w;
