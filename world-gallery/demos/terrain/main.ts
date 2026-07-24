@@ -11,7 +11,6 @@ import {
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
-import { Stats } from "@galacean/engine-toolkit-stats";
 import { TerrainClipmap } from "./src/clipmap/TerrainClipmap";
 import { TerrainMaterial, type TerrainLayerTuning, type TerrainMaterialTuning } from "./src/TerrainMaterial";
 import {
@@ -29,6 +28,7 @@ import {
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
 import { TerrainWaterDebug } from "./src/debug/TerrainWaterDebug";
+import { TerrainFirstPersonController, type TerrainFirstPersonPose } from "./src/TerrainFirstPersonController";
 import { loadLayerTextures } from "./src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
 import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader";
@@ -58,12 +58,7 @@ export {
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
 
-interface CameraPose {
-  position: readonly [x: number, y: number, z: number];
-  target: readonly [x: number, y: number, z: number];
-}
-
-const CAMERA_POSES: Record<TerrainCameraPoseName, CameraPose> = {
+const STATIC_CAMERA_POSES = {
   overview: {
     position: [1740, 1120, 1580],
     target: [512, 35, -512]
@@ -101,6 +96,21 @@ const CAMERA_POSES: Record<TerrainCameraPoseName, CameraPose> = {
     target: [1024, 0, -1536]
   }
 };
+
+const CAMERA_POSES = {
+  "first-person": true,
+  ...STATIC_CAMERA_POSES
+} as const;
+
+const FIRST_PERSON_POSE: TerrainFirstPersonPose = {
+  x: 600,
+  z: -104,
+  // Matches the sunward opening visible from the overview pose in terrain-sky.ambLight.
+  yaw: 0.26,
+  pitch: 0.12
+};
+
+type StaticCameraPoseName = Exclude<TerrainCameraPoseName, "first-person">;
 
 const status = document.querySelector<HTMLDivElement>("#status");
 const backendSelector = document.querySelector<HTMLSelectElement>("#backend");
@@ -159,6 +169,9 @@ async function boot(): Promise<void> {
     loadLayerTextures(engine, manifest.layers, manifestUrl),
     loadMacroNoiseTexture(engine, new URL(manifest.material.macroVariation.noiseTexture, manifestUrl).href)
   ]);
+  const firstPerson = cameraEntity.addComponent(TerrainFirstPersonController);
+  firstPerson.configure(terrainData);
+  let freeControl: FreeControl | null = applyTerrainCameraPose(cameraEntity, orbit, firstPerson, null, "first-person");
 
   const detailedMaterial = new TerrainMaterial(engine);
   const simplifiedMaterial = new TerrainMaterial(engine);
@@ -212,10 +225,18 @@ async function boot(): Promise<void> {
     },
     setPose(pose) {
       if (!Object.hasOwn(CAMERA_POSES, pose)) throw new Error(`[terrain-debug] unknown pose ${pose}`);
-      cameraControl.destroy();
-      cameraControl = pose === "first-person" ? createFreeControl(cameraEntity) : createOrbitControl(cameraEntity);
-      applyCameraPose(cameraEntity, pose);
+      freeControl = applyTerrainCameraPose(cameraEntity, orbit, firstPerson, freeControl, pose);
       clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    getFirstPerson() {
+      return firstPerson.snapshot;
+    },
+    setFirstPersonEyeHeight(height) {
+      firstPerson.setEyeHeight(height);
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    setFirstPersonMoveSpeed(speed) {
+      firstPerson.setMoveSpeed(speed);
     },
     setDebugLayer(layer) {
       for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugLayer(layer);
@@ -361,130 +382,31 @@ async function boot(): Promise<void> {
   );
 }
 
-function resolveBackend(): TerrainBackend {
-  return new URLSearchParams(location.search).get("backend") === "webgpu"
-    ? "webgpu"
-    : "webgl2";
-}
-
-async function registerTerrainShader(engine: Engine, backend: TerrainBackend): Promise<TerrainShaderStartupSnapshot> {
-  const target = backend === "webgpu" ? ShaderLanguage.WGSL : ShaderLanguage.GLSLES100;
-  const useRuntimeCompiler = new URLSearchParams(location.search).get("shader") === "runtime";
-
-  if (useRuntimeCompiler) {
-    const sourceLoadStarted = performance.now();
-    const { default: terrainShaderSource } = await import("./src/shaders/Terrain.shader?raw");
-    const runtimeSourceLoadMs = performance.now() - sourceLoadStarted;
-    const registrationStarted = performance.now();
-    Shader.create(terrainShaderSource);
-    return {
-      mode: "runtime",
-      platforms: [target === ShaderLanguage.WGSL ? "wgsl" : "gles100"],
-      registrationMs: performance.now() - registrationStarted,
-      runtimeSourceLoadMs
-    };
+function applyTerrainCameraPose(
+  cameraEntity: Entity,
+  orbit: OrbitControl,
+  firstPerson: TerrainFirstPersonController,
+  freeControl: FreeControl | null,
+  poseName: TerrainCameraPoseName
+): FreeControl | null {
+  if (poseName === "first-person") {
+    orbit.enabled = false;
+    firstPerson.enter(FIRST_PERSON_POSE);
+    freeControl?.destroy();
+    const nextFreeControl = cameraEntity.addComponent(FreeControl);
+    firstPerson.setFreeControl(nextFreeControl);
+    return nextFreeControl;
   }
-
-  const registrationStarted = performance.now();
-  await engine.resourceManager.load({
-    url: new URL("/compiledShaders/terrain/Terrain.shaderc", location.origin).href,
-    type: AssetType.Shader
-  });
-  return {
-    mode: "precompiled",
-    platforms: [shaderPlatformName(target)],
-    registrationMs: performance.now() - registrationStarted
-  };
+  firstPerson.exit();
+  firstPerson.setFreeControl(null);
+  freeControl?.destroy();
+  orbit.enabled = true;
+  applyCameraPose(cameraEntity, orbit, poseName);
+  return null;
 }
 
-function shaderPlatformName(target: number): "gles100" | "wgsl" {
-  if (target === ShaderLanguage.GLSLES100) return "gles100";
-  if (target === ShaderLanguage.WGSL) return "wgsl";
-  throw new Error(`[terrain] unsupported compiled shader target: ${target}`);
-}
-
-function configureBackendSelector(backend: TerrainBackend): void {
-  if (!backendSelector) {
-    return;
-  }
-  backendSelector.value = backend;
-  backendSelector.addEventListener("change", () => {
-    const url = new URL(location.href);
-    url.searchParams.set("backend", backendSelector.value);
-    location.href = url.href;
-  });
-}
-
-function installStatsPanelStyle(): void {
-  const style = document.createElement("style");
-  style.textContent = `
-    body .gl-perf {
-      top: auto;
-      bottom: 12px;
-      left: 12px;
-      z-index: 10;
-      min-width: 156px;
-      padding: 9px 11px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      border-radius: 4px;
-      background: rgba(12, 15, 18, 0.82);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
-      color: #f3f5f7;
-      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    }
-
-    body .gl-perf dl {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 3px 14px;
-    }
-
-    body .gl-perf dt,
-    body .gl-perf dd {
-      color: inherit;
-      font-size: 11px;
-      line-height: 1.35;
-    }
-
-    body .gl-perf dd {
-      padding: 0;
-      text-align: right;
-      color: #76d6a5;
-      font-variant-numeric: tabular-nums;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function configureStatsForDiagnostics(stats: Stats): void {
-  const configure = () => {
-    const core = (stats as unknown as { monitor?: { core?: { samplingFrames: number } } }).monitor?.core;
-    if (!core) {
-      requestAnimationFrame(configure);
-      return;
-    }
-    // The toolkit defers its first sample for 60 seconds; diagnostics need live values.
-    core.samplingFrames = 0;
-  };
-  requestAnimationFrame(configure);
-}
-
-function createOrbitControl(cameraEntity: Entity): OrbitControl {
-  const control = cameraEntity.addComponent(OrbitControl);
-  control.minDistance = 20;
-  control.maxDistance = 10000;
-  return control;
-}
-
-function createFreeControl(cameraEntity: Entity): FreeControl {
-  const control = cameraEntity.addComponent(FreeControl);
-  control.movementSpeed = 8;
-  control.floorMock = false;
-  return control;
-}
-
-function applyCameraPose(cameraEntity: Entity, poseName: TerrainCameraPoseName): void {
-  const pose = CAMERA_POSES[poseName];
+function applyCameraPose(cameraEntity: Entity, orbit: OrbitControl, poseName: StaticCameraPoseName): void {
+  const pose = STATIC_CAMERA_POSES[poseName];
   cameraEntity.transform.setPosition(pose.position[0], pose.position[1], pose.position[2]);
   const target = new Vector3(pose.target[0], pose.target[1], pose.target[2]);
   cameraEntity.transform.lookAt(target);

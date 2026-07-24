@@ -568,149 +568,34 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
   expect(consoleErrors).toEqual([]);
 });
 
-function collectRuntimeErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      errors.push(`console: ${message.text()}`);
-    }
-  });
-  page.on("requestfailed", (request) => {
-    errors.push(`request: ${request.url()} ${request.failure()?.errorText ?? ""}`);
-  });
-  return errors;
-}
-
-async function measureTerrainShaderRegistration(
-  browser: Browser,
-  baseURL: string,
-  backend: "webgl2" | "webgpu",
-  shader: "precompiled" | "runtime"
-): Promise<TerrainShaderStartup> {
-  const page = await browser.newPage({ viewport: { width: 1024, height: 576 } });
-  const errors = collectRuntimeErrors(page);
-  const shaderQuery = shader === "runtime" ? "&shader=runtime" : "";
-  await page.goto(`${baseURL}/demos/terrain/index.html?backend=${backend}${shaderQuery}`);
+test("first-person camera follows the CPU heightfield", async ({ page }) => {
+  await page.goto("/demos/terrain/index.html");
   await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments");
-  const startup = await page.evaluate(() => window.terrainDebug!.getShaderStartup());
-  expect(errors).toEqual([]);
-  await page.close();
-  return startup;
-}
+  await expect(page.getByText("Ground clearance / 离地高度", { exact: true })).toBeVisible();
 
-async function captureBackendScene(
-  browser: Browser,
-  baseURL: string,
-  backend: "webgl2" | "webgpu"
-): Promise<{
-  screenshot: Buffer;
-  surface: ReturnType<NonNullable<Window["terrainDebug"]>["getSurface"]>;
-  errors: string[];
-  shaderArtifactRequests: string[];
-}> {
-  const page = await browser.newPage({ viewport: { width: 1024, height: 576 } });
-  const errors = collectRuntimeErrors(page);
-  const shaderArtifactRequests: string[] = [];
-  page.on("request", (request) => {
-    const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith(".shaderc") || pathname.endsWith(".wgslc")) {
-      shaderArtifactRequests.push(pathname.split("/").at(-1)!);
-    }
+  const initial = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
+  expect(initial.active).toBe(true);
+  expect(initial.eyeHeight).toBe(1.7);
+  expect(initial.moveSpeed).toBe(8);
+  expect(initial.groundHeight).toBeDefined();
+  expect(initial.position[1]).toBeCloseTo(initial.groundHeight! + 1.7, 5);
+
+  const adjusted = await page.evaluate(() => {
+    window.terrainDebug!.setFirstPersonEyeHeight(2.25);
+    window.terrainDebug!.setFirstPersonMoveSpeed(12);
+    return window.terrainDebug!.getFirstPerson();
   });
-  await page.goto(`${baseURL}/demos/terrain/index.html?backend=${backend}&pose=first-person`);
-  await expect(page.locator("#status")).toContainText(
-    `ready · 3 regions · 144 clipmap segments · 56 surface instances · ${backend}`
-  );
-  if (backend === "webgpu") {
-    expect(await page.evaluate(() => "gpu" in navigator)).toBe(true);
-  }
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-      )
-  );
-  await page.waitForTimeout(2000);
-  await page.addStyleTag({
-    content: "#status,#backend-control,.debug-inspector{display:none!important}"
-  });
-  const surface = await page.evaluate(() => window.terrainDebug!.getSurface());
-  const screenshot = await page.screenshot({ type: "png" });
-  await page.close();
-  return { screenshot, surface, errors, shaderArtifactRequests };
-}
+  expect(adjusted.eyeHeight).toBe(2.25);
+  expect(adjusted.moveSpeed).toBe(12);
+  expect(adjusted.position[1]).toBeCloseTo(adjusted.groundHeight! + 2.25, 5);
 
-async function compareScreenshots(
-  browser: Browser,
-  baseline: Buffer,
-  candidate: Buffer
-): Promise<{ meanAbsoluteError: number; largeDifferenceRatio: number }> {
-  const page = await browser.newPage();
-  const dataUrls = [baseline, candidate].map(
-    (image) => `data:image/png;base64,${image.toString("base64")}`
-  );
-  const result = await page.evaluate(async ([baselineUrl, candidateUrl]) => {
-    const loadImage = (source: string): Promise<HTMLImageElement> =>
-      new Promise((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = reject;
-        image.src = source;
-      });
-    const [baselineImage, candidateImage] = await Promise.all([
-      loadImage(baselineUrl),
-      loadImage(candidateUrl)
-    ]);
-    if (
-      baselineImage.width !== candidateImage.width ||
-      baselineImage.height !== candidateImage.height
-    ) {
-      throw new Error("Backend screenshots have different dimensions.");
-    }
-
-    const canvas = new OffscreenCanvas(baselineImage.width, baselineImage.height);
-    const context = canvas.getContext("2d")!;
-    context.drawImage(baselineImage, 0, 0);
-    const baselinePixels = context.getImageData(
-      0,
-      0,
-      baselineImage.width,
-      baselineImage.height
-    ).data;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(candidateImage, 0, 0);
-    const candidatePixels = context.getImageData(
-      0,
-      0,
-      candidateImage.width,
-      candidateImage.height
-    ).data;
-
-    let absoluteError = 0;
-    let largeDifferencePixels = 0;
-    const pixelCount = baselinePixels.length / 4;
-    for (let offset = 0; offset < baselinePixels.length; offset += 4) {
-      let maximumChannelDifference = 0;
-      for (let channel = 0; channel < 3; channel++) {
-        const difference = Math.abs(
-          baselinePixels[offset + channel] - candidatePixels[offset + channel]
-        );
-        absoluteError += difference;
-        maximumChannelDifference = Math.max(maximumChannelDifference, difference);
-      }
-      if (maximumChannelDifference > 20) {
-        largeDifferencePixels++;
-      }
-    }
-    return {
-      meanAbsoluteError: absoluteError / (pixelCount * 3),
-      largeDifferenceRatio: largeDifferencePixels / pixelCount
-    };
-  }, dataUrls);
-  await page.close();
-  return result;
-}
+  await page.keyboard.down("KeyW");
+  await page.waitForTimeout(180);
+  await page.keyboard.up("KeyW");
+  const moved = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
+  expect(moved.position[0]).not.toBe(initial.position[0]);
+  expect(moved.position[1]).toBeCloseTo(moved.groundHeight! + 2.25, 5);
+});
 
 async function installShaderDiagnostics(page: Page): Promise<void> {
   await page.addInitScript(() => {
