@@ -63,6 +63,9 @@ export interface GrasslandsCloudTuning {
 
 /** Read-only cloud batching and animation diagnostics. */
 export interface GrasslandsCloudSnapshot extends GrasslandsCloudTuning {
+  /** Cloud emitters authored in the Unity scene before terrain-clearance classification. */
+  readonly authoredInstances: number;
+  /** Emitters classified as sky clouds and submitted by this renderer. */
   readonly instances: number;
   readonly drawGroups: number;
   readonly time: number;
@@ -75,7 +78,9 @@ export class GrasslandsCloudSystem {
   readonly root: Entity;
 
   private readonly _materials: GrasslandsCloudMaterial[];
+  private readonly _authoredInstances: number;
   private readonly _instances: number;
+  private readonly _drawGroups: number;
   private readonly _animator: GrasslandsCloudAnimator;
   private _visible = true;
   private _animation = true;
@@ -83,12 +88,16 @@ export class GrasslandsCloudSystem {
   private constructor(
     root: Entity,
     materials: GrasslandsCloudMaterial[],
+    authoredInstances: number,
     instances: number,
+    drawGroups: number,
     animator: GrasslandsCloudAnimator
   ) {
     this.root = root;
     this._materials = materials;
+    this._authoredInstances = authoredInstances;
     this._instances = instances;
+    this._drawGroups = drawGroups;
     this._animator = animator;
   }
 
@@ -99,6 +108,7 @@ export class GrasslandsCloudSystem {
    * @param presets Exact exported Unity particle settings.
    * @param placements Authored emitter transforms and deterministic seeds.
    * @param layoutUrl URL used to resolve preset textures.
+   * @param sampleTerrainHeight Returns terrain height for classifying sky clouds versus valley mist.
    * @returns Ready cloud renderer and runtime diagnostics.
    */
   static async create(
@@ -106,15 +116,21 @@ export class GrasslandsCloudSystem {
     parent: Entity,
     presets: readonly GrasslandsCloudPresetSpec[],
     placements: readonly GrasslandsCloudPlacementSpec[],
-    layoutUrl: string
+    layoutUrl: string,
+    sampleTerrainHeight: (worldX: number, worldZ: number) => number | undefined
   ): Promise<GrasslandsCloudSystem> {
     const root = parent.createChild("grasslands-clouds");
+    const skyPlacements = placements.filter((placement) =>
+      isSkyCloudPlacement(placement, presets[placement.preset], sampleTerrainHeight)
+    );
     const materials = await Promise.all(
       presets.map((preset) => GrasslandsCloudMaterial.create(engine, preset, layoutUrl))
     );
+    let drawGroups = 0;
     for (let presetIndex = 0; presetIndex < presets.length; presetIndex++) {
-      const instances = placements.filter((placement) => placement.preset === presetIndex);
+      const instances = skyPlacements.filter((placement) => placement.preset === presetIndex);
       if (instances.length === 0) continue;
+      drawGroups++;
       const entity = root.createChild(`cloud-preset-${presetIndex + 1}`);
       const renderer = entity.addComponent(MeshRenderer);
       renderer.mesh = createCloudMesh(engine, presetIndex, presets[presetIndex], instances);
@@ -124,7 +140,14 @@ export class GrasslandsCloudSystem {
     }
     const animator = root.addComponent(GrasslandsCloudAnimator);
     animator.materials = materials;
-    return new GrasslandsCloudSystem(root, materials, placements.length, animator);
+    return new GrasslandsCloudSystem(
+      root,
+      materials,
+      placements.length,
+      skyPlacements.length,
+      drawGroups,
+      animator
+    );
   }
 
   /**
@@ -147,11 +170,23 @@ export class GrasslandsCloudSystem {
     return {
       visible: this._visible,
       animation: this._animation,
+      authoredInstances: this._authoredInstances,
       instances: this._instances,
-      drawGroups: this._materials.length,
+      drawGroups: this._drawGroups,
       time: this._animator.time
     };
   }
+}
+
+function isSkyCloudPlacement(
+  placement: GrasslandsCloudPlacementSpec,
+  preset: GrasslandsCloudPresetSpec,
+  sampleTerrainHeight: (worldX: number, worldZ: number) => number | undefined
+): boolean {
+  const terrainHeight = sampleTerrainHeight(placement.position[0], placement.position[2]);
+  if (terrainHeight === undefined) return true;
+  const renderedHeight = preset.size[1] * Math.abs(placement.scale[1]);
+  return placement.position[1] - terrainHeight >= renderedHeight;
 }
 
 class GrasslandsCloudMaterial extends BaseMaterial {

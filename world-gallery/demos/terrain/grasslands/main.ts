@@ -217,7 +217,8 @@ async function boot(): Promise<void> {
     root,
     sceneLayout.environment.cloudPresets,
     sceneLayout.clouds,
-    sceneLayoutUrl.href
+    sceneLayoutUrl.href,
+    (worldX, worldZ) => terrainData.sampleHeightInterpolated(worldX, worldZ)
   );
   window.grasslandsDebug = {
     ready: true,
@@ -264,7 +265,7 @@ async function boot(): Promise<void> {
   const snapshot = surfaceWorld.inspect();
   setStatus(
     `ready · 9 terrain tiles · ${snapshot.totalInstances.toLocaleString()} surface instances · ` +
-      `${architecture.placements} architecture placements · ${clouds.inspect().instances} clouds`
+      `${architecture.placements} architecture placements · ${clouds.inspect().instances} sky clouds`
   );
 }
 
