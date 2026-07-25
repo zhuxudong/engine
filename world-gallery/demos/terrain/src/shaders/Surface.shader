@@ -86,6 +86,7 @@ Shader "Terrain/Surface" {
       float material_WindWavesScale;
       float material_WindFlowDensity;
       int material_WindBaseLock;
+      int material_WindBaseLockUvInverted;
       int material_WindEnabled;
       vec3 material_WindDirection;
       float material_GlobalWindForce;
@@ -314,7 +315,10 @@ Shader "Terrain/Surface" {
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
-          float rootLock = material_WindBaseLock != 0 ? pow(max(attributes.TEXCOORD_0.y, 0.0), 1.5) : 1.0;
+          float baseUv = material_WindBaseLockUvInverted != 0
+            ? 1.0 - attributes.TEXCOORD_0.y
+            : attributes.TEXCOORD_0.y;
+          float rootLock = material_WindBaseLock != 0 ? pow(clamp(baseUv, 0.0, 1.0), 1.5) : 1.0;
           worldPosition += material_WindDirection *
             (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
         }
@@ -742,6 +746,7 @@ Shader "Terrain/Surface" {
       float material_WindWavesScale;
       float material_WindFlowDensity;
       int material_WindBaseLock;
+      int material_WindBaseLockUvInverted;
       int material_WindEnabled;
       vec3 material_WindDirection;
       float material_GlobalWindForce;
@@ -894,7 +899,10 @@ Shader "Terrain/Surface" {
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
-          float rootLock = material_WindBaseLock != 0 ? pow(max(attributes.TEXCOORD_0.y, 0.0), 1.5) : 1.0;
+          float baseUv = material_WindBaseLockUvInverted != 0
+            ? 1.0 - attributes.TEXCOORD_0.y
+            : attributes.TEXCOORD_0.y;
+          float rootLock = material_WindBaseLock != 0 ? pow(clamp(baseUv, 0.0, 1.0), 1.5) : 1.0;
           worldPosition += material_WindDirection *
             (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
         }

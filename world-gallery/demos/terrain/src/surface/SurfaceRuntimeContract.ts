@@ -45,6 +45,8 @@ export interface SurfaceMaterialSpec {
     readonly wavesScale: number;
     readonly flowDensity: number;
     readonly baseLock: boolean;
+    /** Whether the imported mesh flipped source UV.y while converting to glTF. */
+    readonly baseLockUvInverted: boolean;
   };
   readonly colorVariation: {
     readonly enabled: boolean;

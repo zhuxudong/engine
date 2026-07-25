@@ -54,6 +54,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _windWavesScale = ShaderProperty.getByName("material_WindWavesScale");
   private static readonly _windFlowDensity = ShaderProperty.getByName("material_WindFlowDensity");
   private static readonly _windBaseLock = ShaderProperty.getByName("material_WindBaseLock");
+  private static readonly _windBaseLockUvInverted = ShaderProperty.getByName("material_WindBaseLockUvInverted");
   private static readonly _windEnabled = ShaderProperty.getByName("material_WindEnabled");
   private static readonly _windDirection = ShaderProperty.getByName("material_WindDirection");
   private static readonly _globalWindForce = ShaderProperty.getByName("material_GlobalWindForce");
@@ -131,6 +132,10 @@ export class SurfaceMaterial extends BaseMaterial {
     this.shaderData.setFloat(SurfaceMaterial._windWavesScale, spec.wind.wavesScale);
     this.shaderData.setFloat(SurfaceMaterial._windFlowDensity, spec.wind.flowDensity);
     this.shaderData.setInt(SurfaceMaterial._windBaseLock, spec.wind.baseLock ? 1 : 0);
+    this.shaderData.setInt(
+      SurfaceMaterial._windBaseLockUvInverted,
+      spec.wind.baseLockUvInverted ? 1 : 0
+    );
     this.shaderData.setInt(SurfaceMaterial._windEnabled, spec.wind.enabled ? 1 : 0);
     this.shaderData.setFloat(SurfaceMaterial._globalWindForce, 1);
     this.shaderData.setFloat(SurfaceMaterial._globalWavesScale, 1);

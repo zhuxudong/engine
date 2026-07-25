@@ -12098,7 +12098,8 @@
         "force": 0,
         "wavesScale": 1,
         "flowDensity": 1,
-        "baseLock": false
+        "baseLock": false,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": false,
@@ -12147,7 +12148,8 @@
         "force": 0,
         "wavesScale": 1,
         "flowDensity": 1,
-        "baseLock": false
+        "baseLock": false,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": false,
@@ -12195,7 +12197,8 @@
         "force": 0.30000001192092896,
         "wavesScale": 0.75,
         "flowDensity": 1,
-        "baseLock": false
+        "baseLock": false,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": true,
@@ -12243,7 +12246,8 @@
         "force": 0.11999999731779099,
         "wavesScale": 0.15000000596046448,
         "flowDensity": 1,
-        "baseLock": false
+        "baseLock": false,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": true,
@@ -12292,7 +12296,8 @@
         "force": 0.20000000298023224,
         "wavesScale": 0.5,
         "flowDensity": 1,
-        "baseLock": true
+        "baseLock": true,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": true,
@@ -12340,7 +12345,8 @@
         "force": 0.25,
         "wavesScale": 0.30000001192092896,
         "flowDensity": 1,
-        "baseLock": true
+        "baseLock": true,
+        "baseLockUvInverted": true
       },
       "colorVariation": {
         "enabled": true,
