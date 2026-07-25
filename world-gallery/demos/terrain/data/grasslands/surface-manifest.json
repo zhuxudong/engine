@@ -28226,7 +28226,8 @@
       "metallic": 0,
       "occlusionStrength": 1,
       "albedo": "./textures/surface/fake-tree-albedo.png",
-      "normal": "./textures/surface/fake-tree-normal.png"
+      "normal": "./textures/surface/fake-tree-normal.png",
+      "translucencyModel": "none"
     },
     {
       "id": "clif-1",
@@ -28253,18 +28254,26 @@
       "coverage": {
         "albedo": "./textures/terrain/grass-albedosmoothness.png",
         "normal": "./textures/terrain/grass-normal.png",
-        "color": [0.9799999594688416, 0.9799999594688416, 0.9799999594688416, 0],
+        "color": [
+          0.955104509467994,
+          0.955104509467994,
+          0.955104509467994,
+          0
+        ],
         "tiling": 0.5,
         "normalScale": 1,
         "metallic": 0,
         "roughness": 0,
         "smoothnessSource": "albedo-alpha",
         "overlayMethod": "perturbed-normal",
-        "offset": 1.2000000476837159,
+        "offset": 1.2000000476837158,
         "balance": -2,
         "maskContrast": 1,
         "normalBlending": 1,
-        "maskTiling": [1, 1]
+        "maskTiling": [
+          1,
+          1
+        ]
       },
       "wind": {
         "enabled": false,
@@ -28292,7 +28301,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-2",
@@ -28319,18 +28329,26 @@
       "coverage": {
         "albedo": "./textures/terrain/grass-albedosmoothness.png",
         "normal": "./textures/terrain/grass-normal.png",
-        "color": [0.9799999594688416, 0.9799999594688416, 0.9799999594688416, 0],
+        "color": [
+          0.955104509467994,
+          0.955104509467994,
+          0.955104509467994,
+          0
+        ],
         "tiling": 0.5,
         "normalScale": 1,
         "metallic": 0,
         "roughness": 0,
         "smoothnessSource": "albedo-alpha",
         "overlayMethod": "perturbed-normal",
-        "offset": 1.2000000476837159,
+        "offset": 1.2000000476837158,
         "balance": -2,
         "maskContrast": 1,
         "normalBlending": 1,
-        "maskTiling": [1, 1]
+        "maskTiling": [
+          1,
+          1
+        ]
       },
       "wind": {
         "enabled": false,
@@ -28358,7 +28376,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-2-no-grass",
@@ -28408,7 +28427,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-2-sand",
@@ -28435,7 +28455,12 @@
       "coverage": {
         "albedo": "./textures/terrain/sand-albedosmoothness.png",
         "normal": "./textures/terrain/sand-normal.png",
-        "color": [1, 1, 1, 0],
+        "color": [
+          1,
+          1,
+          1,
+          0
+        ],
         "tiling": 0.5,
         "normalScale": 1,
         "metallic": 0,
@@ -28446,7 +28471,10 @@
         "balance": -5,
         "maskContrast": 1,
         "normalBlending": 0.8360000252723694,
-        "maskTiling": [1, 1]
+        "maskTiling": [
+          1,
+          1
+        ]
       },
       "wind": {
         "enabled": false,
@@ -28474,7 +28502,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-3",
@@ -28501,7 +28530,12 @@
       "coverage": {
         "albedo": "./textures/terrain/grass-albedosmoothness.png",
         "normal": "./textures/terrain/grass-normal.png",
-        "color": [0.9799999594688416, 0.9799999594688416, 0.9799999594688416, 0],
+        "color": [
+          0.955104509467994,
+          0.955104509467994,
+          0.955104509467994,
+          0
+        ],
         "tiling": 0.5,
         "normalScale": 1,
         "metallic": 0,
@@ -28512,7 +28546,10 @@
         "balance": -2,
         "maskContrast": 1,
         "normalBlending": 1,
-        "maskTiling": [1, 1]
+        "maskTiling": [
+          1,
+          1
+        ]
       },
       "wind": {
         "enabled": false,
@@ -28540,7 +28577,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-3-no-grass",
@@ -28590,7 +28628,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "clif-3-sand",
@@ -28617,7 +28656,12 @@
       "coverage": {
         "albedo": "./textures/terrain/sand-albedosmoothness.png",
         "normal": "./textures/terrain/sand-normal.png",
-        "color": [1, 1, 1, 0],
+        "color": [
+          1,
+          1,
+          1,
+          0
+        ],
         "tiling": 0.5,
         "normalScale": 1,
         "metallic": 0,
@@ -28628,7 +28672,10 @@
         "balance": -5,
         "maskContrast": 1,
         "normalBlending": 0.800000011920929,
-        "maskTiling": [1, 1]
+        "maskTiling": [
+          1,
+          1
+        ]
       },
       "wind": {
         "enabled": false,
@@ -28656,7 +28703,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 0.4000000059604645
+      "occlusionStrength": 0.4000000059604645,
+      "translucencyModel": "none"
     },
     {
       "id": "ore",
@@ -28705,7 +28753,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 1,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "small-stones",
@@ -28754,7 +28803,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 1,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "stone-12",
@@ -28803,7 +28853,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 1,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "stone-34",
@@ -28852,7 +28903,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 1,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "stone-56",
@@ -28901,7 +28953,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 1,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "stones-789",
@@ -28950,7 +29003,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "birch-bark",
@@ -28958,9 +29012,9 @@
       "albedo": "./textures/surface/birch-bark.png",
       "normal": "./textures/surface/birch-bark-normal.png",
       "baseColor": [
-        0.8009999990463257,
-        0.8009999990463257,
-        0.8009999990463257,
+        0.6055236790678329,
+        0.6055236790678329,
+        0.6055236790678329,
         1
       ],
       "secondColor": [
@@ -28998,7 +29052,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "birch-leaves",
@@ -29006,14 +29061,14 @@
       "albedo": "./textures/surface/broadleaf-leaves.png",
       "baseColor": [
         1,
-        0.5796575546264648,
-        0.08018868416547775,
+        0.29531723023748574,
+        0.007218565725914098,
         0
       ],
       "secondColor": [
-        0.8510000109672546,
-        0.7994242310523987,
-        0.0847315862774849,
+        0.6939078233833709,
+        0.6028518970015864,
+        0.007814498484288435,
         0
       ],
       "alphaCutoff": 0.20000000298023224,
@@ -29037,30 +29092,31 @@
       "translucency": 0.6000000238418579,
       "translucencyColor": [
         1,
-        0.9487783312797546,
-        0.6367924213409424,
+        0.8874110983958642,
+        0.36319178507856203,
         0
       ],
       "fadeDistance": 1,
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "birch-leaves-2",
       "kind": "vegetation",
       "albedo": "./textures/surface/birch-leaves-small.png",
       "baseColor": [
-        0.7380000352859497,
-        0.5872562527656555,
-        0.08702827244997025,
+        0.5040223475743462,
+        0.30387440080460204,
+        0.008126314532152944,
         0
       ],
       "secondColor": [
-        0.8867924213409424,
-        0.45661771297454834,
-        0.26352789998054504,
+        0.7615291921606779,
+        0.17606112381279682,
+        0.05646093228235119,
         0
       ],
       "alphaCutoff": 0.20000000298023224,
@@ -29092,7 +29148,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "broadleaf-bark",
@@ -29100,9 +29157,9 @@
       "albedo": "./textures/surface/broadleaf-bark-albedo.png",
       "normal": "./textures/surface/broadleaf-bark-normal.png",
       "baseColor": [
-        0.6449999809265137,
-        0.5342023968696594,
-        0.48276060819625854,
+        0.3736193534118003,
+        0.24707505948195624,
+        0.19843015152068508,
         1
       ],
       "secondColor": [
@@ -29140,7 +29197,8 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "none"
     },
     {
       "id": "broadleaf-branches",
@@ -29148,9 +29206,9 @@
       "albedo": "./textures/surface/branch-albedo.png",
       "normal": "./textures/surface/branch-normal.png",
       "baseColor": [
-        0.6469999551773071,
-        0.5149591565132141,
-        0.46214282512664795,
+        0.376186407519874,
+        0.22814925821148757,
+        0.1806588767187477,
         0
       ],
       "secondColor": [
@@ -29188,22 +29246,23 @@
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "broadleaf-leaves",
       "kind": "vegetation",
       "albedo": "./textures/surface/broadleaf-leaves.png",
       "baseColor": [
-        0.22124993801116943,
-        0.47999995946884155,
-        0.19124993681907654,
+        0.04011615965489428,
+        0.1959941436654326,
+        0.030443655824741615,
         0
       ],
       "secondColor": [
-        0.33478808403015137,
-        0.5254902243614197,
-        0.13137251138687134,
+        0.09166058762520643,
+        0.2383976016891078,
+        0.015599495554151712,
         0
       ],
       "alphaCutoff": 0.20000000298023224,
@@ -29226,29 +29285,30 @@
       "lightingFlatness": 0.20000000298023224,
       "translucency": 0.4000000059604645,
       "translucencyColor": [
-        0.5935717821121216,
+        0.311095275640875,
         1,
-        0.551886796951294,
+        0.26524826468618723,
         0
       ],
       "fadeDistance": 1,
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "bush",
       "kind": "vegetation",
       "albedo": "./textures/surface/bush-leaves.png",
       "baseColor": [
-        0.13725489377975464,
-        0.45882344245910645,
-        0.1844245195388794,
+        0.016807374036395775,
+        0.17788834373531237,
+        0.028457634416592766,
         0
       ],
       "secondColor": [
-        0.7153458595275879,
+        0.47015374870966986,
         1,
         0,
         0
@@ -29273,16 +29333,17 @@
       "lightingFlatness": 0.5,
       "translucency": 0.20000000298023224,
       "translucencyColor": [
-        0.5904762744903564,
+        0.307543659499532,
         1,
-        0.5,
+        0.21404114048223255,
         0
       ],
       "fadeDistance": 1,
       "fadeFalloff": 1,
       "fadeEnabled": false,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "flowers-1",
@@ -29290,14 +29351,14 @@
       "albedo": "./textures/surface/flowers-1.png",
       "normal": "./textures/surface/flowers-1-normal.png",
       "baseColor": [
-        0.09339150041341782,
-        0.5098038911819458,
-        0.07450977712869644,
+        0.009027671748288535,
+        0.22322792849339698,
+        0.006512087559277722,
         0
       ],
       "secondColor": [
-        0.9699646830558777,
-        0.14899995923042297,
+        0.9330296819705113,
+        0.019377881260097495,
         1,
         0
       ],
@@ -29330,7 +29391,8 @@
       "fadeFalloff": 0.800000011920929,
       "fadeEnabled": true,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "flowers-2",
@@ -29338,15 +29400,15 @@
       "albedo": "./textures/surface/flowers-2.png",
       "normal": "./textures/surface/flowers-2-normal.png",
       "baseColor": [
-        0.800000011920929,
-        0.7036649584770203,
-        0.1591622531414032,
+        0.6038273590607633,
+        0.4532253126800397,
+        0.021775950587304412,
         0
       ],
       "secondColor": [
         1,
-        0.13679245114326477,
-        0.5260823965072632,
+        0.016710510583619134,
+        0.23898168694610503,
         0
       ],
       "alphaCutoff": 0.20000000298023224,
@@ -29378,22 +29440,23 @@
       "fadeFalloff": 0.800000011920929,
       "fadeEnabled": true,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "grass-2",
       "kind": "vegetation",
       "albedo": "./textures/surface/grass-color.png",
       "baseColor": [
-        0.15686270594596863,
-        0.5215685963630676,
-        0.18753081560134888,
+        0.02121900096498889,
+        0.23455055180893644,
+        0.02935179883447671,
         0
       ],
       "secondColor": [
-        0.38058915734291077,
-        0.6313725709915161,
-        0.18823522329330444,
+        0.11966827830243464,
+        0.35640017152742826,
+        0.02955681378281677,
         0
       ],
       "alphaCutoff": 0.30000001192092896,
@@ -29425,7 +29488,8 @@
       "fadeFalloff": 0.800000011920929,
       "fadeEnabled": true,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     },
     {
       "id": "grass-3",
@@ -29433,14 +29497,14 @@
       "albedo": "./textures/surface/grass-3.png",
       "normal": "./textures/surface/grass-3-normal.png",
       "baseColor": [
-        0.09411760419607162,
-        0.501960813999176,
-        0.17559924721717834,
+        0.009134052400981661,
+        0.21586052772625525,
+        0.026004770264445982,
         0
       ],
       "secondColor": [
-        0.4600922465324402,
-        0.6784313917160034,
+        0.17894440636736833,
+        0.41788509705785837,
         0,
         0
       ],
@@ -29473,9 +29537,11 @@
       "fadeFalloff": 0.800000011920929,
       "fadeEnabled": true,
       "metallic": 0,
-      "occlusionStrength": 1
+      "occlusionStrength": 1,
+      "translucencyModel": "unity-additive-albedo"
     }
   ],
   "lodDitherTexture": "./textures/surface/lod-blue-noise.png",
-  "lodCrossfadeDuration": 0.5
+  "lodCrossfadeDuration": 0.5,
+  "colorSpace": "linear"
 }

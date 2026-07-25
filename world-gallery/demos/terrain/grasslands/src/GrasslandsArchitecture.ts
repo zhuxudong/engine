@@ -23,6 +23,7 @@ export interface GrasslandsArchitecturePbrMaterialSpec {
   readonly albedo: string;
   readonly normal?: string;
   readonly roughnessMetallic: string;
+  /** Linear-RGB tint multiplied with the decoded albedo texture. */
   readonly baseColor: readonly [r: number, g: number, b: number, a: number];
   readonly metallic: number;
   readonly roughness: number;
@@ -41,6 +42,8 @@ export type GrasslandsArchitectureMaterialSpec =
 
 /** Runtime resources for the authored Grasslands architecture composition. */
 export interface GrasslandsArchitectureSpec {
+  /** Color space used by every material color tuple in this section. */
+  readonly colorSpace: "linear";
   readonly bundle: string;
   readonly placements: readonly unknown[];
   readonly materials: readonly GrasslandsArchitectureMaterialSpec[];

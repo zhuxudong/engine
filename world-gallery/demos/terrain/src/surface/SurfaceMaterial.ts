@@ -67,6 +67,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _lightingFlatness = ShaderProperty.getByName("material_LightingFlatness");
   private static readonly _translucency = ShaderProperty.getByName("material_Translucency");
   private static readonly _translucencyColor = ShaderProperty.getByName("material_TranslucencyColor");
+  private static readonly _translucencyModel = ShaderProperty.getByName("material_TranslucencyModel");
   private static readonly _fadeDistance = ShaderProperty.getByName("material_FadeDistance");
   private static readonly _fadeFalloff = ShaderProperty.getByName("material_FadeFalloff");
   private static readonly _debugView = ShaderProperty.getByName("material_DebugView");
@@ -142,6 +143,10 @@ export class SurfaceMaterial extends BaseMaterial {
     this.shaderData.setFloat(SurfaceMaterial._lightingFlatness, spec.lightingFlatness);
     this.shaderData.setFloat(SurfaceMaterial._translucency, spec.translucency);
     this.shaderData.setVector3(SurfaceMaterial._translucencyColor, new Vector3(...spec.translucencyColor.slice(0, 3)));
+    this.shaderData.setInt(
+      SurfaceMaterial._translucencyModel,
+      spec.translucencyModel === "unity-additive-albedo" ? 1 : 0
+    );
     this.shaderData.setFloat(SurfaceMaterial._fadeDistance, spec.fadeEnabled ? spec.fadeDistance : 0);
     this.shaderData.setFloat(SurfaceMaterial._fadeFalloff, spec.fadeFalloff);
     this.shaderData.setInt(SurfaceMaterial._debugView, 0);

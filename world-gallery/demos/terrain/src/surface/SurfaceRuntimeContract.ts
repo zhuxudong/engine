@@ -6,6 +6,7 @@ export interface SurfaceCoverageSpec {
   readonly normal: string;
   readonly metallicSmoothness?: string;
   readonly mask?: string;
+  /** Linear-RGB tint multiplied with the decoded albedo texture. */
   readonly color: readonly [r: number, g: number, b: number, a: number];
   readonly tiling: number;
   readonly normalScale: number;
@@ -28,7 +29,9 @@ export interface SurfaceMaterialSpec {
   readonly normal?: string;
   readonly metallicSmoothness?: string;
   readonly occlusion?: string;
+  /** Linear-RGB primary tint multiplied with the decoded albedo texture. */
   readonly baseColor: readonly [r: number, g: number, b: number, a: number];
+  /** Linear-RGB secondary tint used by deterministic color variation. */
   readonly secondColor: readonly [r: number, g: number, b: number, a: number];
   readonly alphaCutoff: number;
   readonly metallic?: number;
@@ -52,7 +55,10 @@ export interface SurfaceMaterialSpec {
   };
   readonly lightingFlatness: number;
   readonly translucency: number;
+  /** Linear-RGB back-light tint. */
   readonly translucencyColor: readonly [r: number, g: number, b: number, a: number];
+  /** Back-light model; the Unity additive mode is reserved for source-parity scene materials. */
+  readonly translucencyModel: "none" | "unity-additive-albedo";
   readonly fadeEnabled: boolean;
   readonly fadeDistance: number;
   readonly fadeFalloff: number;
@@ -90,6 +96,8 @@ export interface SurfacePrototypeSpec {
 
 /** Compiled instance manifest plus all runtime prototype resources. */
 export interface SurfaceRuntimeManifest extends CompiledSurfaceManifest {
+  /** Color space used by all material color tuples in this manifest. */
+  readonly colorSpace: "linear";
   readonly lodDitherTexture: string;
   readonly lodCrossfadeDuration: number;
   readonly prototypeLibrary: readonly SurfacePrototypeSpec[];

@@ -47,6 +47,7 @@ Shader "Terrain/Surface" {
       #include "ShaderLibrary/Lighting/Light.glsl"
       #include "ShaderLibrary/PBR/LightDirectPBR.glsl"
       #include "ShaderLibrary/PBR/LightIndirectPBR.glsl"
+      #include "Terrain/GrasslandsCloudShadow.glsl"
 
       sampler2D material_Albedo;
       sampler2D material_Normal;
@@ -98,6 +99,7 @@ Shader "Terrain/Surface" {
       float material_LightingFlatness;
       float material_Translucency;
       vec3 material_TranslucencyColor;
+      int material_TranslucencyModel;
       float material_FadeDistance;
       float material_FadeFalloff;
       vec3 renderer_SurfaceLocalPosition;
@@ -509,6 +511,40 @@ Shader "Terrain/Surface" {
         float roughness,
         float occlusion
       ) {
+        vec3 viewDirection = normalize(camera_Position - varyings.worldPosition);
+        float shadowAttenuation = 1.0;
+        #if defined(SCENE_DIRECT_LIGHT_COUNT) && defined(NEED_CALCULATE_SHADOWS)
+          shadowAttenuation = sampleShadowMap(
+            varyings.worldPosition,
+            getShadowCoord(varyings.worldPosition)
+          );
+        #endif
+        if (
+          material_TranslucencyModel == 1 &&
+          material_Translucency > 0.0
+        ) {
+          #ifdef SCENE_DIRECT_LIGHT_COUNT
+            if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
+              DirectLight directLight;
+              #ifdef GRAPHICS_API_WEBGL2
+                directLight = getDirectLight(0);
+              #else
+                directLight.color = scene_DirectLightColor[0];
+                directLight.direction = scene_DirectLightDirection[0];
+              #endif
+              float lightIntensity = max(
+                max(directLight.color.r, directLight.color.g),
+                directLight.color.b
+              );
+              vec3 normalizedLightColor = directLight.color / max(lightIntensity, 0.00001);
+              float backLight = -dot(viewDirection, -directLight.direction) - 0.3;
+              vec3 transmission = backLight * shadowAttenuation *
+                normalizedLightColor * material_TranslucencyColor * material_Translucency;
+              albedo += clamp(transmission, vec3(0.0), vec3(1.0));
+            }
+          #endif
+        }
+
         SurfaceData surfaceData;
         surfaceData.albedoColor = albedo;
         surfaceData.emissiveColor = vec3(0.0);
@@ -519,21 +555,15 @@ Shader "Terrain/Surface" {
         surfaceData.IOR = 1.5;
         surfaceData.position = varyings.worldPosition;
         surfaceData.positionCS = varyings.positionCS;
-        surfaceData.normal = normal * (gl_FrontFacing ? 1.0 : -1.0);
-        surfaceData.viewDir = normalize(camera_Position - varyings.worldPosition);
+        surfaceData.normal = normal;
+        surfaceData.viewDir = viewDirection;
         surfaceData.dotNV = saturate(dot(surfaceData.normal, surfaceData.viewDir));
         surfaceData.specularIntensity = 1.0;
         surfaceData.specularColor = vec3(1.0);
 
         BSDFData bsdfData;
         initBSDFData(surfaceData, bsdfData);
-        float shadowAttenuation = 1.0;
-        #if defined(SCENE_DIRECT_LIGHT_COUNT) && defined(NEED_CALCULATE_SHADOWS)
-          shadowAttenuation = sampleShadowMap(
-            varyings.worldPosition,
-            getShadowCoord(varyings.worldPosition)
-          );
-        #endif
+        shadowAttenuation *= grasslandsCloudShadow(varyings.worldPosition);
 
         vec3 diffuse = vec3(0.0);
         vec3 specular = vec3(0.0);
@@ -547,17 +577,6 @@ Shader "Terrain/Surface" {
         );
         evaluateIBL(varyings, surfaceData, bsdfData, diffuse, specular);
 
-        #ifdef SCENE_DIRECT_LIGHT_COUNT
-          if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
-            DirectLight directLight = getDirectLight(0);
-            vec3 lightDirection = -directLight.direction;
-            float backLight = saturate(
-              -dot(surfaceData.viewDir, lightDirection) - 0.3
-            ) * material_Translucency;
-            diffuse += directLight.color * shadowAttenuation *
-              material_TranslucencyColor * albedo * backLight;
-          }
-        #endif
         return diffuse + specular;
       }
 
