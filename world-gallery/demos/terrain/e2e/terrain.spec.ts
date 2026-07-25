@@ -7,6 +7,7 @@ const captureScreenshots = process.env.TERRAIN_E2E_CAPTURE === "1";
 interface ShaderDiagnostic {
   readonly stage: "vertex" | "fragment" | "link";
   readonly log: string;
+  readonly source?: string;
 }
 
 interface GeneratedShaderSource {
@@ -27,6 +28,10 @@ declare global {
     __terrainShaderDiagnostics: ShaderDiagnostic[];
     /** WebGL draw calls captured before the engine starts. */
     __terrainDrawCalls: number;
+    /** Submitted triangles captured from indexed WebGL draws. */
+    __terrainTriangles: number;
+    /** Submitted instance count captured from instanced WebGL draws. */
+    __terrainSubmittedInstances: number;
     /** Instance counts submitted by explicit surface batches. */
     __surfaceInstanceDraws: number[];
     /** Terrain shaders after Galacean's ShaderLab-to-GLSL lowering. */
@@ -215,11 +220,11 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
 
   await test.step("surface cells submit deterministic instanced batches", async () => {
     const compiled = await page.evaluate(() => window.terrainDebug!.inspectSurface());
-    expect(compiled.totalInstances).toBe(48_890);
-    expect(compiled.totalRanges).toBe(928);
-    expect(compiled.rendererBatches).toBe(2_425);
+    expect(compiled.totalInstances).toBe(406_179);
+    expect(compiled.totalRanges).toBe(649);
+    expect(compiled.rendererBatches).toBe(1_177);
     expect(compiled.categoryCounts).toEqual({
-      grass: 39_680,
+      grass: 396_969,
       flower: 597,
       shrub: 4_817,
       tree: 864,
@@ -229,9 +234,21 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(compiled.sourceRules.find((rule) => rule.category === "tree")).toMatchObject({
       mode: "scatter",
       spacing: 24,
-      cellSize: 128
+      cellSize: 256
     });
     expect(compiled.debugMasks.map((mask) => mask.id)).toEqual(["grass", "flower", "shrub", "tree", "rock"]);
+    const materialContract = await page.evaluate(async () => {
+      const manifest = await fetch("/demos/terrain/data/surface/surface-manifest.json").then((response) =>
+        response.json()
+      );
+      return {
+        colorSpace: manifest.colorSpace,
+        translucencyModels: Array.from(
+          new Set(manifest.materials.map((material: { translucencyModel: string }) => material.translucencyModel))
+        )
+      };
+    });
+    expect(materialContract).toEqual({ colorSpace: "linear", translucencyModels: ["none"] });
     const generatedSurfaceShaders = await page.evaluate(() => window.__surfaceGeneratedShaders);
     expect(
       generatedSurfaceShaders.some(
@@ -700,11 +717,228 @@ test("first-person camera follows the CPU heightfield", async ({ page }) => {
   expect(moved.position[1]).toBeCloseTo(moved.groundHeight! + 2.25, 5);
 });
 
+test.describe("Grasslands authored scene", () => {
+  test.use({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
+
+  test("matches deterministic surface, atmosphere, cloud, and architecture contracts", async ({ page }, testInfo) => {
+    test.setTimeout(600_000);
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error" || /INVALID_OPERATION|program not valid/i.test(message.text())) {
+        consoleErrors.push(message.text());
+      }
+    });
+    await installShaderDiagnostics(page);
+
+    await page.goto("/demos/terrain/grasslands/index.html?pose=source");
+    await expect(page.locator("#status")).toContainText(
+      "ready · 9 terrain tiles · 291,072 surface instances · 77 architecture placements · 27 clouds",
+      { timeout: 120_000 }
+    );
+    await expect(page.locator('[aria-label="Grasslands scene inspector"]')).toBeVisible();
+    for (const title of [
+      "Scene / 场景复刻",
+      "Camera / 相机",
+      "Composition / 场景构成",
+      "Lighting / 光照",
+      "Atmosphere / 大气"
+    ]) {
+      const folder = page.locator(".debug-inspector .title").filter({ hasText: title });
+      await expect(folder).toBeVisible();
+      await expect(folder.locator("..")).not.toHaveClass(/closed/);
+    }
+
+    const firstPerson = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    expect(firstPerson).toMatchObject({ active: true, eyeHeight: 1.7, moveSpeed: 8 });
+    expect(firstPerson.groundHeight).toBeDefined();
+    expect(firstPerson.position[1]).toBeCloseTo(firstPerson.groundHeight! + 1.7, 5);
+
+    const adjustedFirstPerson = await page.evaluate(() => {
+      window.grasslandsDebug!.setFirstPersonEyeHeight(2.25);
+      window.grasslandsDebug!.setFirstPersonMoveSpeed(12);
+      return window.grasslandsDebug!.getFirstPerson();
+    });
+    expect(adjustedFirstPerson).toMatchObject({ active: true, eyeHeight: 2.25, moveSpeed: 12 });
+    expect(adjustedFirstPerson.position[1]).toBeCloseTo(adjustedFirstPerson.groundHeight! + 2.25, 5);
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setFirstPersonEyeHeight(1.7);
+      window.grasslandsDebug!.setFirstPersonMoveSpeed(8);
+    });
+
+    const surface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
+    expect(surface.totalInstances).toBe(291_072);
+    expect(surface.totalRanges).toBe(1_344);
+    expect(surface.categoryCounts).toEqual({
+      grass: 254_518,
+      flower: 18_052,
+      shrub: 492,
+      tree: 14_878,
+      rock: 3_132,
+      cliff: 0
+    });
+    expect(surface.categoryCounts.tree + surface.categoryCounts.shrub).toBe(15_370);
+    expect(surface.impostorInstances).toBe(14_367);
+    expect(surface.visibleInstances).toBeGreaterThan(0);
+    expect(surface.visibleRanges).toBeLessThan(surface.totalRanges);
+    expect(surface.lodCounts.slice(1).some((count) => count > 0)).toBe(true);
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectArchitecture())).toEqual({
+      placements: 77,
+      renderers: 90
+    });
+
+    const cloudStart = await page.evaluate(() => window.grasslandsDebug!.inspectClouds());
+    expect(cloudStart).toMatchObject({ visible: true, animation: true, instances: 27, drawGroups: 4 });
+    const sourceContracts = await page.evaluate(async () => {
+      const [surfaceManifest, sceneLayout] = await Promise.all([
+        fetch("/demos/terrain/data/grasslands/surface-manifest.json").then((response) => response.json()),
+        fetch("/demos/terrain/data/grasslands/scene-layout.json").then((response) => response.json())
+      ]);
+      return {
+        surfaceColorSpace: surfaceManifest.colorSpace,
+        vegetationTranslucency: Array.from(
+          new Set(
+            surfaceManifest.materials
+              .filter((material: { kind: string }) => material.kind === "vegetation")
+              .map((material: { translucencyModel: string }) => material.translucencyModel)
+          )
+        ),
+        architectureColorSpace: sceneLayout.architecture.colorSpace,
+        cloudPresets: sceneLayout.clouds.map((cloud: { preset: number }) => cloud.preset)
+      };
+    });
+    expect(sourceContracts).toEqual({
+      surfaceColorSpace: "linear",
+      vegetationTranslucency: ["unity-additive-albedo"],
+      architectureColorSpace: "linear",
+      cloudPresets: [3, 2, 2, 2, 1, 1, 3, 0, 0, 0, 2, 2, 0, 1, 0, 0, 0, 2, 2, 0, 2, 1, 3, 0, 2, 2, 0]
+    });
+    await page.waitForTimeout(250);
+    expect((await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time))).toBeGreaterThan(cloudStart.time);
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ animation: false }));
+    const frozenCloudTime = await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time)).toBe(frozenCloudTime);
+
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ architecture: false, clouds: false }));
+    expect(await page.evaluate(() => window.grasslandsDebug!.getScene())).toMatchObject({
+      architecture: false,
+      clouds: false
+    });
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectClouds())).toMatchObject({ visible: false });
+    await page.evaluate(() =>
+      window.grasslandsDebug!.setScene({
+        architecture: true,
+        clouds: true,
+        animation: true
+      })
+    );
+
+    await page.evaluate(() =>
+      window.grasslandsDebug!.setScene({
+        directLight: false,
+        environment: false,
+        cloudShadows: false
+      })
+    );
+    expect(await page.evaluate(() => window.grasslandsDebug!.getScene())).toMatchObject({
+      directLight: false,
+      environment: false,
+      cloudShadows: false
+    });
+    await page.evaluate(() =>
+      window.grasslandsDebug!.setScene({
+        directLight: true,
+        environment: true,
+        cloudShadows: true
+      })
+    );
+
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: false });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+    });
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectSurface().tuning.wind.enabled)).toBe(false);
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: true });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: true } });
+    });
+
+    const submitted = await page.evaluate(() => ({
+      drawCalls: window.__terrainDrawCalls,
+      triangles: window.__terrainTriangles,
+      instances: window.__terrainSubmittedInstances,
+      surface: window.grasslandsDebug!.inspectSurface(),
+      diagnostics: window.__terrainShaderDiagnostics,
+      hasInstancedDraw: window.__surfaceInstanceDraws.some((count) => count > 1)
+    }));
+    expect(submitted.drawCalls).toBeGreaterThan(0);
+    expect(submitted.triangles).toBeGreaterThan(0);
+    expect(submitted.instances).toBeGreaterThan(0);
+    expect(submitted.diagnostics).toEqual([]);
+    expect(submitted.hasInstancedDraw).toBe(true);
+    await testInfo.attach("grasslands-submission-snapshot", {
+      body: JSON.stringify(submitted, null, 2),
+      contentType: "application/json"
+    });
+    await attachScreenshot(page, testInfo, "grasslands-source-camera");
+
+    const beforeMove = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    await page.keyboard.down("KeyW");
+    await page.waitForTimeout(180);
+    await page.keyboard.up("KeyW");
+    const afterMove = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    expect(Math.hypot(
+      afterMove.position[0] - beforeMove.position[0],
+      afterMove.position[2] - beforeMove.position[2]
+    )).toBeGreaterThan(0);
+    expect(afterMove.position[1]).toBeCloseTo(afterMove.groundHeight! + 1.7, 5);
+
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+});
+
+test.describe("Grasslands visual baseline", () => {
+  test.use({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2 });
+
+  test("captures stable and animated source-camera frames", async ({ page }, testInfo) => {
+    test.skip(!captureScreenshots, "Set TERRAIN_E2E_CAPTURE=1 to record the DPR 2 visual baseline.");
+    test.setTimeout(900_000);
+    await page.goto("/demos/terrain/grasslands/index.html?pose=source");
+    await expect(page.locator("#status")).toContainText(
+      "ready · 9 terrain tiles · 291,072 surface instances · 77 architecture placements · 27 clouds",
+      { timeout: 120_000 }
+    );
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: false });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+    });
+    const canvas = page.locator("#canvas");
+    const staticFrame = await canvas.screenshot();
+    await page.waitForTimeout(250);
+    expect(await canvas.screenshot()).toEqual(staticFrame);
+
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: true });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: true } });
+    });
+    await page.waitForTimeout(500);
+    const animatedFrame = await canvas.screenshot();
+    expect(animatedFrame).not.toEqual(staticFrame);
+    await testInfo.attach("grasslands-source-static-dpr2", { body: staticFrame, contentType: "image/png" });
+    await testInfo.attach("grasslands-source-animated-dpr2", { body: animatedFrame, contentType: "image/png" });
+  });
+});
+
 async function installShaderDiagnostics(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const diagnostics: ShaderDiagnostic[] = [];
     Object.defineProperty(window, "__terrainShaderDiagnostics", { value: diagnostics });
     Object.defineProperty(window, "__terrainDrawCalls", { value: 0, writable: true });
+    Object.defineProperty(window, "__terrainTriangles", { value: 0, writable: true });
+    Object.defineProperty(window, "__terrainSubmittedInstances", { value: 0, writable: true });
     const surfaceInstanceDraws: number[] = [];
     Object.defineProperty(window, "__surfaceInstanceDraws", { value: surfaceInstanceDraws });
     const generatedShaders: GeneratedShaderSource[] = [];
@@ -712,8 +946,10 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
     const generatedSurfaceShaders: GeneratedShaderSource[] = [];
     Object.defineProperty(window, "__surfaceGeneratedShaders", { value: generatedSurfaceShaders });
     const prototype = WebGL2RenderingContext.prototype;
+    const shaderSources = new WeakMap<WebGLShader, string>();
     const shaderSource = prototype.shaderSource;
     prototype.shaderSource = function (shader, source): void {
+      shaderSources.set(shader, source);
       if (source.includes("material_RegionMap")) {
         generatedShaders.push({
           stage: this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment",
@@ -733,7 +969,11 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
       compileShader.call(this, shader);
       if (!this.getShaderParameter(shader, this.COMPILE_STATUS)) {
         const stage = this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment";
-        diagnostics.push({ stage, log: this.getShaderInfoLog(shader) ?? "Unknown shader compile error" });
+        diagnostics.push({
+          stage,
+          log: this.getShaderInfoLog(shader) ?? "Unknown shader compile error",
+          source: shaderSources.get(shader)
+        });
       }
     };
     const linkProgram = prototype.linkProgram;
@@ -746,12 +986,15 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
     const drawElements = prototype.drawElements;
     prototype.drawElements = function (...args): void {
       window.__terrainDrawCalls++;
+      window.__terrainTriangles += args[1] / 3;
       drawElements.apply(this, args);
     };
     const drawElementsInstanced = prototype.drawElementsInstanced;
     prototype.drawElementsInstanced = function (...args): void {
       window.__terrainDrawCalls++;
-      surfaceInstanceDraws.push(args[4]);
+      window.__terrainTriangles += (args[1] / 3) * args[4];
+      window.__terrainSubmittedInstances += args[4];
+      if (surfaceInstanceDraws.length < 100_000) surfaceInstanceDraws.push(args[4]);
       drawElementsInstanced.apply(this, args);
     };
   });

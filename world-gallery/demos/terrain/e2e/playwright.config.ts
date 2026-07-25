@@ -6,7 +6,7 @@ const galleryRoot = path.resolve(__dirname, "../../..");
 const configuredUrl = process.env.TERRAIN_E2E_URL;
 const baseUrl = new URL(configuredUrl ?? "http://127.0.0.1:5175");
 const port = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
-const captureScreenshots = process.env.TERRAIN_E2E_CAPTURE === "1";
+const browserChannel = process.env.TERRAIN_E2E_CHANNEL;
 
 export default defineConfig({
   testDir: ".",
@@ -21,12 +21,7 @@ export default defineConfig({
   use: {
     baseURL: baseUrl.origin,
     viewport: { width: 1024, height: 576 },
-    launchOptions: {
-      args: [
-        "--enable-unsafe-webgpu",
-        ...(process.platform === "darwin" ? ["--use-angle=metal"] : [])
-      ]
-    },
+    channel: browserChannel,
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },
