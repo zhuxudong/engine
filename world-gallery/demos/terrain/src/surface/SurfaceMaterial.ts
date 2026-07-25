@@ -15,6 +15,7 @@ import {
   Vector3,
   Vector4
 } from "@galacean/engine";
+import type { SurfaceCategory } from "./SurfaceContract";
 import type { SurfaceMaterialSpec, SurfacePrototypeRendererSpec } from "./SurfaceRuntimeContract";
 
 const WHITE_PIXEL = new Uint8Array([255, 255, 255, 255]);
@@ -55,6 +56,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _windFlowDensity = ShaderProperty.getByName("material_WindFlowDensity");
   private static readonly _windBaseLock = ShaderProperty.getByName("material_WindBaseLock");
   private static readonly _windBaseLockUvInverted = ShaderProperty.getByName("material_WindBaseLockUvInverted");
+  private static readonly _windSupported = ShaderProperty.getByName("material_WindSupported");
   private static readonly _windEnabled = ShaderProperty.getByName("material_WindEnabled");
   private static readonly _windDirection = ShaderProperty.getByName("material_WindDirection");
   private static readonly _globalWindForce = ShaderProperty.getByName("material_GlobalWindForce");
@@ -77,6 +79,8 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _localScale = ShaderProperty.getByName("renderer_SurfaceLocalScale");
   private static readonly _lodFade = ShaderProperty.getByName("renderer_SurfaceLodFade");
   private static readonly _lodFadeEnabled = ShaderProperty.getByName("renderer_SurfaceLodFadeEnabled");
+  private static readonly _categoryDebugColor = ShaderProperty.getByName("renderer_SurfaceCategoryDebugColor");
+  private static readonly _cellDebugColor = ShaderProperty.getByName("renderer_SurfaceCellDebugColor");
   private static readonly _vertexColorMacro = ShaderMacro.getByName("RENDERER_ENABLE_VERTEXCOLOR");
   private static readonly _billboardMacro = ShaderMacro.getByName("RENDERER_SURFACE_BILLBOARD");
   private static readonly _instancedMacro = ShaderMacro.getByName("RENDERER_SURFACE_INSTANCED");
@@ -136,6 +140,7 @@ export class SurfaceMaterial extends BaseMaterial {
       SurfaceMaterial._windBaseLockUvInverted,
       spec.wind.baseLockUvInverted ? 1 : 0
     );
+    this.shaderData.setInt(SurfaceMaterial._windSupported, spec.wind.enabled ? 1 : 0);
     this.shaderData.setInt(SurfaceMaterial._windEnabled, spec.wind.enabled ? 1 : 0);
     this.shaderData.setFloat(SurfaceMaterial._globalWindForce, 1);
     this.shaderData.setFloat(SurfaceMaterial._globalWavesScale, 1);
@@ -223,9 +228,9 @@ export class SurfaceMaterial extends BaseMaterial {
 
   /**
    * Selects a shared material diagnostic.
-   * @param view Zero for shaded surface and one for world normal.
+   * @param view Shared surface diagnostic identifier.
    */
-  setDebugView(view: 0 | 1): void {
+  setDebugView(view: 0 | 1 | 2 | 3 | 4): void {
     this.shaderData.setInt(SurfaceMaterial._debugView, view);
   }
 
@@ -274,6 +279,27 @@ export class SurfaceMaterial extends BaseMaterial {
   }
 
   /**
+   * Binds deterministic colors for the renderer's compiled category and spatial cell.
+   * @param category Surface category shared by the compiled range.
+   * @param cell Integer spatial-cell coordinate shared by the compiled range.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererDebugInfo(
+    category: SurfaceCategory,
+    cell: readonly [x: number, z: number],
+    shaderData: ShaderData
+  ): void {
+    shaderData.setVector3(
+      SurfaceMaterial._categoryDebugColor,
+      new Vector3(...categoryDebugColor(category))
+    );
+    shaderData.setVector3(
+      SurfaceMaterial._cellDebugColor,
+      new Vector3(...hashColor(cell[0], cell[1]))
+    );
+  }
+
+  /**
    * Binds a signed Unity-compatible cross-fade factor for one renderer batch.
    * @param enabled Whether the fragment shader applies screen-space dithering.
    * @param factor Positive values fade out; negative values fade in.
@@ -283,6 +309,39 @@ export class SurfaceMaterial extends BaseMaterial {
     shaderData.setInt(SurfaceMaterial._lodFadeEnabled, enabled ? 1 : 0);
     shaderData.setFloat(SurfaceMaterial._lodFade, factor);
   }
+}
+
+function categoryDebugColor(category: SurfaceCategory): [number, number, number] {
+  switch (category) {
+    case "grass":
+      return [0.15, 0.85, 0.2];
+    case "flower":
+      return [1, 0.2, 0.8];
+    case "shrub":
+      return [0.02, 0.38, 0.12];
+    case "tree":
+      return [0.05, 0.75, 0.95];
+    case "rock":
+      return [1, 0.55, 0.08];
+    case "cliff":
+      return [0.85, 0.08, 0.04];
+  }
+}
+
+function hashColor(x: number, z: number): [number, number, number] {
+  let value = Math.imul(x, 0x9e3779b1) ^ Math.imul(z, 0x85ebca77);
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d);
+  value ^= value >>> 15;
+  const hue = (value >>> 0) / 0x100000000;
+  const rainbow = [
+    Math.abs(hue * 6 - 3) - 1,
+    2 - Math.abs(hue * 6 - 2),
+    2 - Math.abs(hue * 6 - 4)
+  ];
+  return rainbow.map((component) =>
+    0.35 + Math.min(1, Math.max(0, component)) * 0.65
+  ) as [number, number, number];
 }
 
 async function loadCoverageTextures(

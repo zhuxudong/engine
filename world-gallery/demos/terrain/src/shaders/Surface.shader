@@ -14,7 +14,9 @@ Shader "Terrain/Surface" {
       struct Attributes {
         vec3 POSITION;
         vec3 NORMAL;
-        vec4 TANGENT;
+        #ifdef RENDERER_HAS_TANGENT
+          vec4 TANGENT;
+        #endif
         vec2 TEXCOORD_0;
         vec4 COLOR_0;
         #ifdef RENDERER_SURFACE_INSTANCED
@@ -32,6 +34,7 @@ Shader "Terrain/Surface" {
         vec4 worldTangent;
         vec4 instanceColor;
         vec3 localPosition;
+        float windDisplacementWeight;
         vec3 positionVS;
         vec4 positionCS;
         #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
@@ -42,6 +45,7 @@ Shader "Terrain/Surface" {
 
       #include "ShaderLibrary/Common/Common.glsl"
       #include "ShaderLibrary/Common/Transform.glsl"
+      #include "ShaderLibrary/Common/Normal.glsl"
       #include "ShaderLibrary/Common/Fog.glsl"
       #include "ShaderLibrary/Shadow/Shadow.glsl"
       #include "ShaderLibrary/Lighting/Light.glsl"
@@ -87,6 +91,7 @@ Shader "Terrain/Surface" {
       float material_WindFlowDensity;
       int material_WindBaseLock;
       int material_WindBaseLockUvInverted;
+      int material_WindSupported;
       int material_WindEnabled;
       vec3 material_WindDirection;
       float material_GlobalWindForce;
@@ -108,6 +113,8 @@ Shader "Terrain/Surface" {
       vec3 renderer_SurfaceLocalScale;
       float renderer_SurfaceLodFade;
       int renderer_SurfaceLodFadeEnabled;
+      vec3 renderer_SurfaceCategoryDebugColor;
+      vec3 renderer_SurfaceCellDebugColor;
       int material_DebugView;
 
       VertexShader = vert;
@@ -230,7 +237,7 @@ Shader "Terrain/Surface" {
         forward = -normalize(vec3(camera_ViewMat[0][2], camera_ViewMat[1][2], camera_ViewMat[2][2]));
       }
 
-      float windWeight(Attributes attributes) {
+      float vertexWindWeight(Attributes attributes) {
         #ifdef RENDERER_ENABLE_VERTEXCOLOR
           return attributes.COLOR_0.r;
         #else
@@ -238,7 +245,23 @@ Shader "Terrain/Surface" {
         #endif
       }
 
-      vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal, out vec4 worldTangent) {
+      float effectiveWindWeight(Attributes attributes) {
+        if (material_WindSupported == 0) return 0.0;
+        float baseUv = material_WindBaseLockUvInverted != 0
+          ? 1.0 - attributes.TEXCOORD_0.y
+          : attributes.TEXCOORD_0.y;
+        float rootLock = material_WindBaseLock != 0
+          ? pow(clamp(baseUv, 0.0, 1.0), 1.5)
+          : 1.0;
+        return rootLock * vertexWindWeight(attributes);
+      }
+
+      vec3 displacedWorldPosition(
+        Attributes attributes,
+        out vec3 worldNormal,
+        out vec4 worldTangent,
+        out float surfaceWindWeight
+      ) {
         vec3 worldPosition;
         vec3 fadeAnchor;
         float windPhase = 0.0;
@@ -254,9 +277,6 @@ Shader "Terrain/Surface" {
             vec3 localNormal = normalize(
               attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
             );
-            vec3 localTangent = normalize(
-              attributes.TANGENT.xyz * renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz
-            );
             worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
               billboardRight * scaledPosition.x +
               billboardUp * scaledPosition.y +
@@ -266,14 +286,21 @@ Shader "Terrain/Surface" {
               billboardUp * localNormal.y +
               billboardForward * localNormal.z
             );
-            worldTangent = vec4(
-              normalize(
-                billboardRight * localTangent.x +
-                billboardUp * localTangent.y +
-                billboardForward * localTangent.z
-              ),
-              attributes.TANGENT.w
-            );
+            #ifdef RENDERER_HAS_TANGENT
+              vec3 localTangent = normalize(
+                attributes.TANGENT.xyz * renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz
+              );
+              worldTangent = vec4(
+                normalize(
+                  billboardRight * localTangent.x +
+                  billboardUp * localTangent.y +
+                  billboardForward * localTangent.z
+                ),
+                attributes.TANGENT.w
+              );
+            #else
+              worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
+            #endif
           #else
             vec3 localNormal = normalize(
               rotateByQuaternion(
@@ -282,19 +309,23 @@ Shader "Terrain/Surface" {
               ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
             );
             localNormal = normalize(mix(localNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
-            vec3 localTangent = normalize(
-              rotateByQuaternion(
-                attributes.TANGENT.xyz * renderer_SurfaceLocalScale,
-                renderer_SurfaceLocalRotation
-              ) * attributes.INSTANCE_SCALE_WIND.xyz
-            );
             worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
               rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
             worldNormal = normalize(rotateByQuaternion(localNormal, attributes.INSTANCE_ROTATION));
-            worldTangent = vec4(
-              normalize(rotateByQuaternion(localTangent, attributes.INSTANCE_ROTATION)),
-              attributes.TANGENT.w
-            );
+            #ifdef RENDERER_HAS_TANGENT
+              vec3 localTangent = normalize(
+                rotateByQuaternion(
+                  attributes.TANGENT.xyz * renderer_SurfaceLocalScale,
+                  renderer_SurfaceLocalRotation
+                ) * attributes.INSTANCE_SCALE_WIND.xyz
+              );
+              worldTangent = vec4(
+                normalize(rotateByQuaternion(localTangent, attributes.INSTANCE_ROTATION)),
+                attributes.TANGENT.w
+              );
+            #else
+              worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
+            #endif
           #endif
           fadeAnchor = attributes.INSTANCE_POSITION_HASH.xyz;
           windPhase = attributes.INSTANCE_SCALE_WIND.w;
@@ -302,25 +333,26 @@ Shader "Terrain/Surface" {
           worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;
           worldNormal = normalize((renderer_NormalMat * vec4(attributes.NORMAL, 0.0)).xyz);
           worldNormal = normalize(mix(worldNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
-          worldTangent = vec4(
-            normalize((renderer_ModelMat * vec4(attributes.TANGENT.xyz, 0.0)).xyz),
-            attributes.TANGENT.w
-          );
+          #ifdef RENDERER_HAS_TANGENT
+            worldTangent = vec4(
+              normalize((renderer_ModelMat * vec4(attributes.TANGENT.xyz, 0.0)).xyz),
+              attributes.TANGENT.w
+            );
+          #else
+            worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
+          #endif
           fadeAnchor = (renderer_ModelMat * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
         #endif
 
+        surfaceWindWeight = effectiveWindWeight(attributes);
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +
             windPhase;
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
-          float baseUv = material_WindBaseLockUvInverted != 0
-            ? 1.0 - attributes.TEXCOORD_0.y
-            : attributes.TEXCOORD_0.y;
-          float rootLock = material_WindBaseLock != 0 ? pow(clamp(baseUv, 0.0, 1.0), 1.5) : 1.0;
           worldPosition += material_WindDirection *
-            (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
+            (flow * surfaceWindWeight * material_WindForce * 100.0 * material_GlobalWindForce);
         }
 
         if (material_FadeDistance > 0.0) {
@@ -342,7 +374,13 @@ Shader "Terrain/Surface" {
         Varyings output;
         vec3 surfaceNormal;
         vec4 surfaceTangent;
-        vec3 surfacePosition = displacedWorldPosition(attributes, surfaceNormal, surfaceTangent);
+        float surfaceWindWeight;
+        vec3 surfacePosition = displacedWorldPosition(
+          attributes,
+          surfaceNormal,
+          surfaceTangent,
+          surfaceWindWeight
+        );
         output.uv = attributes.TEXCOORD_0;
         output.worldPosition = surfacePosition;
         output.worldNormal = surfaceNormal;
@@ -353,6 +391,7 @@ Shader "Terrain/Surface" {
           output.instanceColor = vec4(1.0);
         #endif
         output.localPosition = attributes.POSITION;
+        output.windDisplacementWeight = surfaceWindWeight;
         output.positionVS = (camera_ViewMat * vec4(surfacePosition, 1.0)).xyz;
         output.positionCS = camera_VPMat * vec4(surfacePosition, 1.0);
         #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
@@ -373,8 +412,19 @@ Shader "Terrain/Surface" {
 
       void surfaceBasis(Varyings varyings, out vec3 normal, out vec3 tangent, out vec3 bitangent) {
         normal = normalize(varyings.worldNormal);
-        tangent = normalize(varyings.worldTangent.xyz - normal * dot(normal, varyings.worldTangent.xyz));
-        bitangent = normalize(cross(normal, tangent)) * varyings.worldTangent.w;
+        #ifdef RENDERER_HAS_TANGENT
+          tangent = normalize(varyings.worldTangent.xyz - normal * dot(normal, varyings.worldTangent.xyz));
+          bitangent = normalize(cross(normal, tangent)) * varyings.worldTangent.w;
+        #else
+          mat3 derivativeBasis = getTBNByDerivatives(
+            varyings.uv,
+            normal,
+            varyings.worldPosition,
+            gl_FrontFacing
+          );
+          tangent = derivativeBasis[0];
+          bitangent = derivativeBasis[1];
+        #endif
       }
 
       vec3 unpackNormal(vec4 packedNormal, float scale) {
@@ -600,7 +650,8 @@ Shader "Terrain/Surface" {
           } else if (material_ColorVariationMode == 2) {
             overlay = varyings.localPosition.y;
           } else {
-            overlay = varyings.uv.y;
+            // Restore the source mesh orientation for authored gradients after glTF V conversion.
+            overlay = 1.0 - varyings.uv.y;
           }
           float shifted = overlay + (1.0 - material_ColorOffset);
           float blend = clamp(
@@ -699,6 +750,19 @@ Shader "Terrain/Surface" {
         vec4 outputColor;
         if (material_DebugView == 1) {
           outputColor = vec4(normal * 0.5 + 0.5, 1.0);
+        } else if (material_DebugView == 2) {
+          outputColor = vec4(
+            mix(
+              vec3(0.03, 0.15, 1.0),
+              vec3(1.0, 0.75, 0.02),
+              clamp(varyings.windDisplacementWeight, 0.0, 1.0)
+            ),
+            1.0
+          );
+        } else if (material_DebugView == 3) {
+          outputColor = vec4(renderer_SurfaceCategoryDebugColor, 1.0);
+        } else if (material_DebugView == 4) {
+          outputColor = vec4(renderer_SurfaceCellDebugColor, 1.0);
         } else {
           outputColor = vec4(
             shadeSurface(varyings, baseColor.rgb, normal, metallic, roughness, occlusion),
@@ -747,6 +811,7 @@ Shader "Terrain/Surface" {
       float material_WindFlowDensity;
       int material_WindBaseLock;
       int material_WindBaseLockUvInverted;
+      int material_WindSupported;
       int material_WindEnabled;
       vec3 material_WindDirection;
       float material_GlobalWindForce;
@@ -840,12 +905,23 @@ Shader "Terrain/Surface" {
         forward = -normalize(vec3(camera_ViewMat[0][2], camera_ViewMat[1][2], camera_ViewMat[2][2]));
       }
 
-      float windWeight(Attributes attributes) {
+      float vertexWindWeight(Attributes attributes) {
         #ifdef RENDERER_ENABLE_VERTEXCOLOR
           return attributes.COLOR_0.r;
         #else
           return 1.0;
         #endif
+      }
+
+      float effectiveWindWeight(Attributes attributes) {
+        if (material_WindSupported == 0) return 0.0;
+        float baseUv = material_WindBaseLockUvInverted != 0
+          ? 1.0 - attributes.TEXCOORD_0.y
+          : attributes.TEXCOORD_0.y;
+        float rootLock = material_WindBaseLock != 0
+          ? pow(clamp(baseUv, 0.0, 1.0), 1.5)
+          : 1.0;
+        return rootLock * vertexWindWeight(attributes);
       }
 
       vec3 displacedWorldPosition(Attributes attributes, out vec3 worldNormal) {
@@ -899,12 +975,8 @@ Shader "Terrain/Surface" {
           float frequency = max((1.0 - material_WindWavesScale) * material_GlobalWavesScale, 0.00001);
           float noise = surfaceNoise3D((worldPosition + vec3(timeOffset)) * frequency) * 0.5 + 0.5;
           float flow = pow(max(noise, 0.00001), material_WindFlowDensity * material_GlobalFlowDensity) * 0.01;
-          float baseUv = material_WindBaseLockUvInverted != 0
-            ? 1.0 - attributes.TEXCOORD_0.y
-            : attributes.TEXCOORD_0.y;
-          float rootLock = material_WindBaseLock != 0 ? pow(clamp(baseUv, 0.0, 1.0), 1.5) : 1.0;
           worldPosition += material_WindDirection *
-            (flow * rootLock * windWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
+            (flow * effectiveWindWeight(attributes) * material_WindForce * 100.0 * material_GlobalWindForce);
         }
         if (material_FadeDistance > 0.0) {
           float eyeDepth = -(camera_ViewMat * vec4(worldPosition, 1.0)).z;

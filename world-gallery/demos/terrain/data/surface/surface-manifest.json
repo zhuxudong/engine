@@ -12556,23 +12556,63 @@
   "debugMasks": [
     {
       "id": "grass",
-      "url": "./masks/grass.png"
+      "url": "./masks/grass.png",
+      "origin": [
+        0,
+        -2048
+      ],
+      "size": [
+        1024,
+        3072
+      ]
     },
     {
       "id": "flower",
-      "url": "./masks/flower.png"
+      "url": "./masks/flower.png",
+      "origin": [
+        0,
+        -2048
+      ],
+      "size": [
+        1024,
+        3072
+      ]
     },
     {
       "id": "shrub",
-      "url": "./masks/shrub.png"
+      "url": "./masks/shrub.png",
+      "origin": [
+        0,
+        -2048
+      ],
+      "size": [
+        1024,
+        3072
+      ]
     },
     {
       "id": "tree",
-      "url": "./masks/tree.png"
+      "url": "./masks/tree.png",
+      "origin": [
+        0,
+        -2048
+      ],
+      "size": [
+        1024,
+        3072
+      ]
     },
     {
       "id": "rock",
-      "url": "./masks/rock.png"
+      "url": "./masks/rock.png",
+      "origin": [
+        0,
+        -2048
+      ],
+      "size": [
+        1024,
+        3072
+      ]
     }
   ],
   "colorSpace": "linear"

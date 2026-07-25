@@ -69,7 +69,10 @@ export function mountTerrainInspector(
   const requestedPose = query.get("pose");
   const sceneState = {
     view: requestedView && api.views.includes(requestedView) ? requestedView : ("surface" as TerrainDebugViewName),
-    pose: requestedPose && api.poses.includes(requestedPose as TerrainCameraPoseName) ? requestedPose : "first-person",
+    pose:
+      requestedPose && api.poses.includes(requestedPose as TerrainCameraPoseName)
+        ? requestedPose
+        : (api.poses[0] ?? "first-person"),
     layer: initialLayer,
     reset: () => {
       api.resetTuning();
@@ -90,6 +93,7 @@ export function mountTerrainInspector(
   const firstPersonState: TerrainFirstPersonSnapshot = api.getFirstPerson();
   const renderingState = api.getRendering();
   const selectPreview = new Map<number, () => void>();
+  options.extend?.(inspector);
   const renderingFolder = inspector.folder("Rendering / 渲染", true);
   const terrainFolder = inspector.folder("Terrain / 地形", true);
   const surfaceFolder = inspector.folder("Surface / 地表", true);
@@ -104,7 +108,6 @@ export function mountTerrainInspector(
   };
 
   const sceneFolder = inspector.subfolder(terrainFolder, "Scene / 场景", true);
-  const setViewExplanation = inspector.addReadout(sceneFolder, "Debug output / 输出说明");
   annotate(
     sceneFolder.add(sceneState, "view", debugViewOptions(api)),
     "Debug output / 调试输出",
@@ -113,6 +116,7 @@ export function mountTerrainInspector(
     api.setView(view);
     setViewExplanation(TERRAIN_DEBUG_VIEW_INFO[view].description);
   });
+  const setViewExplanation = inspector.addReadout(sceneFolder, "View meaning / 视图说明");
   const eyeHeightController = annotate(
     sceneFolder.add(firstPersonState, "eyeHeight", 0.5, 3, 0.01),
     "Ground clearance / 离地高度",
@@ -273,14 +277,20 @@ export function mountTerrainInspector(
   annotate(
     surfaceDebugFolder.add(surfaceState, "debugView", {
       "Surface / 材质": "surface",
-      "World normal / 世界法线": "normal"
+      "World normal / 世界法线": "normal",
+      "Wind weight / 风动权重": "wind-weight",
+      "Category / 实例类别": "category",
+      "Spatial cell / 空间 cell": "cell"
     }),
     "Debug output / 调试输出",
-    "切换所有地表实例的生产材质或世界法线输出。"
+    "切换实际渲染实例的材质、世界法线、根部锁定、类别或离线空间 cell；风动权重中蓝色固定、黄色摆动。"
   ).onChange((view: SurfaceRuntimeTuning["debugView"]) => api.setSurfaceDebugView(view));
   for (const mask of surfaceSnapshot.debugMasks) {
     inspector.addImagePreview(surfaceDebugFolder, {
-      label: `${mask.id} density mask / ${mask.id} 密度掩码`,
+      label:
+        `${mask.id} density mask / ${mask.id} 密度掩码` +
+        ` · XZ (${mask.origin[0]}, ${mask.origin[1]})` +
+        ` · ${mask.size[0]}×${mask.size[1]}m`,
       src: mask.url
     });
   }
@@ -442,8 +452,6 @@ export function mountTerrainInspector(
     annotate(waterFolder.add(waterState, "height", -256, 512, 0.1), "Surface height / 水面高度", "水面 world Y；仅在水体调试开启时可见。")
       .onChange((height: number) => api.setWaterDebug({ height }));
   }
-
-  options.extend?.(inspector);
 
   selectLayer(initialLayer);
   syncWorldNoiseVisibility();

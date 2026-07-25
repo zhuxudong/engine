@@ -112,6 +112,10 @@ export interface SurfaceRuntimeManifest extends CompiledSurfaceManifest {
 export interface SurfaceDebugMaskSpec {
   readonly id: string;
   readonly url: string;
+  /** World-space XZ coordinate represented by the mask's lower-left texel boundary. */
+  readonly origin: readonly [x: number, z: number];
+  /** World-space width and depth represented by the complete mask. */
+  readonly size: readonly [width: number, depth: number];
 }
 
 /** Mutable category-level runtime controls that never alter compiled placement data. */
@@ -127,7 +131,7 @@ export interface SurfaceRuntimeTuning {
     readonly enabled: boolean;
     readonly distanceScale: number;
   };
-  readonly debugView: "surface" | "normal";
+  readonly debugView: "surface" | "normal" | "wind-weight" | "category" | "cell";
 }
 
 /** Partial runtime-only update accepted by a surface world. */

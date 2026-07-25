@@ -105,6 +105,18 @@ function validateManifest(manifest: SurfaceRuntimeManifest): void {
       throw new Error(`[SurfaceManifest] invalid triplanar coverage in ${material.id}`);
     }
   }
+  for (const mask of manifest.debugMasks ?? []) {
+    if (
+      !mask.id ||
+      !mask.url ||
+      mask.origin.length !== 2 ||
+      mask.size.length !== 2 ||
+      mask.origin.some((value) => !Number.isFinite(value)) ||
+      mask.size.some((value) => !(value > 0))
+    ) {
+      throw new Error(`[SurfaceManifest] invalid debug mask ${mask.id}`);
+    }
+  }
   let expectedOffset = 0;
   for (const range of manifest.ranges) {
     if (

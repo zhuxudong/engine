@@ -182,6 +182,7 @@ export class SurfaceWorld {
             SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
             SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
             SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
+            SurfaceMaterial.setRendererDebugInfo(range.category, range.cell, renderer.shaderData);
             SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
             const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
             const material = materials.get(materialId);
@@ -251,7 +252,16 @@ export class SurfaceWorld {
     if (values.wind) Object.assign(this._tuning.wind, values.wind);
     if (values.lod) Object.assign(this._tuning.lod, values.lod);
     if (values.debugView) this._tuning.debugView = values.debugView;
-    for (const material of this._materials) material.setDebugView(this._tuning.debugView === "normal" ? 1 : 0);
+    const debugView = this._tuning.debugView === "normal"
+      ? 1
+      : this._tuning.debugView === "wind-weight"
+        ? 2
+        : this._tuning.debugView === "category"
+          ? 3
+          : this._tuning.debugView === "cell"
+            ? 4
+            : 0;
+    for (const material of this._materials) material.setDebugView(debugView);
     this.update(0);
   }
 
@@ -286,7 +296,9 @@ export class SurfaceWorld {
       impostorInstances: this._impostorInstances,
       debugMasks: (this._manifest.debugMasks ?? []).map((mask) => ({
         id: mask.id,
-        url: new URL(mask.url, this._manifestUrl).href
+        url: new URL(mask.url, this._manifestUrl).href,
+        origin: [...mask.origin],
+        size: [...mask.size]
       })),
       sourceRules: (this._manifest.sourceRules ?? []).map((rule) => ({
         ...rule,
@@ -358,7 +370,7 @@ interface MutableSurfaceRuntimeTuning {
     enabled: boolean;
     distanceScale: number;
   };
-  debugView: "surface" | "normal";
+  debugView: "surface" | "normal" | "wind-weight" | "category" | "cell";
 }
 
 class SurfaceWorldFollower extends Script {
