@@ -487,7 +487,9 @@ export class TerrainMaterial extends BaseMaterial {
     if (tuning.detilingShift !== undefined) {
       this._detilingValues[layer * 2 + 1] = this._range("detilingShift", tuning.detilingShift, 0, 1);
     }
-    if (tuning.normalDepth !== undefined) this._normalDepthValues[layer] = this._range("normalDepth", tuning.normalDepth, 0, 2);
+    if (tuning.normalDepth !== undefined) {
+      this._normalDepthValues[layer] = this._nonNegative("normalDepth", tuning.normalDepth);
+    }
     if (tuning.aoStrength !== undefined) this._aoStrengthValues[layer] = this._range("aoStrength", tuning.aoStrength, 0, 2);
     if (tuning.roughnessMod !== undefined) this._roughnessModValues[layer] = this._range("roughnessMod", tuning.roughnessMod, -1, 1);
     this._uploadLayerParameters();
@@ -635,6 +637,12 @@ export class TerrainMaterial extends BaseMaterial {
     if (finite < minimum || finite > maximum) {
       throw new Error(`[TerrainMaterial] ${name} must be in ${minimum}..${maximum}`);
     }
+    return finite;
+  }
+
+  private _nonNegative(name: string, value: number): number {
+    const finite = this._finite(name, value);
+    if (finite < 0) throw new Error(`[TerrainMaterial] ${name} must be non-negative`);
     return finite;
   }
 

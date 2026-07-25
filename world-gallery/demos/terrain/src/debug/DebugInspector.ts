@@ -176,7 +176,7 @@ function installInspectorStyles(): void {
   style.id = "debug-inspector-styles";
   style.textContent = `
     .debug-inspector.dg.main { --debug-accent: #63b0ff; --debug-panel: #1d222b; --debug-field: #15191f; position: fixed; top: 0; right: 0; max-height: 100vh; margin-right: 0; overflow-x: hidden !important; overflow-y: auto !important; overscroll-behavior: contain; scrollbar-gutter: stable; background: var(--debug-panel); border: 1px solid #344151; box-shadow: 0 16px 42px rgba(0, 0, 0, 0.42); }
-    .debug-inspector .close-button { display: none; }
+    .debug-inspector .close-button { position: sticky; bottom: 0; z-index: 2; background: #303d50; color: #f2f6fb; font-weight: 700; }
     .debug-inspector > .title { background: #303d50; color: #f2f6fb; font-weight: 700; }
     .debug-inspector li.folder { margin-left: 9px; border-left: 1px solid #3a4b5f; }
     .debug-inspector li.folder > ul > .title { position: relative; padding-left: 23px; background: #232b36; color: #dce7f4; }

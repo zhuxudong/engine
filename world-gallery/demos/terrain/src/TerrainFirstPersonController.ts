@@ -24,6 +24,8 @@ export interface TerrainFirstPersonSnapshot {
   readonly moveSpeed: number;
   /** Current world-space camera position. */
   readonly position: readonly [x: number, y: number, z: number];
+  /** Current normalized world-space view direction. */
+  readonly forward: readonly [x: number, y: number, z: number];
   /** Current terrain height below the camera, when its XZ position is loaded. */
   readonly groundHeight?: number;
 }
@@ -52,11 +54,13 @@ export class TerrainFirstPersonController extends Script {
   /** Current state suitable for the demo inspector and browser tests. */
   get snapshot(): TerrainFirstPersonSnapshot {
     const position = this.entity.transform.worldPosition;
+    const forward = this.entity.transform.worldForward;
     return {
       active: this._active,
       eyeHeight: this._eyeHeight,
       moveSpeed: this._moveSpeed,
       position: [position.x, position.y, position.z],
+      forward: [forward.x, forward.y, forward.z],
       groundHeight: this._terrain?.sampleHeightInterpolated(position.x, position.z)
     };
   }

@@ -12,26 +12,30 @@ import {
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
 import { TerrainClipmap } from "./src/clipmap/TerrainClipmap";
-import { TerrainMaterial, type TerrainLayerTuning, type TerrainMaterialTuning } from "./src/TerrainMaterial";
+import { TerrainMaterial } from "./src/TerrainMaterial";
 import {
   TERRAIN_DEBUG_VIEWS,
-  type TerrainBackgroundMode,
   type TerrainCameraPoseName,
   type TerrainDebugApi,
-  type TerrainDebugTuningSnapshot,
   type TerrainDebugViewName,
   type TerrainLightingSnapshot,
-  type TerrainMaterialTuningSnapshot,
   type TerrainProbeSnapshot,
   type TerrainRenderingTuning,
-  type TerrainWorldNoiseTuning,
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
+import {
+  cloneTerrainDebugTuning,
+  createTerrainDebugTuning,
+  replaceTerrainDebugTuning,
+  replaceTerrainMaterialTuning,
+  replaceTerrainWorldNoiseTuning,
+  terrainBackgroundModeToShader
+} from "./src/debug/TerrainDebugTuning";
 import { TerrainWaterDebug } from "./src/debug/TerrainWaterDebug";
 import { TerrainFirstPersonController, type TerrainFirstPersonPose } from "./src/TerrainFirstPersonController";
 import { loadLayerTextures } from "./src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
-import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader";
+import { loadManifest } from "./src/loader/ManifestLoader";
 import { loadTerrainData } from "./src/loader/TerrainDataLoader";
 import surfaceShaderSource from "./src/shaders/Surface.shader?raw";
 import terrainShaderSource from "./src/shaders/Terrain.shader?raw";
@@ -179,20 +183,14 @@ async function boot(): Promise<void> {
   firstPerson.configure(terrainData);
   let freeControl: FreeControl | null = applyTerrainCameraPose(cameraEntity, orbit, firstPerson, null, "first-person");
 
-  const detailedMaterial = new TerrainMaterial(engine);
-  const simplifiedMaterial = new TerrainMaterial(engine);
-  const terrainMaterials = [detailedMaterial, simplifiedMaterial] as const;
-  for (const terrainMaterial of terrainMaterials) {
-    terrainMaterial.bindTerrain(terrainData, manifest.clipmap.meshSize);
-    terrainMaterial.setLayerLibrary(layerTextures.albedoHeight, layerTextures.normalRoughness, manifest.layers);
-    terrainMaterial.configure(manifest.material, macroNoise);
-    terrainMaterial.configureWorldNoise(manifest.world.noise);
-    terrainMaterial.setBackgroundMode(backgroundModeToShader(manifest.world.background));
-    terrainMaterial.setDebugLayer(Math.min(1, manifest.layers.length - 1));
-  }
-  detailedMaterial.setMaterialDetailEnabled(true);
-  simplifiedMaterial.setMaterialDetailEnabled(false);
-  const tuning = createTuningSnapshot(manifest);
+  const material = new TerrainMaterial(engine);
+  material.bindTerrain(terrainData, manifest.clipmap.meshSize);
+  material.setLayerLibrary(layerTextures.albedoHeight, layerTextures.normalRoughness, manifest.layers);
+  material.configure(manifest.material, macroNoise);
+  material.configureWorldNoise(manifest.world.noise);
+  material.setBackgroundMode(terrainBackgroundModeToShader(manifest.world.background));
+  material.setDebugLayer(Math.min(1, manifest.layers.length - 1));
+  const tuning = createTerrainDebugTuning(manifest);
 
   const clipmap = new TerrainClipmap(
     engine,
@@ -228,6 +226,7 @@ async function boot(): Promise<void> {
 
   const api: TerrainDebugApi = {
     ready: true,
+    manifestUrl,
     views: Object.keys(TERRAIN_DEBUG_VIEWS) as TerrainDebugViewName[],
     poses: Object.keys(CAMERA_POSES) as TerrainCameraPoseName[],
     layers: manifest.layers.map(({ id, name, albedoHeight, normalRoughness }) => ({ id, name, albedoHeight, normalRoughness })),
@@ -252,11 +251,34 @@ async function boot(): Promise<void> {
     setFirstPersonMoveSpeed(speed) {
       firstPerson.setMoveSpeed(speed);
     },
+    getCamera() {
+      const transform = cameraEntity.transform;
+      const position = transform.worldPosition;
+      const rotation = transform.worldRotationQuaternion;
+      const forward = transform.worldForward;
+      return {
+        position: [position.x, position.y, position.z],
+        rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
+        forward: [forward.x, forward.y, forward.z],
+        fieldOfView: camera.fieldOfView
+      };
+    },
+    setCamera(snapshot) {
+      const [positionX, positionY, positionZ] = snapshot.position;
+      const groundHeight = terrainData.sampleHeightInterpolated(positionX, positionZ);
+      if (groundHeight !== undefined) {
+        firstPerson.setEyeHeight(positionY - groundHeight);
+      }
+      cameraEntity.transform.setPosition(positionX, positionY, positionZ);
+      cameraEntity.transform.worldRotationQuaternion.set(...snapshot.rotation);
+      camera.fieldOfView = snapshot.fieldOfView;
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
     setDebugLayer(layer) {
       for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugLayer(layer);
     },
     getTuning() {
-      return cloneTuningSnapshot(tuning);
+      return cloneTerrainDebugTuning(tuning);
     },
     setLayerTuning(layer, values) {
       for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layer, values);
@@ -268,16 +290,16 @@ async function boot(): Promise<void> {
       Object.assign(tuning.sampling, values);
     },
     setMaterialTuning(values) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setMaterialTuning(values);
-      replaceMaterialTuning(tuning.material, values);
+      material.setMaterialTuning(values);
+      replaceTerrainMaterialTuning(tuning.material, values);
     },
     setWorldBackground(mode) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setBackgroundMode(backgroundModeToShader(mode));
+      material.setBackgroundMode(terrainBackgroundModeToShader(mode));
       tuning.world.background = mode;
     },
     setWorldNoiseTuning(values) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setWorldNoiseTuning(values);
-      replaceWorldNoiseTuning(tuning.world.noise, values);
+      material.setWorldNoiseTuning(values);
+      replaceTerrainWorldNoiseTuning(tuning.world.noise, values);
     },
     getShaderStartup() {
       return { ...terrainShaderStartup, platforms: [...terrainShaderStartup.platforms] };
@@ -333,19 +355,16 @@ async function boot(): Promise<void> {
       surfaceWorld.setTuning({ debugView: view });
     },
     resetTuning() {
-      const defaults = createTuningSnapshot(manifest);
+      const defaults = createTerrainDebugTuning(manifest);
       for (const layer of defaults.layers) {
         const { layer: layerId, ...values } = layer;
         for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layerId, values);
       }
-      for (const terrainMaterial of terrainMaterials) {
-        terrainMaterial.setSamplingTuning(defaults.sampling);
-        terrainMaterial.setMaterialTuning(defaults.material);
-        terrainMaterial.configureWorldNoise(defaults.world.noise);
-        terrainMaterial.setBackgroundMode(backgroundModeToShader(defaults.world.background));
-      }
-      clipmap.setMaterialDetailLod(defaults.sampling.normalMapMaxLod);
-      replaceTuningSnapshot(tuning, defaults);
+      material.setSamplingTuning(defaults.sampling);
+      material.setMaterialTuning(defaults.material);
+      material.configureWorldNoise(defaults.world.noise);
+      material.setBackgroundMode(terrainBackgroundModeToShader(defaults.world.background));
+      replaceTerrainDebugTuning(tuning, defaults);
       waterDebugState.enabled = false;
       waterDebugState.height = 10;
       waterDebug.setState(waterDebugState.enabled, waterDebugState.height);
@@ -441,12 +460,6 @@ function applyCameraPose(cameraEntity: Entity, orbit: OrbitControl, poseName: St
   if (orbit) orbit.target.copyFrom(target);
 }
 
-function backgroundModeToShader(mode: TerrainBackgroundMode): 0 | 1 | 2 {
-  if (mode === "flat") return 1;
-  if (mode === "noise") return 2;
-  return 0;
-}
-
 function terrainWaterBounds(terrain: { readonly regionSize: number; readonly regions: readonly { location: readonly [number, number] }[] }) {
   let minimumX = Infinity;
   let minimumZ = Infinity;
@@ -463,87 +476,6 @@ function terrainWaterBounds(terrain: { readonly regionSize: number; readonly reg
     center: [(minimumX + maximumX) * 0.5, (minimumZ + maximumZ) * 0.5] as const,
     size: Math.max(maximumX - minimumX, maximumZ - minimumZ)
   };
-}
-
-function createTuningSnapshot(manifest: TerrainManifest): TerrainDebugTuningSnapshot {
-  return {
-    layers: manifest.layers.map((layer) => ({
-      layer: layer.id,
-      uvScale: layer.uvScale,
-      detilingRotation: layer.detilingRotation,
-      detilingShift: layer.detilingShift,
-      normalDepth: layer.normalDepth,
-      aoStrength: layer.aoStrength,
-      roughnessMod: layer.roughnessMod
-    })),
-    sampling: { ...manifest.material.sampling },
-    material: {
-      autoShader: { ...manifest.material.autoShader },
-      projection: { ...manifest.material.projection },
-      dualScaling: { ...manifest.material.dualScaling },
-      macroVariation: {
-        ...manifest.material.macroVariation,
-        color1: [...manifest.material.macroVariation.color1],
-        color2: [...manifest.material.macroVariation.color2],
-        noise1Offset: [...manifest.material.macroVariation.noise1Offset]
-      }
-    },
-    world: {
-      background: manifest.world.background,
-      noise: { ...manifest.world.noise, offset: [...manifest.world.noise.offset] }
-    }
-  };
-}
-
-function cloneTuningSnapshot(snapshot: TerrainDebugTuningSnapshot): TerrainDebugTuningSnapshot {
-  return {
-    layers: snapshot.layers.map((layer) => ({ ...layer })),
-    sampling: { ...snapshot.sampling },
-    material: {
-      autoShader: { ...snapshot.material.autoShader },
-      projection: { ...snapshot.material.projection },
-      dualScaling: { ...snapshot.material.dualScaling },
-      macroVariation: {
-        ...snapshot.material.macroVariation,
-        color1: [...snapshot.material.macroVariation.color1],
-        color2: [...snapshot.material.macroVariation.color2],
-        noise1Offset: [...snapshot.material.macroVariation.noise1Offset]
-      }
-    },
-    world: {
-      background: snapshot.world.background,
-      noise: { ...snapshot.world.noise, offset: [...snapshot.world.noise.offset] }
-    }
-  };
-}
-
-function replaceTuningSnapshot(target: TerrainDebugTuningSnapshot, source: TerrainDebugTuningSnapshot): void {
-  target.layers.splice(0, target.layers.length, ...source.layers.map((layer) => ({ ...layer })));
-  Object.assign(target.sampling, source.sampling);
-  replaceMaterialTuning(target.material, source.material);
-  target.world.background = source.world.background;
-  replaceWorldNoiseTuning(target.world.noise, source.world.noise);
-}
-
-function replaceMaterialTuning(target: TerrainMaterialTuningSnapshot, source: TerrainMaterialTuning): void {
-  if (source.autoShader) Object.assign(target.autoShader, source.autoShader);
-  if (source.projection) Object.assign(target.projection, source.projection);
-  if (source.dualScaling) Object.assign(target.dualScaling, source.dualScaling);
-  if (source.macroVariation) {
-    const macro = source.macroVariation;
-    Object.assign(target.macroVariation, macro);
-    if (macro.color1) target.macroVariation.color1 = [...macro.color1];
-    if (macro.color2) target.macroVariation.color2 = [...macro.color2];
-    if (macro.noise1Offset) target.macroVariation.noise1Offset = [...macro.noise1Offset];
-  }
-}
-
-function replaceWorldNoiseTuning(
-  target: Required<TerrainWorldNoiseTuning>,
-  source: TerrainWorldNoiseTuning
-): void {
-  Object.assign(target, source);
-  if (source.offset) target.offset = [...source.offset];
 }
 
 function setStatus(message: string): void {

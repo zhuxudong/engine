@@ -5,6 +5,7 @@ import type { SurfaceCategory } from "../surface/SurfaceContract";
 import type { SurfaceRuntimeTuning } from "../surface/SurfaceRuntimeContract";
 import type {
   TerrainBackgroundMode,
+  TerrainCameraSnapshot,
   TerrainCameraPoseName,
   TerrainDebugApi,
   TerrainDebugLayerTuningSnapshot,
@@ -35,12 +36,30 @@ const SURFACE_CATEGORY_LABELS: Readonly<Record<SurfaceCategory, string>> = {
   cliff: "Cliffs / 悬崖"
 };
 
+/** Optional composition hooks around the shared terrain inspector. */
+export interface TerrainDebugInspectorOptions {
+  /** Accessible dat.gui panel label. */
+  readonly title?: string;
+  /** Whether the demo exposes the independent water diagnostic. */
+  readonly showWater?: boolean;
+  /**
+   * Adds demo-specific top-level folders to the same dat.gui instance.
+   * @param inspector Shared inspector receiving the extension.
+   */
+  readonly extend?: (inspector: DebugInspector) => void;
+}
+
 /**
  * Mounts the terrain inspector over the production demo.
  * @param api Ready production terrain debug contract.
+ * @param options Optional title, capabilities, and demo-specific extension.
+ * @returns The shared inspector instance.
  */
-export function mountTerrainInspector(api: TerrainDebugApi): void {
-  const inspector = new DebugInspector("Terrain material inspector");
+export function mountTerrainInspector(
+  api: TerrainDebugApi,
+  options: TerrainDebugInspectorOptions = {}
+): DebugInspector {
+  const inspector = new DebugInspector(options.title ?? "Terrain material inspector");
   const snapshot = api.getTuning();
   const surfaceState = cloneSurfaceTuning(api.getSurface());
   const surfaceSnapshot = api.inspectSurface();
@@ -154,6 +173,20 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     "MSAA samples / 多重采样",
     "写入 Camera.msaaSamples 的真实引擎枚举：None=1、2×=2、4×=4、8×=8；超过硬件能力时引擎会钳制实际值。"
   ).onChange((value: number) => updateRendering({ camera: { msaaSamples: Number(value) as MSAASamples } }));
+  const setCameraReadout = inspector.addReadout(cameraFolder, "Camera JSON / 相机 JSON");
+  const cameraActions = {
+    output: () => {
+      const output = formatCameraSnapshot(api.getCamera());
+      setCameraReadout(output);
+      console.info("[terrain-camera]", output);
+      void navigator.clipboard?.writeText(output).catch(() => undefined);
+    }
+  };
+  annotate(
+    cameraFolder.add(cameraActions, "output"),
+    "Output camera pose / 输出相机姿态",
+    "输出可复现的位置、世界旋转四元数、朝向和视场角；同时尝试复制到剪贴板。"
+  );
 
   const postProcessFolder = inspector.subfolder(renderingFolder, "Post-process / 后处理", true);
   annotate(
@@ -300,7 +333,7 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     .onChange((value: number) => api.setWorldNoiseTuning({ offset: [worldNoiseState.offsetX, worldNoiseState.offsetY, value] }));
 
   const layerFolder = inspector.subfolder(terrainFolder, "Texture assets / 纹理资产", true);
-  const manifestUrl = new URL("../../data/manifest.json", import.meta.url);
+  const manifestUrl = new URL(api.manifestUrl);
   for (const layer of api.layers) {
     const select = inspector.addImagePreview(layerFolder, {
       label: `${layer.id}: ${layer.name} · albedo`,
@@ -328,7 +361,8 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingRotation: value }));
   annotate(layerFolder.add(layerState, "detilingShift", 0, 1, 0.001), "Detiling shift / 去重复平移", "按地形单元随机平移纹理的幅度。")
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingShift: value }));
-  annotate(layerFolder.add(layerState, "normalDepth", 0, 2, 0.01), "Normal depth / 法线强度", "纹理法线对最终材质法线的强度。")
+  const normalDepthMaximum = Math.max(...snapshot.layers.map((layer) => layer.normalDepth), 1);
+  annotate(layerFolder.add(layerState, "normalDepth", 0, normalDepthMaximum, 0.01), "Normal depth / 法线强度", "纹理法线对最终材质法线的强度；范围取自当前 manifest。")
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { normalDepth: value }));
   annotate(layerFolder.add(layerState, "aoStrength", 0, 2, 0.01), "AO strength / AO 强度", "纹理 height alpha 与 normal map 上朝分量共同衰减烘焙环境光；不改变直接光。")
     .onChange((value: number) => api.setLayerTuning(sceneState.layer, { aoStrength: value }));
@@ -401,11 +435,15 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
   annotate(macroFolder.add(materialState.macroVariation, "noise2Scale", 0.001, 1, 0.001), "Noise 2 scale / 噪声二缩放", "第二低频噪声的 world UV 缩放。")
     .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise2Scale: value } }));
 
-  const waterFolder = inspector.subfolder(terrainFolder, "Water debug / 水体调试", true);
-  annotate(waterFolder.add(waterState, "enabled"), "Enabled / 启用", "独立的 water-pcg 可视化；不会修改 control word、hole 或地形材质。")
-    .onChange((enabled: boolean) => api.setWaterDebug({ enabled }));
-  annotate(waterFolder.add(waterState, "height", -256, 512, 0.1), "Surface height / 水面高度", "水面 world Y；仅在水体调试开启时可见。")
-    .onChange((height: number) => api.setWaterDebug({ height }));
+  if (options.showWater !== false) {
+    const waterFolder = inspector.subfolder(terrainFolder, "Water debug / 水体调试", true);
+    annotate(waterFolder.add(waterState, "enabled"), "Enabled / 启用", "独立的 water-pcg 可视化；不会修改 control word、hole 或地形材质。")
+      .onChange((enabled: boolean) => api.setWaterDebug({ enabled }));
+    annotate(waterFolder.add(waterState, "height", -256, 512, 0.1), "Surface height / 水面高度", "水面 world Y；仅在水体调试开启时可见。")
+      .onChange((height: number) => api.setWaterDebug({ height }));
+  }
+
+  options.extend?.(inspector);
 
   selectLayer(initialLayer);
   syncWorldNoiseVisibility();
@@ -427,6 +465,7 @@ export function mountTerrainInspector(api: TerrainDebugApi): void {
     if (row) row.hidden = !visible;
     if (visible) worldNoiseFolder.open();
   }
+  return inspector;
 }
 
 function layerOptions(api: TerrainDebugApi): Record<string, number> {
@@ -534,4 +573,18 @@ function replaceSurfaceState(target: ReturnType<typeof cloneSurfaceTuning>, sour
   Object.assign(target.wind, source.wind, { direction: [...source.wind.direction] });
   Object.assign(target.lod, source.lod);
   target.debugView = source.debugView;
+}
+
+function formatCameraSnapshot(snapshot: TerrainCameraSnapshot): string {
+  const round = (value: number): number => Number(value.toFixed(6));
+  return JSON.stringify(
+    {
+      position: snapshot.position.map(round),
+      rotation: snapshot.rotation.map(round),
+      forward: snapshot.forward.map(round),
+      fieldOfView: round(snapshot.fieldOfView)
+    },
+    null,
+    2
+  );
 }

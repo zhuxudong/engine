@@ -1,5 +1,6 @@
 import type { MSAASamples, TonemappingMode } from "@galacean/engine";
 import type { TerrainClipmapSegmentSnapshot } from "../clipmap/TerrainClipmap";
+import type { TerrainFirstPersonSnapshot } from "../TerrainFirstPersonController";
 import type {
   SurfaceRuntimeSnapshot,
   SurfaceRuntimeTuning,
@@ -235,18 +236,18 @@ export interface TerrainProbeSnapshot {
   };
 }
 
-/** First-person camera state exposed by the terrain demo. */
-export interface TerrainFirstPersonSnapshot {
-  /** Whether the first-person controller currently owns the camera. */
-  readonly active: boolean;
-  /** Camera height above the sampled terrain in metres. */
-  readonly eyeHeight: number;
-  /** Horizontal movement speed in metres per second. */
-  readonly moveSpeed: number;
-  /** Current world-space camera position. */
+export type { TerrainFirstPersonSnapshot } from "../TerrainFirstPersonController";
+
+/** Serializable camera transform used to reproduce a diagnostic viewpoint. */
+export interface TerrainCameraSnapshot {
+  /** World-space camera position. */
   readonly position: readonly [x: number, y: number, z: number];
-  /** Sampled terrain height below the camera, when its XZ position is loaded. */
-  readonly groundHeight?: number;
+  /** World-space camera rotation quaternion. */
+  readonly rotation: readonly [x: number, y: number, z: number, w: number];
+  /** Normalized world-space viewing direction. */
+  readonly forward: readonly [x: number, y: number, z: number];
+  /** Vertical field of view in degrees. */
+  readonly fieldOfView: number;
 }
 
 /** Texture asset metadata exposed to the diagnostics surface. */
@@ -361,6 +362,8 @@ export interface TerrainDebugTuningSnapshot {
 export interface TerrainDebugApi {
   /** Marks an initialized terrain demo. */
   readonly ready: true;
+  /** Absolute URL used to resolve texture assets exposed by this demo. */
+  readonly manifestUrl: string;
   /** Available production shader outputs. */
   readonly views: readonly TerrainDebugViewName[];
   /** Available deterministic camera poses. */
@@ -377,6 +380,13 @@ export interface TerrainDebugApi {
   setFirstPersonEyeHeight(height: number): void;
   /** Updates first-person horizontal movement speed in metres per second. */
   setFirstPersonMoveSpeed(speed: number): void;
+  /** Captures the active camera transform as reproducible JSON data. */
+  getCamera(): TerrainCameraSnapshot;
+  /**
+   * Restores a camera transform previously returned by `getCamera`.
+   * @param snapshot Reproducible camera transform.
+   */
+  setCamera(snapshot: TerrainCameraSnapshot): void;
   /** Selects the asset used by layer-specific debug outputs. */
   setDebugLayer(layer: number): void;
   /** Returns a copy of all inspector-controlled values. */

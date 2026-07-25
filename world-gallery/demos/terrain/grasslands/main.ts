@@ -19,6 +19,24 @@ import {
   type TerrainFirstPersonSnapshot
 } from "../src/TerrainFirstPersonController";
 import { TerrainClipmap } from "../src/clipmap/TerrainClipmap";
+import {
+  TERRAIN_DEBUG_VIEWS,
+  type TerrainCameraPoseName,
+  type TerrainDebugApi,
+  type TerrainDebugViewName,
+  type TerrainLightingSnapshot,
+  type TerrainProbeSnapshot,
+  type TerrainRenderingTuning
+} from "../src/debug/TerrainDebugContract";
+import { mountTerrainInspector } from "../src/debug/TerrainDebugInspector";
+import {
+  cloneTerrainDebugTuning,
+  createTerrainDebugTuning,
+  replaceTerrainDebugTuning,
+  replaceTerrainMaterialTuning,
+  replaceTerrainWorldNoiseTuning,
+  terrainBackgroundModeToShader
+} from "../src/debug/TerrainDebugTuning";
 import { loadLayerTextures } from "../src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "../src/loader/MacroNoiseLoader";
 import { loadManifest } from "../src/loader/ManifestLoader";
@@ -43,7 +61,8 @@ import {
 } from "./src/GrasslandsDebugInspector";
 import {
   createGrasslandsEnvironment,
-  type GrasslandsEnvironmentSpec
+  type GrasslandsEnvironmentSpec,
+  type GrasslandsEnvironmentTuning
 } from "./src/GrasslandsEnvironment";
 import { GrasslandsExposurePass } from "./src/GrasslandsExposurePass";
 
@@ -186,8 +205,10 @@ async function boot(): Promise<void> {
   terrainMaterial.setLayerLibrary(layerTextures.albedoHeight, layerTextures.normalRoughness, manifest.layers);
   terrainMaterial.configure(manifest.material, macroNoise);
   terrainMaterial.configureWorldNoise(manifest.world.noise);
-  terrainMaterial.setBackgroundMode(0);
-  new TerrainClipmap(
+  terrainMaterial.setBackgroundMode(terrainBackgroundModeToShader(manifest.world.background));
+  terrainMaterial.setDebugLayer(Math.min(1, manifest.layers.length - 1));
+  const terrainTuning = createTerrainDebugTuning(manifest);
+  const clipmap = new TerrainClipmap(
     engine,
     root.createChild("terrain"),
     camera,
@@ -197,13 +218,14 @@ async function boot(): Promise<void> {
     manifest.clipmap.meshLods
   );
 
-  setStatus("loading 291,072 deterministic surface instances");
+  setStatus("loading 291,069 deterministic surface instances");
   const surfaceWorld = await SurfaceWorld.create(
     engine,
     root.createChild("surface-world"),
     camera,
     surfaceManifestUrl
   );
+  const surfaceDefaults = surfaceWorld.getTuning();
   setStatus("loading authored architecture");
   const architecture = await loadGrasslandsArchitecture(
     engine,
@@ -220,7 +242,49 @@ async function boot(): Promise<void> {
     sceneLayoutUrl.href,
     (worldX, worldZ) => terrainData.sampleHeightInterpolated(worldX, worldZ)
   );
-  window.grasslandsDebug = {
+  const setSurfaceTuning = (values: SurfaceRuntimeTuningUpdate): void => {
+    surfaceWorld.setTuning(values);
+    if (values.wind) {
+      const wind = surfaceWorld.getTuning().wind;
+      architecture.setWind(wind.enabled, wind.strength, wind.direction);
+    }
+  };
+  const getSceneTuning = (): GrasslandsSceneTuning => ({
+    ...environment.getTuning(),
+    architecture: architecture.root.isActive,
+    clouds: clouds.inspect().visible,
+    postProcess: camera.enablePostProcess
+  });
+  const setSceneTuning = (values: Partial<GrasslandsSceneTuning>): void => {
+    const environmentValues: Partial<GrasslandsEnvironmentTuning> = {
+      ...(values.directLight === undefined ? {} : { directLight: values.directLight }),
+      ...(values.shadows === undefined ? {} : { shadows: values.shadows }),
+      ...(values.environment === undefined ? {} : { environment: values.environment }),
+      ...(values.sky === undefined ? {} : { sky: values.sky }),
+      ...(values.fog === undefined ? {} : { fog: values.fog }),
+      ...(values.cloudShadows === undefined ? {} : { cloudShadows: values.cloudShadows }),
+      ...(values.animation === undefined ? {} : { animation: values.animation })
+    };
+    environment.setTuning(environmentValues);
+    if (values.directLight !== undefined) {
+      terrainMaterial.setDirectLightingEnabled(values.directLight);
+    }
+    if (values.environment !== undefined) {
+      terrainMaterial.setIndirectLightingEnabled(values.environment);
+    }
+    if (values.architecture !== undefined) {
+      architecture.root.isActive = values.architecture;
+    }
+    if (values.postProcess !== undefined) {
+      camera.enablePostProcess = values.postProcess;
+      exposure.isActive = values.postProcess;
+    }
+    clouds.setTuning({
+      visible: values.clouds,
+      animation: values.animation
+    });
+  };
+  const grasslandsDebug: NonNullable<Window["grasslandsDebug"]> = {
     ready: true,
     inspectSurface: () => surfaceWorld.inspect(),
     inspectClouds: () => clouds.inspect(),
@@ -231,35 +295,215 @@ async function boot(): Promise<void> {
     getFirstPerson: () => firstPerson.snapshot,
     setFirstPersonEyeHeight: (height) => firstPerson.setEyeHeight(height),
     setFirstPersonMoveSpeed: (speed) => firstPerson.setMoveSpeed(speed),
-    setSurface: (values) => {
-      surfaceWorld.setTuning(values);
-      if (values.wind) {
-        const wind = surfaceWorld.getTuning().wind;
-        architecture.setWind(wind.enabled, wind.strength, wind.direction);
+    setSurface: setSurfaceTuning,
+    getScene: getSceneTuning,
+    setScene: setSceneTuning
+  };
+  window.grasslandsDebug = grasslandsDebug;
+
+  const terrainDebug: TerrainDebugApi = {
+    ready: true,
+    manifestUrl,
+    views: Object.keys(TERRAIN_DEBUG_VIEWS) as TerrainDebugViewName[],
+    poses: ["first-person"],
+    layers: manifest.layers.map(({ id, name, albedoHeight, normalRoughness }) => ({
+      id,
+      name,
+      albedoHeight,
+      normalRoughness
+    })),
+    setView(view) {
+      if (!Object.hasOwn(TERRAIN_DEBUG_VIEWS, view)) {
+        throw new Error(`[terrain-debug] unknown view ${view}`);
+      }
+      clipmap.setWireframe(view === "clipmap-lod" || view === "wireframe");
+      terrainMaterial.setDebugView(TERRAIN_DEBUG_VIEWS[view]);
+    },
+    setPose(pose) {
+      if (pose !== "first-person") {
+        throw new Error(`[terrain-debug] unknown Grasslands pose ${pose}`);
+      }
+      firstPerson.enter(firstPersonPose(sceneLayout.camera));
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    getFirstPerson: () => firstPerson.snapshot,
+    setFirstPersonEyeHeight(height) {
+      firstPerson.setEyeHeight(height);
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    setFirstPersonMoveSpeed: (speed) => firstPerson.setMoveSpeed(speed),
+    getCamera() {
+      const transform = cameraEntity.transform;
+      const position = transform.worldPosition;
+      const rotation = transform.worldRotationQuaternion;
+      const forward = transform.worldForward;
+      return {
+        position: [position.x, position.y, position.z],
+        rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
+        forward: [forward.x, forward.y, forward.z],
+        fieldOfView: camera.fieldOfView
+      };
+    },
+    setCamera(snapshot) {
+      const [positionX, positionY, positionZ] = snapshot.position;
+      const groundHeight = terrainData.sampleHeightInterpolated(positionX, positionZ);
+      if (groundHeight !== undefined) {
+        firstPerson.setEyeHeight(positionY - groundHeight);
+      }
+      cameraEntity.transform.setPosition(positionX, positionY, positionZ);
+      cameraEntity.transform.worldRotationQuaternion.set(...snapshot.rotation);
+      camera.fieldOfView = snapshot.fieldOfView;
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    setDebugLayer: (layer) => terrainMaterial.setDebugLayer(layer),
+    getTuning: () => cloneTerrainDebugTuning(terrainTuning),
+    setLayerTuning(layer, values) {
+      terrainMaterial.setLayerTuning(layer, values);
+      Object.assign(terrainTuning.layers[layer], values);
+    },
+    setSamplingTuning(values) {
+      terrainMaterial.setSamplingTuning(values);
+      Object.assign(terrainTuning.sampling, values);
+    },
+    setMaterialTuning(values) {
+      terrainMaterial.setMaterialTuning(values);
+      replaceTerrainMaterialTuning(terrainTuning.material, values);
+    },
+    setWorldBackground(mode) {
+      terrainMaterial.setBackgroundMode(terrainBackgroundModeToShader(mode));
+      terrainTuning.world.background = mode;
+    },
+    setWorldNoiseTuning(values) {
+      terrainMaterial.setWorldNoiseTuning(values);
+      replaceTerrainWorldNoiseTuning(terrainTuning.world.noise, values);
+    },
+    getWaterDebug: () => ({ enabled: false, height: 0 }),
+    setWaterDebug: () => undefined,
+    getLighting() {
+      const tuning = environment.getTuning();
+      return {
+        directLight: tuning.directLight,
+        shadows: tuning.shadows,
+        environment: tuning.environment,
+        skybox: tuning.sky
+      };
+    },
+    setLighting(values) {
+      setSceneTuning({
+        directLight: values.directLight,
+        shadows: values.shadows,
+        environment: values.environment,
+        sky: values.skybox
+      });
+    },
+    getRendering() {
+      const sceneTuning = environment.getTuning();
+      return {
+        lighting: {
+          directLight: sceneTuning.directLight,
+          shadows: sceneTuning.shadows,
+          environment: sceneTuning.environment,
+          skybox: sceneTuning.sky
+        },
+        camera: {
+          hdr: camera.enableHDR,
+          msaaSamples: camera.msaaSamples
+        },
+        postProcess: {
+          enabled: camera.enablePostProcess,
+          tonemapping: tonemapping.enabled,
+          tonemappingMode: tonemapping.mode.value
+        }
+      };
+    },
+    setRendering(values: TerrainRenderingTuning) {
+      if (values.lighting) {
+        const lighting = values.lighting;
+        setSceneTuning({
+          directLight: lighting.directLight,
+          shadows: lighting.shadows,
+          environment: lighting.environment,
+          sky: lighting.skybox
+        });
+      }
+      if (values.camera?.hdr !== undefined) camera.enableHDR = values.camera.hdr;
+      if (values.camera?.msaaSamples !== undefined) camera.msaaSamples = values.camera.msaaSamples;
+      if (values.postProcess?.enabled !== undefined) {
+        setSceneTuning({ postProcess: values.postProcess.enabled });
+      }
+      if (values.postProcess?.tonemapping !== undefined) {
+        tonemapping.enabled = values.postProcess.tonemapping;
+      }
+      if (values.postProcess?.tonemappingMode !== undefined) {
+        tonemapping.mode.value = values.postProcess.tonemappingMode;
       }
     },
-    getScene: () => ({
-      ...environment.getTuning(),
-      architecture: architecture.root.isActive,
-      clouds: clouds.inspect().visible,
-      postProcess: camera.enablePostProcess
-    }),
-    setScene: (values) => {
-      environment.setTuning(values);
-      if (values.architecture !== undefined) {
-        architecture.root.isActive = values.architecture;
+    getSurface: () => surfaceWorld.getTuning(),
+    setSurface: setSurfaceTuning,
+    inspectSurface: () => surfaceWorld.inspect(),
+    setSurfaceDebugView: (view) => surfaceWorld.setTuning({ debugView: view }),
+    resetTuning() {
+      const defaults = createTerrainDebugTuning(manifest);
+      for (const layer of defaults.layers) {
+        const { layer: layerId, ...values } = layer;
+        terrainMaterial.setLayerTuning(layerId, values);
       }
-      if (values.postProcess !== undefined) {
-        camera.enablePostProcess = values.postProcess;
-        exposure.isActive = values.postProcess;
-      }
-      clouds.setTuning({
-        visible: values.clouds,
-        animation: values.animation
-      });
+      terrainMaterial.setSamplingTuning(defaults.sampling);
+      terrainMaterial.setMaterialTuning(defaults.material);
+      terrainMaterial.configureWorldNoise(defaults.world.noise);
+      terrainMaterial.setBackgroundMode(terrainBackgroundModeToShader(defaults.world.background));
+      replaceTerrainDebugTuning(terrainTuning, defaults);
+      surfaceWorld.setTuning(surfaceDefaults);
+      const wind = surfaceWorld.getTuning().wind;
+      architecture.setWind(wind.enabled, wind.strength, wind.direction);
+    },
+    inspect() {
+      const segments = clipmap.inspectSegments();
+      const segmentsPerLod = new Array<number>(manifest.clipmap.meshLods).fill(0);
+      for (const segment of segments) segmentsPerLod[segment.lod]++;
+      return {
+        regionLocations: terrainData.regions.map((region) => region.location),
+        regionSize: terrainData.regionSize,
+        vertexSpacing: terrainData.vertexSpacing,
+        meshSize: manifest.clipmap.meshSize,
+        meshLods: manifest.clipmap.meshLods,
+        segmentCount: clipmap.segmentCount,
+        segmentsPerLod,
+        segments
+      };
+    },
+    readProbe(worldX, worldZ) {
+      const rawControl = terrainData.sampleControl(worldX, worldZ);
+      const snapshot: TerrainProbeSnapshot = {
+        world: [worldX, worldZ],
+        height: terrainData.sampleHeight(worldX, worldZ)
+      };
+      if (rawControl === undefined) return snapshot;
+      const raw = rawControl >>> 0;
+      const scaleIndex = (raw >>> 7) & 0x7;
+      return {
+        ...snapshot,
+        control: {
+          raw,
+          base: (raw >>> 27) & 0x1f,
+          overlay: (raw >>> 22) & 0x1f,
+          blend: ((raw >>> 14) & 0xff) / 255,
+          angleIndex: (raw >>> 10) & 0xf,
+          scaleIndex,
+          scale: 0.9 - (((scaleIndex + 3) % 8) + 1) * 0.1,
+          hole: (raw & 0x4) !== 0,
+          navigation: (raw & 0x2) !== 0,
+          autoshader: (raw & 0x1) !== 0
+        }
+      };
     }
   };
-  mountGrasslandsInspector(window.grasslandsDebug);
+  window.terrainDebug = terrainDebug;
+  mountTerrainInspector(terrainDebug, {
+    title: "Grasslands terrain inspector",
+    showWater: false,
+    extend: (inspector) => mountGrasslandsInspector(inspector, grasslandsDebug)
+  });
 
   engine.run();
   const snapshot = surfaceWorld.inspect();
