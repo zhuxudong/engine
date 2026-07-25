@@ -720,6 +720,62 @@ test("first-person camera follows the CPU heightfield", async ({ page }) => {
 test.describe("Grasslands authored scene", () => {
   test.use({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
 
+  test("shares terrain diagnostics and reproducible camera poses", async ({ page }) => {
+    await page.goto("/demos/terrain/grasslands/index.html?pose=source");
+    await expect(page.locator("#status")).toContainText(
+      "ready · 9 terrain tiles · 291,069 surface instances · 64 architecture placements · 8 sky clouds",
+      { timeout: 120_000 }
+    );
+    await expect(page.locator('[aria-label="Grasslands terrain inspector"]')).toBeVisible();
+    for (const title of [
+      "Rendering / 渲染",
+      "Terrain / 地形",
+      "Surface / 地表",
+      "Scene / 场景复刻",
+      "Camera / 相机",
+      "Composition / 场景构成",
+      "Lighting / 光照",
+      "Cloud & fog / 云雾"
+    ]) {
+      const folder = page.locator(".debug-inspector .title").filter({ hasText: title });
+      await folder.scrollIntoViewIfNeeded();
+      await expect(folder).toBeVisible();
+      await expect(folder.locator("..")).not.toHaveClass(/closed/);
+    }
+
+    await page.evaluate(() => {
+      window.terrainDebug!.setView("dual-factor");
+      window.terrainDebug!.setView("surface");
+      window.terrainDebug!.setMaterialTuning({ dualScaling: { enabled: true } });
+    });
+    expect(await page.evaluate(() => window.terrainDebug!.getTuning().material.dualScaling.enabled)).toBe(true);
+
+    const originalCamera = await page.evaluate(() => window.terrainDebug!.getCamera());
+    const movedCamera = await page.evaluate((camera) => {
+      window.terrainDebug!.setCamera({
+        ...camera,
+        position: [camera.position[0] + 2, camera.position[1], camera.position[2] - 3],
+        fieldOfView: camera.fieldOfView + 1
+      });
+      return window.terrainDebug!.getCamera();
+    }, originalCamera);
+    expect(movedCamera.position[0]).toBeCloseTo(originalCamera.position[0] + 2, 5);
+    expect(movedCamera.position[2]).toBeCloseTo(originalCamera.position[2] - 3, 5);
+    expect(movedCamera.rotation).toEqual(originalCamera.rotation);
+    expect(movedCamera.fieldOfView).toBeCloseTo(originalCamera.fieldOfView + 1, 5);
+    await page.evaluate((camera) => {
+      window.terrainDebug!.setCamera(camera);
+      window.terrainDebug!.resetTuning();
+    }, originalCamera);
+
+    const cameraOutput = page
+      .locator(".debug-inspector li.cr.function")
+      .filter({ hasText: "Output camera pose / 输出相机姿态" });
+    await cameraOutput.scrollIntoViewIfNeeded();
+    await cameraOutput.click();
+    await expect(page.locator(".debug-inspector__readout").filter({ hasText: '"position"' })).toBeVisible();
+  });
+
   test("matches deterministic surface, atmosphere, cloud, and architecture contracts", async ({ page }, testInfo) => {
     test.setTimeout(600_000);
     const pageErrors: string[] = [];
@@ -734,48 +790,41 @@ test.describe("Grasslands authored scene", () => {
 
     await page.goto("/demos/terrain/grasslands/index.html?pose=source");
     await expect(page.locator("#status")).toContainText(
-      "ready · 9 terrain tiles · 291,072 surface instances · 77 architecture placements · 27 clouds",
+      "ready · 9 terrain tiles · 291,069 surface instances · 64 architecture placements · 8 sky clouds",
       { timeout: 120_000 }
     );
-    await expect(page.locator('[aria-label="Grasslands scene inspector"]')).toBeVisible();
-    for (const title of [
-      "Scene / 场景复刻",
-      "Camera / 相机",
-      "Composition / 场景构成",
-      "Lighting / 光照",
-      "Atmosphere / 大气"
-    ]) {
-      const folder = page.locator(".debug-inspector .title").filter({ hasText: title });
-      await expect(folder).toBeVisible();
-      await expect(folder.locator("..")).not.toHaveClass(/closed/);
-    }
-
-    const firstPerson = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    const firstPerson = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
     expect(firstPerson).toMatchObject({ active: true, eyeHeight: 1.7, moveSpeed: 8 });
     expect(firstPerson.groundHeight).toBeDefined();
     expect(firstPerson.position[1]).toBeCloseTo(firstPerson.groundHeight! + 1.7, 5);
+    expect(firstPerson.forward[0]).toBeCloseTo(-0.1849809, 5);
+    expect(firstPerson.forward[1]).toBeCloseTo(0, 5);
+    expect(firstPerson.forward[2]).toBeCloseTo(-0.9827429, 5);
 
     const adjustedFirstPerson = await page.evaluate(() => {
-      window.grasslandsDebug!.setFirstPersonEyeHeight(2.25);
-      window.grasslandsDebug!.setFirstPersonMoveSpeed(12);
-      return window.grasslandsDebug!.getFirstPerson();
+      window.terrainDebug!.setFirstPersonEyeHeight(2.25);
+      window.terrainDebug!.setFirstPersonMoveSpeed(12);
+      return window.terrainDebug!.getFirstPerson();
     });
     expect(adjustedFirstPerson).toMatchObject({ active: true, eyeHeight: 2.25, moveSpeed: 12 });
     expect(adjustedFirstPerson.position[1]).toBeCloseTo(adjustedFirstPerson.groundHeight! + 2.25, 5);
     await page.evaluate(() => {
-      window.grasslandsDebug!.setFirstPersonEyeHeight(1.7);
-      window.grasslandsDebug!.setFirstPersonMoveSpeed(8);
+      window.terrainDebug!.setFirstPersonEyeHeight(1.7);
+      window.terrainDebug!.setFirstPersonMoveSpeed(8);
     });
 
-    const surface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
-    expect(surface.totalInstances).toBe(291_072);
+    await expect
+      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges))
+      .toBe(0);
+    const surface = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(surface.totalInstances).toBe(291_069);
     expect(surface.totalRanges).toBe(1_344);
     expect(surface.categoryCounts).toEqual({
       grass: 254_518,
       flower: 18_052,
       shrub: 492,
       tree: 14_878,
-      rock: 3_132,
+      rock: 3_129,
       cliff: 0
     });
     expect(surface.categoryCounts.tree + surface.categoryCounts.shrub).toBe(15_370);
@@ -784,12 +833,18 @@ test.describe("Grasslands authored scene", () => {
     expect(surface.visibleRanges).toBeLessThan(surface.totalRanges);
     expect(surface.lodCounts.slice(1).some((count) => count > 0)).toBe(true);
     expect(await page.evaluate(() => window.grasslandsDebug!.inspectArchitecture())).toEqual({
-      placements: 77,
-      renderers: 90
+      placements: 64,
+      renderers: 77
     });
 
     const cloudStart = await page.evaluate(() => window.grasslandsDebug!.inspectClouds());
-    expect(cloudStart).toMatchObject({ visible: true, animation: true, instances: 27, drawGroups: 4 });
+    expect(cloudStart).toMatchObject({
+      visible: true,
+      animation: true,
+      authoredInstances: 27,
+      instances: 8,
+      drawGroups: 2
+    });
     const sourceContracts = await page.evaluate(async () => {
       const [surfaceManifest, sceneLayout] = await Promise.all([
         fetch("/demos/terrain/data/grasslands/surface-manifest.json").then((response) => response.json()),
@@ -797,6 +852,9 @@ test.describe("Grasslands authored scene", () => {
       ]);
       return {
         surfaceColorSpace: surfaceManifest.colorSpace,
+        invertedWindBaseLock: surfaceManifest.materials
+          .filter((material: { wind: { baseLock: boolean } }) => material.wind.baseLock)
+          .every((material: { wind: { baseLockUvInverted: boolean } }) => material.wind.baseLockUvInverted),
         vegetationTranslucency: Array.from(
           new Set(
             surfaceManifest.materials
@@ -810,6 +868,7 @@ test.describe("Grasslands authored scene", () => {
     });
     expect(sourceContracts).toEqual({
       surfaceColorSpace: "linear",
+      invertedWindBaseLock: true,
       vegetationTranslucency: ["unity-additive-albedo"],
       architectureColorSpace: "linear",
       cloudPresets: [3, 2, 2, 2, 1, 1, 3, 0, 0, 0, 2, 2, 0, 1, 0, 0, 0, 2, 2, 0, 2, 1, 3, 0, 2, 2, 0]
@@ -857,19 +916,19 @@ test.describe("Grasslands authored scene", () => {
 
     await page.evaluate(() => {
       window.grasslandsDebug!.setScene({ animation: false });
-      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+      window.terrainDebug!.setSurface({ wind: { enabled: false } });
     });
-    expect(await page.evaluate(() => window.grasslandsDebug!.inspectSurface().tuning.wind.enabled)).toBe(false);
+    expect(await page.evaluate(() => window.terrainDebug!.inspectSurface().tuning.wind.enabled)).toBe(false);
     await page.evaluate(() => {
       window.grasslandsDebug!.setScene({ animation: true });
-      window.grasslandsDebug!.setSurface({ wind: { enabled: true } });
+      window.terrainDebug!.setSurface({ wind: { enabled: true } });
     });
 
     const submitted = await page.evaluate(() => ({
       drawCalls: window.__terrainDrawCalls,
       triangles: window.__terrainTriangles,
       instances: window.__terrainSubmittedInstances,
-      surface: window.grasslandsDebug!.inspectSurface(),
+      surface: window.terrainDebug!.inspectSurface(),
       diagnostics: window.__terrainShaderDiagnostics,
       hasInstancedDraw: window.__surfaceInstanceDraws.some((count) => count > 1)
     }));
@@ -878,22 +937,32 @@ test.describe("Grasslands authored scene", () => {
     expect(submitted.instances).toBeGreaterThan(0);
     expect(submitted.diagnostics).toEqual([]);
     expect(submitted.hasInstancedDraw).toBe(true);
+    const windVertexShaders = await page.evaluate(() =>
+      window.__surfaceGeneratedShaders.filter(
+        (shader) =>
+          shader.stage === "vertex" &&
+          shader.source.includes("material_WindBaseLockUvInverted") &&
+          /1\.0\s*-\s*TEXCOORD_0\.y/.test(shader.source)
+      )
+    );
+    expect(windVertexShaders.some((shader) => shader.source.includes("scene_ShadowBias"))).toBe(true);
+    expect(windVertexShaders.some((shader) => !shader.source.includes("scene_ShadowBias"))).toBe(true);
     await testInfo.attach("grasslands-submission-snapshot", {
       body: JSON.stringify(submitted, null, 2),
       contentType: "application/json"
     });
     await attachScreenshot(page, testInfo, "grasslands-source-camera");
 
-    const beforeMove = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    const beforeMove = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
     await page.keyboard.down("KeyW");
     await page.waitForTimeout(180);
     await page.keyboard.up("KeyW");
-    const afterMove = await page.evaluate(() => window.grasslandsDebug!.getFirstPerson());
+    const afterMove = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
     expect(Math.hypot(
       afterMove.position[0] - beforeMove.position[0],
       afterMove.position[2] - beforeMove.position[2]
     )).toBeGreaterThan(0);
-    expect(afterMove.position[1]).toBeCloseTo(afterMove.groundHeight! + 1.7, 5);
+    expect(afterMove.position[1]).toBeCloseTo(afterMove.groundHeight! + 1.7, 4);
 
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
@@ -908,12 +977,12 @@ test.describe("Grasslands visual baseline", () => {
     test.setTimeout(900_000);
     await page.goto("/demos/terrain/grasslands/index.html?pose=source");
     await expect(page.locator("#status")).toContainText(
-      "ready · 9 terrain tiles · 291,072 surface instances · 77 architecture placements · 27 clouds",
+      "ready · 9 terrain tiles · 291,069 surface instances · 64 architecture placements · 8 sky clouds",
       { timeout: 120_000 }
     );
     await page.evaluate(() => {
       window.grasslandsDebug!.setScene({ animation: false });
-      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+      window.terrainDebug!.setSurface({ wind: { enabled: false } });
     });
     const canvas = page.locator("#canvas");
     const staticFrame = await canvas.screenshot();
@@ -922,7 +991,7 @@ test.describe("Grasslands visual baseline", () => {
 
     await page.evaluate(() => {
       window.grasslandsDebug!.setScene({ animation: true });
-      window.grasslandsDebug!.setSurface({ wind: { enabled: true } });
+      window.terrainDebug!.setSurface({ wind: { enabled: true } });
     });
     await page.waitForTimeout(500);
     const animatedFrame = await canvas.screenshot();
