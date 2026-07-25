@@ -2,15 +2,17 @@ import {
   BloomEffect,
   Camera,
   DepthTextureMode,
+  Entity,
   MSAASamples,
   PostProcess,
   Shader,
   TonemappingEffect,
   TonemappingMode,
+  Vector3,
   WebGLEngine
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
-import { FreeControl } from "@galacean/engine-toolkit-controls";
+import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
 import { Stats } from "@galacean/engine-toolkit-stats";
 import { TerrainMaterial } from "../src/TerrainMaterial";
 import {
@@ -89,6 +91,28 @@ interface GrasslandsSceneLayout {
     };
   };
 }
+
+const GRASSLANDS_POSES: readonly TerrainCameraPoseName[] = [
+  "hero",
+  "first-person",
+  "overview",
+  "valley-overview",
+  "terrain-horizon",
+  "grass-wind"
+];
+
+const GRASSLANDS_DIAGNOSTIC_CAMERAS = {
+  "valley-overview": {
+    position: [1473.834961, 23.960739, 1753.641479],
+    rotation: [-0.026121, -0.01122, -0.000293, 0.999596],
+    fieldOfView: 50
+  },
+  "terrain-horizon": {
+    position: [1465.276489, 18.276848, 1729.573608],
+    rotation: [0.011888, -0.466302, 0.006267, 0.884523],
+    fieldOfView: 50
+  }
+} as const;
 
 declare global {
   interface Window {
@@ -173,6 +197,7 @@ async function boot(): Promise<void> {
   camera.nearClipPlane = sceneLayout.camera.nearClip;
   camera.farClipPlane = sceneLayout.camera.farClip;
   cameraEntity.transform.position.set(...sceneLayout.camera.position);
+  cameraEntity.transform.worldRotationQuaternion.set(...sceneLayout.camera.rotation);
 
   setStatus("loading 3 km terrain");
   const manifest = await loadManifest(engine, manifestUrl);
@@ -183,9 +208,8 @@ async function boot(): Promise<void> {
   ]);
   const firstPerson = cameraEntity.addComponent(TerrainFirstPersonController);
   firstPerson.configure(terrainData);
-  firstPerson.enter(firstPersonPose(sceneLayout.camera));
-  const freeControl = cameraEntity.addComponent(FreeControl);
-  firstPerson.setFreeControl(freeControl);
+  const orbit = cameraEntity.addComponent(OrbitControl);
+  let freeControl: FreeControl | null = null;
   const environment = await createGrasslandsEnvironment(
     engine,
     scene,
@@ -305,7 +329,7 @@ async function boot(): Promise<void> {
     ready: true,
     manifestUrl,
     views: Object.keys(TERRAIN_DEBUG_VIEWS) as TerrainDebugViewName[],
-    poses: ["first-person"],
+    poses: GRASSLANDS_POSES,
     layers: manifest.layers.map(({ id, name, albedoHeight, normalRoughness }) => ({
       id,
       name,
@@ -320,10 +344,18 @@ async function boot(): Promise<void> {
       terrainMaterial.setDebugView(TERRAIN_DEBUG_VIEWS[view]);
     },
     setPose(pose) {
-      if (pose !== "first-person") {
+      if (!GRASSLANDS_POSES.includes(pose)) {
         throw new Error(`[terrain-debug] unknown Grasslands pose ${pose}`);
       }
-      firstPerson.enter(firstPersonPose(sceneLayout.camera));
+      freeControl = applyGrasslandsCameraPose(
+        cameraEntity,
+        camera,
+        orbit,
+        firstPerson,
+        freeControl,
+        pose,
+        sceneLayout.camera
+      );
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
     getFirstPerson: () => firstPerson.snapshot,
@@ -345,14 +377,16 @@ async function boot(): Promise<void> {
       };
     },
     setCamera(snapshot) {
+      firstPerson.exit();
+      firstPerson.setFreeControl(null);
+      freeControl?.destroy();
+      freeControl = null;
+      orbit.enabled = true;
       const [positionX, positionY, positionZ] = snapshot.position;
-      const groundHeight = terrainData.sampleHeightInterpolated(positionX, positionZ);
-      if (groundHeight !== undefined) {
-        firstPerson.setEyeHeight(positionY - groundHeight);
-      }
       cameraEntity.transform.setPosition(positionX, positionY, positionZ);
       cameraEntity.transform.worldRotationQuaternion.set(...snapshot.rotation);
       camera.fieldOfView = snapshot.fieldOfView;
+      setOrbitTargetFromCamera(cameraEntity, orbit);
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
     setDebugLayer: (layer) => terrainMaterial.setDebugLayer(layer),
@@ -499,6 +533,15 @@ async function boot(): Promise<void> {
     }
   };
   window.terrainDebug = terrainDebug;
+  const query = new URLSearchParams(location.search);
+  const requestedView = query.get("view") as TerrainDebugViewName | null;
+  const requestedPose = query.get("pose") as TerrainCameraPoseName | null;
+  if (requestedView && requestedView in TERRAIN_DEBUG_VIEWS) terrainDebug.setView(requestedView);
+  terrainDebug.setPose(
+    requestedPose && GRASSLANDS_POSES.includes(requestedPose)
+      ? requestedPose
+      : "hero"
+  );
   mountTerrainInspector(terrainDebug, {
     title: "Grasslands terrain inspector",
     showWater: false,
@@ -525,6 +568,78 @@ function firstPersonPose(camera: GrasslandsSceneLayout["camera"]): TerrainFirstP
     yaw: Math.atan2(forwardX, -forwardZ),
     pitch: Math.asin(Math.max(-1, Math.min(1, forwardY)))
   };
+}
+
+function applyGrasslandsCameraPose(
+  cameraEntity: Entity,
+  camera: Camera,
+  orbit: OrbitControl,
+  firstPerson: TerrainFirstPersonController,
+  freeControl: FreeControl | null,
+  pose: TerrainCameraPoseName,
+  authoredCamera: GrasslandsSceneLayout["camera"]
+): FreeControl | null {
+  if (pose === "first-person") {
+    orbit.enabled = false;
+    firstPerson.enter(firstPersonPose(authoredCamera));
+    freeControl?.destroy();
+    const nextFreeControl = cameraEntity.addComponent(FreeControl);
+    firstPerson.setFreeControl(nextFreeControl);
+    camera.fieldOfView = authoredCamera.fieldOfView;
+    return nextFreeControl;
+  }
+
+  firstPerson.exit();
+  firstPerson.setFreeControl(null);
+  freeControl?.destroy();
+  orbit.enabled = true;
+
+  if (pose === "hero") {
+    cameraEntity.transform.setPosition(...authoredCamera.position);
+    cameraEntity.transform.worldRotationQuaternion.set(...authoredCamera.rotation);
+    camera.fieldOfView = authoredCamera.fieldOfView;
+    setOrbitTargetFromCamera(cameraEntity, orbit);
+  } else if (pose === "overview") {
+    const target = new Vector3(1500, 22, 1500);
+    cameraEntity.transform.setPosition(1500, 140, 1835);
+    cameraEntity.transform.lookAt(target);
+    orbit.target.copyFrom(target);
+    camera.fieldOfView = 58;
+  } else if (pose === "grass-wind") {
+    const target = new Vector3(1473, 21.2, 1752.5);
+    cameraEntity.transform.setPosition(1473, 20.7, 1749.5);
+    cameraEntity.transform.lookAt(target);
+    orbit.target.copyFrom(target);
+    camera.fieldOfView = 50;
+  } else if (pose === "valley-overview" || pose === "terrain-horizon") {
+    const diagnostic = GRASSLANDS_DIAGNOSTIC_CAMERAS[pose];
+    cameraEntity.transform.setPosition(
+      diagnostic.position[0],
+      diagnostic.position[1],
+      diagnostic.position[2]
+    );
+    cameraEntity.transform.worldRotationQuaternion.set(
+      diagnostic.rotation[0],
+      diagnostic.rotation[1],
+      diagnostic.rotation[2],
+      diagnostic.rotation[3]
+    );
+    camera.fieldOfView = diagnostic.fieldOfView;
+    setOrbitTargetFromCamera(cameraEntity, orbit);
+  } else {
+    throw new Error(`[terrain-debug] unknown Grasslands pose ${pose}`);
+  }
+  return null;
+}
+
+function setOrbitTargetFromCamera(cameraEntity: Entity, orbit: OrbitControl): void {
+  const position = cameraEntity.transform.worldPosition;
+  const forward = cameraEntity.transform.worldForward;
+  orbit.target.set(
+    position.x + forward.x * 100,
+    position.y + forward.y * 100,
+    position.z + forward.z * 100
+  );
 }
 
 async function loadJson<T>(url: URL): Promise<T> {

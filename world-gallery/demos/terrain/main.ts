@@ -118,7 +118,7 @@ const FIRST_PERSON_POSE: TerrainFirstPersonPose = {
   pitch: 0.12
 };
 
-type StaticCameraPoseName = Exclude<TerrainCameraPoseName, "first-person">;
+type StaticCameraPoseName = keyof typeof STATIC_CAMERA_POSES;
 
 const status = document.querySelector<HTMLDivElement>("#status");
 const backendSelector = document.querySelector<HTMLSelectElement>("#backend");
@@ -264,11 +264,11 @@ async function boot(): Promise<void> {
       };
     },
     setCamera(snapshot) {
+      firstPerson.exit();
+      orbit.enabled = false;
+      if (!freeControl) freeControl = cameraEntity.addComponent(FreeControl);
+      firstPerson.setFreeControl(freeControl);
       const [positionX, positionY, positionZ] = snapshot.position;
-      const groundHeight = terrainData.sampleHeightInterpolated(positionX, positionZ);
-      if (groundHeight !== undefined) {
-        firstPerson.setEyeHeight(positionY - groundHeight);
-      }
       cameraEntity.transform.setPosition(positionX, positionY, positionZ);
       cameraEntity.transform.worldRotationQuaternion.set(...snapshot.rotation);
       camera.fieldOfView = snapshot.fieldOfView;
@@ -447,7 +447,7 @@ function applyTerrainCameraPose(
   firstPerson.setFreeControl(null);
   freeControl?.destroy();
   orbit.enabled = true;
-  applyCameraPose(cameraEntity, orbit, poseName);
+  applyCameraPose(cameraEntity, orbit, poseName as StaticCameraPoseName);
   return null;
 }
 

@@ -43,7 +43,7 @@ export function mountGrasslandsInspector(
   annotate(
     composition.add(state, "architecture"),
     "Architecture / 建筑",
-    "显示 Unity authored 的 Arch、Bridge、Shrine、Columns、Walls、Fence 与藤蔓；不属于 SurfaceWorld PCG。"
+    "显示 Arch、Bridge、Shrine、Columns、Walls、Fence 与藤蔓等场景建筑；不属于 SurfaceWorld PCG。"
   ).onChange((architecture: boolean) => api.setScene({ architecture }));
   annotate(
     composition.add(state, "clouds"),

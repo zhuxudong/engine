@@ -62,7 +62,19 @@ export const TERRAIN_DEBUG_VIEWS = {
 export type TerrainDebugViewName = keyof typeof TERRAIN_DEBUG_VIEWS;
 
 /** Named deterministic camera pose. */
-export type TerrainCameraPoseName = "first-person" | "overview" | "oblique" | "slope" | "dual" | "top" | "seam" | "background-seam";
+export type TerrainCameraPoseName =
+  | "first-person"
+  | "overview"
+  | "oblique"
+  | "slope"
+  | "dual"
+  | "top"
+  | "seam"
+  | "background-seam"
+  | "hero"
+  | "valley-overview"
+  | "terrain-horizon"
+  | "grass-wind";
 
 /** terrain world background modes implemented by the Galacean core path. */
 export type TerrainBackgroundMode = "none" | "flat" | "noise";
