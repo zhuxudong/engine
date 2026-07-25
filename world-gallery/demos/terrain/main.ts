@@ -35,6 +35,7 @@ import { loadManifest, type TerrainManifest } from "./src/loader/ManifestLoader"
 import { loadTerrainData } from "./src/loader/TerrainDataLoader";
 import surfaceShaderSource from "./src/shaders/Surface.shader?raw";
 import terrainShaderSource from "./src/shaders/Terrain.shader?raw";
+import { registerTerrainShaderIncludes } from "./src/shaders/registerTerrainShaderIncludes";
 import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
 import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
 import { SurfaceWorld } from "./src/surface/SurfaceWorld";
@@ -138,6 +139,7 @@ async function boot(): Promise<void> {
       : await WebGLEngine.create(configuration);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
+  registerTerrainShaderIncludes();
   Shader.create(terrainShaderSource);
   Shader.create(surfaceShaderSource);
 

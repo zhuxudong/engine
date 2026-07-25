@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Terrain · Grasslands</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #80a6c8;
+      }
+      #canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+      }
+      #status {
+        position: fixed;
+        top: 10px;
+        left: 12px;
+        color: #fff;
+        font: 12px/1.4 monospace;
+        text-shadow: 0 1px 3px #000;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="status">loading…</div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

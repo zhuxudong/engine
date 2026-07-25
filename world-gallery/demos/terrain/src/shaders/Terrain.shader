@@ -38,8 +38,10 @@ Shader "Terrain" {
 
       #include "ShaderLibrary/Common/Common.glsl"
       #include "ShaderLibrary/Common/Transform.glsl"
+      #include "ShaderLibrary/Common/Fog.glsl"
       #include "ShaderLibrary/Shadow/Shadow.glsl"
       #include "ShaderLibrary/Lighting/Light.glsl"
+      #include "Terrain/GrasslandsCloudShadow.glsl"
       #ifdef TERRAIN_DEBUG
         float renderer_DebugWire;
       #endif
@@ -1277,6 +1279,7 @@ Shader "Terrain" {
               getShadowCoord(varyings.worldPosition)
             );
           #endif
+          shadowAttenuation *= grasslandsCloudShadow(varyings.worldPosition);
           #ifdef SCENE_DIRECT_LIGHT_COUNT
             if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
               DirectLight directLight = getDirectLight(0);
@@ -1304,7 +1307,11 @@ Shader "Terrain" {
       }
 
       void frag(Varyings varyings) {
-        gl_FragColor = shadeTerrain(varyings);
+        vec4 color = shadeTerrain(varyings);
+        #if SCENE_FOG_MODE != 0
+          color = fog(color, (camera_ViewMat * vec4(varyings.worldPosition, 1.0)).xyz);
+        #endif
+        gl_FragColor = color;
       }
     }
   }
