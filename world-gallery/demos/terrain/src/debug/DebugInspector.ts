@@ -135,8 +135,6 @@ export class DebugInspector {
   private _installFolderToggle(folder: dat.GUI): void {
     const title = folder.domElement.querySelector<HTMLElement>(".title");
     if (!title) return;
-    const list = title.parentElement;
-    if (!list) return;
     title.tabIndex = 0;
     title.setAttribute("role", "button");
     title.classList.add("debug-inspector__folder-title");
@@ -145,16 +143,13 @@ export class DebugInspector {
       title.classList.toggle("is-collapsed", collapsed);
       title.setAttribute("aria-expanded", String(!collapsed));
     };
-    const toggle = (event: Event) => {
+    title.addEventListener("click", () => queueMicrotask(sync));
+    title.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
-      event.stopImmediatePropagation();
       if (folder.closed) folder.open();
       else folder.close();
       sync();
-    };
-    title.addEventListener("click", toggle, true);
-    title.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") toggle(event);
     });
     sync();
   }
@@ -175,11 +170,13 @@ function installInspectorStyles(): void {
   const style = document.createElement("style");
   style.id = "debug-inspector-styles";
   style.textContent = `
-    .debug-inspector.dg.main { --debug-accent: #63b0ff; --debug-panel: #1d222b; --debug-field: #15191f; position: fixed; top: 0; right: 0; max-height: 100vh; margin-right: 0; overflow-x: hidden !important; overflow-y: auto !important; overscroll-behavior: contain; scrollbar-gutter: stable; background: var(--debug-panel); border: 1px solid #344151; box-shadow: 0 16px 42px rgba(0, 0, 0, 0.42); }
-    .debug-inspector .close-button { position: sticky; bottom: 0; z-index: 2; background: #303d50; color: #f2f6fb; font-weight: 700; }
+    .debug-inspector.dg.main { --debug-accent: #63b0ff; --debug-panel: #1d222b; --debug-field: #15191f; position: fixed; top: 0; right: 0; display: flex; flex-direction: column; height: auto !important; max-height: 100vh; margin-right: 0; overflow: hidden !important; background: var(--debug-panel); border: 1px solid #344151; box-shadow: 0 16px 42px rgba(0, 0, 0, 0.42); }
+    .debug-inspector.dg.main > ul { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .debug-inspector.dg.main > .close-button { position: static !important; flex: 0 0 auto; background: #303d50; color: #f2f6fb; font-weight: 700; }
     .debug-inspector > .title { background: #303d50; color: #f2f6fb; font-weight: 700; }
     .debug-inspector li.folder { margin-left: 9px; border-left: 1px solid #3a4b5f; }
     .debug-inspector li.folder > ul > .title { position: relative; padding-left: 23px; background: #232b36; color: #dce7f4; }
+    .debug-inspector ul.closed > li.title { height: 27px !important; overflow: visible !important; }
     .debug-inspector li.folder > ul > .title::before { position: absolute; left: 8px; color: var(--debug-accent); content: "▾"; transition: transform 0.14s ease; }
     .debug-inspector li.folder > ul > .title.is-collapsed::before { content: "▸"; }
     .debug-inspector .title { cursor: pointer; user-select: none; }
@@ -191,9 +188,9 @@ function installInspectorStyles(): void {
     .debug-inspector .cr.boolean .property-name { color: #e0e9f5; }
     .debug-inspector .slider { background: #3c4b5c; }
     .debug-inspector .slider-fg { background: var(--debug-accent); }
-    .debug-inspector::-webkit-scrollbar { width: 8px; }
-    .debug-inspector::-webkit-scrollbar-track { background: #131821; }
-    .debug-inspector::-webkit-scrollbar-thumb { border-radius: 8px; background: #52657b; }
+    .debug-inspector > ul::-webkit-scrollbar { width: 8px; }
+    .debug-inspector > ul::-webkit-scrollbar-track { background: #131821; }
+    .debug-inspector > ul::-webkit-scrollbar-thumb { border-radius: 8px; background: #52657b; }
     .debug-inspector__preview-row { height: auto !important; padding: 5px !important; }
     .debug-inspector ul.closed > .debug-inspector__preview-row,
     .debug-inspector ul.closed > .debug-inspector__readout-row { height: 0 !important; overflow: hidden; padding-top: 0 !important; padding-bottom: 0 !important; }
