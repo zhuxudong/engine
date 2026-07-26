@@ -26,6 +26,7 @@ Shader "Terrain" {
           float geomorphFactor;
         #endif
         vec2 worldNoiseDdxDdy;
+        float renderable;
       };
 
       struct TerrainSurface {
@@ -275,18 +276,19 @@ Shader "Terrain" {
         ivec4 startIndex = getIndexCoord(startPosition, 1);
         uint control = fetchControl(startIndex);
         bool resolveHeight = true;
+        bool vertexRenderable = true;
         #ifdef TERRAIN_DEBUG
         if (startIndex.z < 0 && (material_DebugView == 2 || material_DebugView == 10)) {
           terrainWorldPosition.y = 0.0;
           resolveHeight = false;
         } else if ((startIndex.z < 0 && material_BackgroundMode == 0) ||
                    (decodeHole(control) && material_DebugView != 9)) {
-          terrainWorldPosition.x = sqrt(-1.0);
+          vertexRenderable = false;
           resolveHeight = false;
         }
         #else
         if ((startIndex.z < 0 && material_BackgroundMode == 0) || decodeHole(control)) {
-          terrainWorldPosition.x = sqrt(-1.0);
+          vertexRenderable = false;
           resolveHeight = false;
         }
         #endif
@@ -317,56 +319,12 @@ Shader "Terrain" {
           terrainWorldPosition.y = height;
         }
 
+        output.renderable = vertexRenderable ? 1.0 : 0.0;
         output.worldPosition = terrainWorldPosition;
         output.terrainCoord = terrainWorldPosition.xz * vertexDensity();
-        #if defined(TERRAIN_DIRECT_LIGHTING) || defined(TERRAIN_INDIRECT_LIGHTING)
-          ivec4 normalIndex = getIndexCoord(output.terrainCoord, 1);
-          float normalHeight = fetchHeight(normalIndex);
-          float normalHeightX = fetchHeight(getIndexCoord(output.terrainCoord + vec2(1.0, 0.0), 1));
-          float normalHeightZ = fetchHeight(getIndexCoord(output.terrainCoord + vec2(0.0, 1.0), 1));
-          vec3 vertexTerrainNormal = normalize(vec3(
-            normalHeight - normalHeightX + output.worldNoiseDdxDdy.x,
-            vertexSpacing(),
-            normalHeight - normalHeightZ + output.worldNoiseDdxDdy.y
-          ));
-        #endif
-        #ifdef TERRAIN_INDIRECT_LIGHTING
-          #ifdef SCENE_USE_SH
-            output.bakedIrradiance = max(
-              scene_EnvSH[0] +
-                scene_EnvSH[1] * vertexTerrainNormal.y +
-                scene_EnvSH[2] * vertexTerrainNormal.z +
-                scene_EnvSH[3] * vertexTerrainNormal.x +
-                scene_EnvSH[4] * (vertexTerrainNormal.y * vertexTerrainNormal.x) +
-                scene_EnvSH[5] * (vertexTerrainNormal.y * vertexTerrainNormal.z) +
-                scene_EnvSH[6] * (3.0 * vertexTerrainNormal.z * vertexTerrainNormal.z - 1.0) +
-                scene_EnvSH[7] * (vertexTerrainNormal.z * vertexTerrainNormal.x) +
-                scene_EnvSH[8] * (vertexTerrainNormal.x * vertexTerrainNormal.x - vertexTerrainNormal.y * vertexTerrainNormal.y),
-              vec3(0.0)
-            );
-          #else
-            output.bakedIrradiance = scene_EnvMapLight.diffuse * PI;
-          #endif
-        #endif
-        #ifdef TERRAIN_DIRECT_LIGHTING
-          output.shadowAttenuation = 1.0;
-          #if defined(SCENE_DIRECT_LIGHT_COUNT) && defined(NEED_CALCULATE_SHADOWS)
-            output.shadowAttenuation = sampleShadowMap(
-              terrainWorldPosition,
-              getShadowCoord(terrainWorldPosition)
-            );
-          #endif
-          output.directIrradiance = vec3(0.0);
-          #ifdef SCENE_DIRECT_LIGHT_COUNT
-            if (!isRendererCulledByLight(renderer_Layer.xy, scene_DirectLightCullingMask[0])) {
-              DirectLight directLight = getDirectLight(0);
-              output.directIrradiance = directLight.color * output.shadowAttenuation *
-                saturate(dot(vertexTerrainNormal, -directLight.direction));
-            }
-          #endif
-        #endif
-        output.positionCS = camera_VPMat * vec4(terrainWorldPosition, 1.0);
-        gl_Position = output.positionCS;
+        gl_Position = vertexRenderable
+          ? camera_VPMat * vec4(terrainWorldPosition, 1.0)
+          : vec4(2.0, 2.0, 2.0, 1.0);
         return output;
       }
 
@@ -1232,6 +1190,7 @@ Shader "Terrain" {
       }
 
       void frag(Varyings varyings) {
+        if (varyings.renderable < 1.0) discard;
         vec4 color = shadeTerrain(varyings);
         #if SCENE_FOG_MODE != 0 && !defined(TERRAIN_DEBUG)
           color = fog(color, (camera_ViewMat * vec4(varyings.worldPosition, 1.0)).xyz);

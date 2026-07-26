@@ -4,7 +4,11 @@ import path from "node:path";
 import type { TerrainFirstPersonSnapshot } from "../src/TerrainFirstPersonController";
 import type { TerrainData } from "../src/data/TerrainData";
 import { TerrainGroundSampler } from "../src/data/TerrainGroundSampler";
-import type { TerrainDebugViewName, TerrainProbeSnapshot } from "../src/debug/TerrainDebugContract";
+import type {
+  TerrainCameraSnapshot,
+  TerrainDebugViewName,
+  TerrainProbeSnapshot
+} from "../src/debug/TerrainDebugContract";
 import { compileSurface } from "../src/surface/SurfaceCompiler";
 import type { SurfaceCategory, SurfaceCompileInput, SurfaceTerrainSample } from "../src/surface/SurfaceContract";
 
@@ -286,6 +290,50 @@ test("Realistic control maps preserve packed material semantics", () => {
     navigation: 281_281,
     autoshader: 3_131_514
   });
+});
+
+test("Grasslands terrain clips hidden vertices without NaN projection", async ({ page }) => {
+  test.setTimeout(180_000);
+  await installShaderDiagnostics(page);
+  await page.goto("/demos/terrain/grasslands/index.html");
+  await expect(page.locator("#status")).toContainText(
+    "ready · 9 terrain tiles · 291,069 surface instances · 64 architecture placements · 8 sky clouds",
+    { timeout: 120_000 }
+  );
+
+  const cameras = [
+    {
+      position: [1469.862549, 17.485165, 1714.755859],
+      rotation: [0.04666, -0.065622, 0.003072, 0.996748],
+      forward: [0.13053, 0.093421, -0.987033],
+      fieldOfView: 50
+    },
+    {
+      position: [1469.862549, 17.485165, 1714.755859],
+      rotation: [0.045541, -0.141214, 0.006503, 0.98891],
+      forward: [0.278703, 0.091909, -0.955969],
+      fieldOfView: 50
+    }
+  ] satisfies readonly TerrainCameraSnapshot[];
+  const fingerprints: number[] = [];
+  for (const camera of cameras) {
+    await page.evaluate(async (snapshot) => {
+      window.terrainDebug!.setCamera(snapshot);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    }, camera);
+    fingerprints.push(await readFrameFingerprint(page));
+  }
+  expect(fingerprints[0]).not.toBe(fingerprints[1]);
+
+  const shaders = await page.evaluate(() => window.__terrainGeneratedShaders);
+  const vertexShaders = shaders.filter((shader) => shader.stage === "vertex");
+  const fragmentShaders = shaders.filter((shader) => shader.stage === "fragment");
+  expect(vertexShaders).not.toHaveLength(0);
+  expect(fragmentShaders).not.toHaveLength(0);
+  expect(vertexShaders.every((shader) => !shader.source.includes("sqrt(-1.0)"))).toBe(true);
+  expect(vertexShaders.every((shader) => shader.source.includes("renderable"))).toBe(true);
+  expect(fragmentShaders.every((shader) => /renderable\s*<\s*1\.0/.test(shader.source))).toBe(true);
+  expect(await page.evaluate(() => window.__terrainShaderDiagnostics)).toEqual([]);
 });
 
 test.describe("terrain height/control data closure", () => {
@@ -858,6 +906,9 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(fragmentShaders.every((shader) => !shader.source.includes("worldBackgroundMaterialFade"))).toBe(true);
     expect(fragmentShaders.every((shader) => !shader.source.includes("materialCoordinateScale"))).toBe(true);
     expect(fragmentShaders.every((shader) => !shader.source.includes("sampleLayerWithWorldTransition"))).toBe(true);
+    expect(vertexShaders.every((shader) => !shader.source.includes("sqrt(-1.0)"))).toBe(true);
+    expect(vertexShaders.every((shader) => shader.source.includes("renderable"))).toBe(true);
+    expect(fragmentShaders.every((shader) => /renderable\s*<\s*1\.0/.test(shader.source))).toBe(true);
     const packedControlShader = fragmentShaders.find(
       (shader) => shader.source.includes("decodeBase") && shader.source.includes("decodeHole")
     );
