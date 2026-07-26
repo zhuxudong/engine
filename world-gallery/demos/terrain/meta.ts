@@ -1,7 +1,7 @@
 export const meta = {
-  title: "Terrain · Realistic",
+  title: "PCG World Generator",
   owner: "慎思",
   category: "Large World · Terrain",
   description:
-    "Replaceable height/control inputs with geometry-clipmap LOD, seamless sampling, detiling, projection, autoshader, and dual scaling."
+    "Reusable terrain and surface PCG validation driven by replaceable height, control, density, prototype, and rule inputs."
 };

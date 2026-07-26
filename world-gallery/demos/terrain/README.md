@@ -2,12 +2,12 @@
 
 The terrain category contains two runtime entries:
 
-- `Terrain · Realistic` validates replaceable height/control inputs, geometry-clipmap LOD, terrain material sampling, lighting, and the portable `SurfaceWorld`.
-- `Terrain · Grasslands` reuses the same terrain and surface runtime with exported 3 km scene data, authored architecture, and a demo-only atmosphere layer.
+- `PCG World Generator` validates replaceable height/control/density inputs, geometry-clipmap LOD, terrain material sampling, lighting, and the portable `SurfaceWorld`.
+- `Grasslands Benchmark` reuses the same terrain and surface runtime with exported 3 km scene data, authored architecture, and an authored atmosphere layer.
 
 ## Boundaries
 
-`SurfaceWorld` consumes versioned manifests, cell-indexed instance binaries, prototype LODs, density masks, and deterministic placement data. Runtime code only selects visible cells, LODs, and precompiled instances; it never calls `Math.random()` or regenerates authored layouts.
+`SurfaceWorld` consumes versioned manifests, prototype LODs, density masks, and deterministic placement data. High-density coverage is regenerated in camera-local cells from mask, rule, seed, and global lattice coordinates; sparse and explicit placements stay in the cell-indexed instance binary. The procedural background uses the same deterministic coordinate model without `Math.random()`.
 
 Grasslands architecture, HDR sky, fog, clouds, cloud shadows, exposure, and post-processing remain under `grasslands/`. They do not add fields to the portable surface contract.
 

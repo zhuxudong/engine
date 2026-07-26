@@ -1,7 +1,7 @@
 export const meta = {
-  title: "Terrain · Grasslands",
+  title: "Grasslands Benchmark",
   owner: "慎思",
   category: "Large World · Terrain",
   description:
-    "Deterministic 3 km Grasslands reconstruction with terrain, instanced vegetation, rocks, architecture, and authored atmosphere."
+    "Grasslands reference-scene reconstruction combining deterministic terrain and surfaces with authored architecture and atmosphere."
 };
