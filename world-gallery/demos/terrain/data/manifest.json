@@ -74,7 +74,7 @@
       "albedoHeight": "./textures/grass_albedo_height.png",
       "normalRoughness": "./textures/grass_normal_roughness.png",
       "albedoColor": [0.67451, 0.74902, 0.686275],
-      "uvScale": 0.5,
+      "uvScale": 1,
       "detilingRotation": 0.161,
       "detilingShift": 0,
       "normalDepth": 1,

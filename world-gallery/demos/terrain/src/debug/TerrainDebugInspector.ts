@@ -1,8 +1,12 @@
-import { MSAASamples, TonemappingMode } from "@galacean/engine";
+import { Color, TonemappingMode } from "@galacean/engine";
 import { DebugInspector } from "./DebugInspector";
 import { TERRAIN_DEBUG_VIEW_INFO } from "./TerrainDebugContract";
 import type { SurfaceCategory } from "../surface/SurfaceContract";
-import type { SurfaceRuntimeTuning } from "../surface/SurfaceRuntimeContract";
+import {
+  SURFACE_RUNTIME_SCALE_MAX,
+  SURFACE_RUNTIME_SCALE_MIN,
+  type SurfaceRuntimeTuning
+} from "../surface/SurfaceRuntimeContract";
 import type {
   TerrainBackgroundMode,
   TerrainCameraSnapshot,
@@ -14,13 +18,6 @@ import type {
   TerrainRenderingSnapshot,
   TerrainRenderingTuning
 } from "./TerrainDebugContract";
-
-const MSAA_OPTIONS = {
-  "None / 无": MSAASamples.None,
-  "2×": MSAASamples.TwoX,
-  "4×": MSAASamples.FourX,
-  "8×": MSAASamples.EightX
-} as const;
 
 const TONEMAPPING_OPTIONS = {
   "Neutral / 中性": TonemappingMode.Neutral,
@@ -43,7 +40,7 @@ export interface TerrainDebugInspectorOptions {
   /** Whether the demo exposes the independent water diagnostic. */
   readonly showWater?: boolean;
   /**
-   * Adds demo-specific top-level folders to the same dat.gui instance.
+   * Adds entry-specific top-level folders to the same dat.gui instance.
    * @param inspector Shared inspector receiving the extension.
    */
   readonly extend?: (inspector: DebugInspector) => void;
@@ -52,7 +49,7 @@ export interface TerrainDebugInspectorOptions {
 /**
  * Mounts the terrain inspector over the production demo.
  * @param api Ready production terrain debug contract.
- * @param options Optional title, capabilities, and demo-specific extension.
+ * @param options Optional title, capabilities, and entry-specific extension.
  * @returns The shared inspector instance.
  */
 export function mountTerrainInspector(
@@ -67,6 +64,7 @@ export function mountTerrainInspector(
   const query = new URLSearchParams(location.search);
   const requestedView = query.get("view") as TerrainDebugViewName | null;
   const requestedPose = query.get("pose");
+  let worldSurfaceEditorState: { enabled: boolean; biomeOffsetX: number; biomeOffsetZ: number } | undefined;
   const sceneState = {
     view: requestedView && api.views.includes(requestedView) ? requestedView : ("surface" as TerrainDebugViewName),
     pose:
@@ -78,11 +76,15 @@ export function mountTerrainInspector(
       api.resetTuning();
       replaceInspectorState(api, snapshot, layerState, materialState, worldState, worldNoiseState);
       replaceSurfaceState(surfaceState, api.getSurface());
+      if (worldSurfaceEditorState) {
+        worldSurfaceEditorState.enabled = surfaceState.world.enabled;
+        worldSurfaceEditorState.biomeOffsetX = surfaceState.world.biomeOffset[0];
+        worldSurfaceEditorState.biomeOffsetZ = surfaceState.world.biomeOffset[1];
+      }
       Object.assign(waterState, api.getWaterDebug());
       inspector.gui.updateDisplay();
       selectLayer(sceneState.layer);
       syncWorldNoiseVisibility();
-      updateSurfaceReadout();
     }
   };
   const layerState: TerrainDebugLayerTuningSnapshot = { ...snapshot.layers[initialLayer] };
@@ -93,10 +95,10 @@ export function mountTerrainInspector(
   const firstPersonState: TerrainFirstPersonSnapshot = api.getFirstPerson();
   const renderingState = api.getRendering();
   const selectPreview = new Map<number, () => void>();
+  const renderingFolder = inspector.folder("Rendering / 渲染", false);
+  const terrainFolder = inspector.folder("Terrain / 地形", false);
+  const surfaceFolder = inspector.folder("Surface / 地表", false);
   options.extend?.(inspector);
-  const renderingFolder = inspector.folder("Rendering / 渲染", true);
-  const terrainFolder = inspector.folder("Terrain / 地形", true);
-  const surfaceFolder = inspector.folder("Surface / 地表", true);
 
   const syncRenderingState = (): void => {
     replaceRenderingState(renderingState, api.getRendering());
@@ -133,13 +135,29 @@ export function mountTerrainInspector(
       if (row) row.hidden = sceneState.pose !== "first-person";
     }
   };
-  annotate(sceneFolder.add(sceneState, "pose", api.poses), "Camera pose / 相机视角", "第一人称使用 CPU 高度场贴地；其他选项为可重复截图视角。").onChange(
-    (pose: string) => {
-      api.setPose(pose as TerrainCameraPoseName);
-      Object.assign(firstPersonState, api.getFirstPerson());
-      syncFirstPersonVisibility();
-      inspector.gui.updateDisplay();
+  annotate(
+    sceneFolder.add(sceneState, "pose", api.poses),
+    "Camera pose / 相机视角",
+    "第一人称使用 CPU 高度场贴地；其他选项为可重复截图视角。"
+  ).onChange((pose: string) => {
+    api.setPose(pose as TerrainCameraPoseName);
+    Object.assign(firstPersonState, api.getFirstPerson());
+    syncFirstPersonVisibility();
+    inspector.gui.updateDisplay();
+  });
+  const setCameraReadout = inspector.addReadout(sceneFolder, "Camera JSON / 相机 JSON");
+  const cameraActions = {
+    output: () => {
+      const output = formatCameraSnapshot(api.getCamera());
+      setCameraReadout(output);
+      console.info("[terrain-camera]", output);
+      void navigator.clipboard?.writeText(output).catch(() => undefined);
     }
+  };
+  annotate(
+    sceneFolder.add(cameraActions, "output"),
+    "Output camera pose / 输出相机姿态",
+    "输出位置、世界旋转四元数、朝向和视场角，并尝试复制到剪贴板。"
   );
   syncFirstPersonVisibility();
   annotate(sceneFolder.add(sceneState, "reset"), "Reset terrain values / 重置地形参数", "恢复 manifest 默认参数。");
@@ -166,32 +184,6 @@ export function mountTerrainInspector(
     "只切换 HDR 天空背景绘制，不改变地形的环境漫反射。"
   ).onChange((value: boolean) => updateRendering({ lighting: { skybox: value } }));
 
-  const cameraFolder = inspector.subfolder(renderingFolder, "Camera / 相机", true);
-  annotate(
-    cameraFolder.add(renderingState.camera, "hdr"),
-    "HDR / 高动态范围",
-    "切换 Camera.enableHDR；引擎只会在 WebGL2 或支持 half-float 的设备上接受 HDR。"
-  ).onChange((value: boolean) => updateRendering({ camera: { hdr: value } }));
-  annotate(
-    cameraFolder.add(renderingState.camera, "msaaSamples", MSAA_OPTIONS),
-    "MSAA samples / 多重采样",
-    "写入 Camera.msaaSamples 的真实引擎枚举：None=1、2×=2、4×=4、8×=8；超过硬件能力时引擎会钳制实际值。"
-  ).onChange((value: number) => updateRendering({ camera: { msaaSamples: Number(value) as MSAASamples } }));
-  const setCameraReadout = inspector.addReadout(cameraFolder, "Camera JSON / 相机 JSON");
-  const cameraActions = {
-    output: () => {
-      const output = formatCameraSnapshot(api.getCamera());
-      setCameraReadout(output);
-      console.info("[terrain-camera]", output);
-      void navigator.clipboard?.writeText(output).catch(() => undefined);
-    }
-  };
-  annotate(
-    cameraFolder.add(cameraActions, "output"),
-    "Output camera pose / 输出相机姿态",
-    "输出可复现的位置、世界旋转四元数、朝向和视场角；同时尝试复制到剪贴板。"
-  );
-
   const postProcessFolder = inspector.subfolder(renderingFolder, "Post-process / 后处理", true);
   annotate(
     postProcessFolder.add(renderingState.postProcess, "enabled"),
@@ -207,7 +199,9 @@ export function mountTerrainInspector(
     postProcessFolder.add(renderingState.postProcess, "tonemappingMode", TONEMAPPING_OPTIONS),
     "Tonemapping mode / 色调映射模式",
     "写入 TonemappingEffect.mode：Neutral 偏保留色相与饱和度，ACES 使用更电影化的近似。"
-  ).onChange((value: number) => updateRendering({ postProcess: { tonemappingMode: Number(value) as TonemappingMode } }));
+  ).onChange((value: number) =>
+    updateRendering({ postProcess: { tonemappingMode: Number(value) as TonemappingMode } })
+  );
 
   const surfaceVisibilityFolder = inspector.subfolder(surfaceFolder, "Visibility & density / 可见性与密度", true);
   for (const category of Object.keys(SURFACE_CATEGORY_LABELS) as SurfaceCategory[]) {
@@ -215,44 +209,87 @@ export function mountTerrainInspector(
     annotate(
       categoryFolder.add(surfaceState.enabled, category),
       "Enabled / 显示",
-      "只筛选已经离线编译的确定性实例，不会重新生成位置。"
+      "筛选该类别的确定性候选；高密度覆盖按相机邻近 cell 生成，scatter/explicit 使用已编译记录。"
     ).onChange((enabled: boolean) => {
       api.setSurface({ enabled: { [category]: enabled } });
-      updateSurfaceReadout();
     });
     annotate(
       categoryFolder.add(surfaceState.density, category, 0, 1, 0.01),
       "Density multiplier / 密度倍率",
-      "按稳定实例顺序保留前 N%；相同值每次刷新得到相同结果。"
+      "按稳定 hash priority 保留候选；刷新和往返同一 world cell 都保持一致。"
     ).onChange((density: number) => {
       api.setSurface({ density: { [category]: density } });
-      updateSurfaceReadout();
     });
-    const rule = surfaceSnapshot.sourceRules.find((candidate) => candidate.category === category);
-    const count = surfaceSnapshot.categoryCounts[category];
-    inspector.addReadout(categoryFolder, "Compiled inputs / 编译输入")(
-      rule
-        ? [
-            `instances: ${count.toLocaleString("en-US")}`,
-            `mode: ${rule.mode}`,
-            `density: ${rule.densityPerSquareMetre}/m²`,
-            `spacing: ${rule.spacing}m`,
-            `scale XZ: ${rule.scale.horizontal[0]}..${rule.scale.horizontal[1]}`,
-            `scale Y: ${rule.scale.vertical[0]}..${rule.scale.vertical[1]}`,
-            `cell: ${rule.cellSize}m`
-          ].join("\n")
-        : `instances: ${count.toLocaleString("en-US")}\nno compiled rule`
-    );
+    annotate(
+      categoryFolder.add(surfaceState.scale, category, SURFACE_RUNTIME_SCALE_MIN, SURFACE_RUNTIME_SCALE_MAX, 0.01),
+      "Scale multiplier / 尺寸倍率",
+      "实时缩放该类别的 prototype；实例中心不变。"
+    ).onChange((scale: number) => {
+      api.setSurface({ scale: { [category]: scale } });
+    });
+    annotate(
+      categoryFolder.addColor(surfaceState.color, category),
+      "Color multiplier / 颜色倍率",
+      "实时乘到该类别的线性 RGB 材质颜色；不会修改源纹理或实例分布。"
+    ).onChange((color: string) => {
+      api.setSurface({ color: { [category]: hexToRgb(color) } });
+    });
+    if (surfaceSnapshot.worldSurfaceAvailable) {
+      annotate(
+        categoryFolder.add(surfaceState.world.spacing, category, 0.5, 4, 0.01),
+        "World spacing / 世界间距",
+        "仅重新生成 world-noise 背景候选；有限 region 的 mask 覆盖与已编译 scatter/explicit 不变。"
+      ).onChange((spacing: number) => {
+        api.setSurface({ world: { spacing: { [category]: spacing } } });
+      });
+    }
   }
 
   const surfaceWindFolder = inspector.subfolder(surfaceFolder, "Wind / 风动", true);
-  annotate(surfaceWindFolder.add(surfaceState.wind, "enabled"), "Enabled / 启用", "关闭后冻结植被顶点位移，实例位置不变。")
-    .onChange((enabled: boolean) => api.setSurface({ wind: { enabled } }));
+  annotate(
+    surfaceWindFolder.add(surfaceState.wind, "enabled"),
+    "Enabled / 启用",
+    "关闭后冻结植被顶点位移，实例位置不变。"
+  ).onChange((enabled: boolean) => api.setSurface({ wind: { enabled } }));
   annotate(
     surfaceWindFolder.add(surfaceState.wind, "strength", 0, 2, 0.01),
     "Strength / 强度",
     "乘到每个材质的源风力；0 表示无位移。"
   ).onChange((strength: number) => api.setSurface({ wind: { strength } }));
+
+  if (surfaceSnapshot.worldSurfaceAvailable) {
+    const worldSurfaceFolder = inspector.subfolder(surfaceFolder, "World-noise distribution / 世界地表分布", true);
+    worldSurfaceEditorState = {
+      enabled: surfaceState.world.enabled,
+      biomeOffsetX: surfaceState.world.biomeOffset[0],
+      biomeOffsetZ: surfaceState.world.biomeOffset[1]
+    };
+    const worldSurfaceState = worldSurfaceEditorState;
+    annotate(
+      worldSurfaceFolder.add(worldSurfaceState, "enabled"),
+      "Enabled / 启用",
+      "在有限 region 之外按全局整数 lattice hash 生成确定性地表；关闭不会影响 region 的离线实例。"
+    ).onChange((enabled: boolean) => {
+      surfaceState.world.enabled = enabled;
+      api.setSurface({ world: { enabled } });
+    });
+    annotate(
+      worldSurfaceFolder.add(worldSurfaceState, "biomeOffsetX", -8192, 8192, 1),
+      "Biome offset X / 生态 X 偏移",
+      "平移所有世界生态噪声的 X 坐标，单位米；用于实时预览分布区域。"
+    ).onChange((value: number) => {
+      surfaceState.world.biomeOffset[0] = value;
+      api.setSurface({ world: { biomeOffset: [value, worldSurfaceState.biomeOffsetZ] } });
+    });
+    annotate(
+      worldSurfaceFolder.add(worldSurfaceState, "biomeOffsetZ", -8192, 8192, 1),
+      "Biome offset Z / 生态 Z 偏移",
+      "平移所有世界生态噪声的 Z 坐标，单位米；相同数值刷新后分布一致。"
+    ).onChange((value: number) => {
+      surfaceState.world.biomeOffset[1] = value;
+      api.setSurface({ world: { biomeOffset: [worldSurfaceState.biomeOffsetX, value] } });
+    });
+  }
 
   const surfaceLodFolder = inspector.subfolder(surfaceFolder, "LOD & culling / 层级与剔除", true);
   annotate(
@@ -261,7 +298,6 @@ export function mountTerrainInspector(
     "按投影高度选择 prototype 的真实 mesh LOD；关闭后固定 LOD0。"
   ).onChange((enabled: boolean) => {
     api.setSurface({ lod: { enabled } });
-    updateSurfaceReadout();
   });
   annotate(
     surfaceLodFolder.add(surfaceState.lod, "distanceScale", 0.25, 2, 0.01),
@@ -269,9 +305,7 @@ export function mountTerrainInspector(
     "同时缩放 prototype 最大可见距离与 LOD 阈值；值越小越早剔除和降级。"
   ).onChange((distanceScale: number) => {
     api.setSurface({ lod: { distanceScale } });
-    updateSurfaceReadout();
   });
-  const setSurfaceReadout = inspector.addReadout(surfaceLodFolder, "Runtime cells / 运行时 cell");
 
   const surfaceDebugFolder = inspector.subfolder(surfaceFolder, "Debug / 调试", true);
   annotate(
@@ -280,35 +314,12 @@ export function mountTerrainInspector(
       "World normal / 世界法线": "normal",
       "Wind weight / 风动权重": "wind-weight",
       "Category / 实例类别": "category",
-      "Spatial cell / 空间 cell": "cell"
+      "Spatial cell / 空间 cell": "cell",
+      "World biome / 世界生态值": "world-biome"
     }),
     "Debug output / 调试输出",
-    "切换实际渲染实例的材质、世界法线、根部锁定、类别或离线空间 cell；风动权重中蓝色固定、黄色摆动。"
+    "切换实际渲染实例的材质、世界法线、根部锁定、类别、空间 cell 或 world ecology 值；风动权重中蓝色固定、黄色摆动。"
   ).onChange((view: SurfaceRuntimeTuning["debugView"]) => api.setSurfaceDebugView(view));
-  for (const mask of surfaceSnapshot.debugMasks) {
-    inspector.addImagePreview(surfaceDebugFolder, {
-      label:
-        `${mask.id} density mask / ${mask.id} 密度掩码` +
-        ` · XZ (${mask.origin[0]}, ${mask.origin[1]})` +
-        ` · ${mask.size[0]}×${mask.size[1]}m`,
-      src: mask.url
-    });
-  }
-
-  function updateSurfaceReadout(): void {
-    const current = api.inspectSurface();
-    setSurfaceReadout(
-      [
-        `visible: ${current.visibleInstances.toLocaleString("en-US")} / ${current.totalInstances.toLocaleString("en-US")}`,
-        `cells: ${current.visibleRanges} / ${current.totalRanges}`,
-        `crossfading cells: ${current.transitioningRanges}`,
-        `renderer batches: ${current.rendererBatches}`,
-        `LOD: ${current.lodCounts.map((count, index) => `${index}=${count.toLocaleString("en-US")}`).join(", ")}`,
-        `impostor: ${current.impostorInstances.toLocaleString("en-US")}`
-      ].join("\n")
-    );
-  }
-  updateSurfaceReadout();
 
   const worldFolder = inspector.subfolder(terrainFolder, "World background / 世界背景", true);
   annotate(
@@ -320,27 +331,67 @@ export function mountTerrainInspector(
     syncWorldNoiseVisibility();
   });
 
-  const worldNoiseFolder = inspector.subfolder(worldFolder, "World noise / 世界噪声", worldState.background === "noise");
-  annotate(worldNoiseFolder.add(worldNoiseState, "fragmentNormals"), "Fragment normals / 片元法线", "启用后在 fragment 重新采样 world noise 导数；关闭则使用 vertex 传递的导数。")
-    .onChange((value: boolean) => api.setWorldNoiseTuning({ fragmentNormals: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "regionBlend", 0.05, 0.95, 0.01), "Region blend / 区域过渡", "区域边缘由 authored height 过渡到 world noise 的宽度。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ regionBlend: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "maxOctaves", 0, 15, 1), "Max octaves / 最大层数", "相机附近 morenoise 的最大 octave 数。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ maxOctaves: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "minOctaves", 0, 15, 1), "Min octaves / 最小层数", "远距离 morenoise 的最小 octave 数。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ minOctaves: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "lodDistance", 0, 40000, 1), "LOD distance / LOD 距离", "从最大 octave 衰减到最小 octave 的相机距离。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ lodDistance: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "scale", 0.25, 20, 0.01), "Scale / 频率", "world noise 的空间频率乘数。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ scale: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "height", 0, 1000, 0.1), "Height / 高度", "world noise 的高度乘数（米）。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ height: value }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "offsetX"), "Offset X / X 偏移", "world noise 在 region 坐标中的 X 平移。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ offset: [value, worldNoiseState.offsetY, worldNoiseState.offsetZ] }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "offsetY"), "Offset Y / Y 偏移", "world noise 的最终高度偏移，按 terrain 的 ×100 公式参与计算。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ offset: [worldNoiseState.offsetX, value, worldNoiseState.offsetZ] }));
-  annotate(worldNoiseFolder.add(worldNoiseState, "offsetZ"), "Offset Z / Z 偏移", "world noise 在 region 坐标中的 Z 平移。")
-    .onChange((value: number) => api.setWorldNoiseTuning({ offset: [worldNoiseState.offsetX, worldNoiseState.offsetY, value] }));
+  const worldNoiseFolder = inspector.subfolder(
+    worldFolder,
+    "World noise / 世界噪声",
+    worldState.background === "noise"
+  );
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "fragmentNormals"),
+    "Fragment normals / 片元法线",
+    "启用后在 fragment 重新采样 world noise 导数；关闭则使用 vertex 传递的导数。"
+  ).onChange((value: boolean) => api.setWorldNoiseTuning({ fragmentNormals: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "regionBlend", 0.05, 0.95, 0.01),
+    "Region blend / 区域过渡",
+    "区域边缘由 authored height 过渡到 world noise 的宽度。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ regionBlend: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "maxOctaves", 0, 15, 1),
+    "Max octaves / 最大层数",
+    "相机附近 morenoise 的最大 octave 数。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ maxOctaves: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "minOctaves", 0, 15, 1),
+    "Min octaves / 最小层数",
+    "远距离 morenoise 的最小 octave 数。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ minOctaves: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "lodDistance", 0, 40000, 1),
+    "LOD distance / LOD 距离",
+    "从最大 octave 衰减到最小 octave 的相机距离。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ lodDistance: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "scale", 0.25, 20, 0.01),
+    "Scale / 频率",
+    "world noise 的空间频率乘数。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ scale: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "height", 0, 1000, 0.1),
+    "Height / 高度",
+    "world noise 的高度乘数（米）。"
+  ).onChange((value: number) => api.setWorldNoiseTuning({ height: value }));
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "offsetX"),
+    "Offset X / X 偏移",
+    "world noise 在 region 坐标中的 X 平移。"
+  ).onChange((value: number) =>
+    api.setWorldNoiseTuning({ offset: [value, worldNoiseState.offsetY, worldNoiseState.offsetZ] })
+  );
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "offsetY"),
+    "Offset Y / Y 偏移",
+    "world noise 的最终高度偏移，按 terrain 的 ×100 公式参与计算。"
+  ).onChange((value: number) =>
+    api.setWorldNoiseTuning({ offset: [worldNoiseState.offsetX, value, worldNoiseState.offsetZ] })
+  );
+  annotate(
+    worldNoiseFolder.add(worldNoiseState, "offsetZ"),
+    "Offset Z / Z 偏移",
+    "world noise 在 region 坐标中的 Z 平移。"
+  ).onChange((value: number) =>
+    api.setWorldNoiseTuning({ offset: [worldNoiseState.offsetX, worldNoiseState.offsetY, value] })
+  );
 
   const layerFolder = inspector.subfolder(terrainFolder, "Texture assets / 纹理资产", true);
   const manifestUrl = new URL(api.manifestUrl);
@@ -365,92 +416,196 @@ export function mountTerrainInspector(
       }
     });
   }
-  annotate(layerFolder.add(layerState, "uvScale", 0.001, 2, 0.001), "UV scale / UV 缩放", "每米纹理重复率；值越大，纹理越密。")
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { uvScale: value }));
-  annotate(layerFolder.add(layerState, "detilingRotation", 0, 1, 0.001), "Detiling rotation / 去重复旋转", "按地形单元随机旋转纹理的幅度。")
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingRotation: value }));
-  annotate(layerFolder.add(layerState, "detilingShift", 0, 1, 0.001), "Detiling shift / 去重复平移", "按地形单元随机平移纹理的幅度。")
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingShift: value }));
+  annotate(
+    layerFolder.add(layerState, "uvScale", 0.001, 2, 0.001),
+    "UV scale / UV 缩放",
+    "每米纹理重复率；值越大，纹理越密。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { uvScale: value }));
+  annotate(
+    layerFolder.add(layerState, "detilingRotation", 0, 1, 0.001),
+    "Detiling rotation / 去重复旋转",
+    "按地形单元随机旋转纹理的幅度。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingRotation: value }));
+  annotate(
+    layerFolder.add(layerState, "detilingShift", 0, 1, 0.001),
+    "Detiling shift / 去重复平移",
+    "按地形单元随机平移纹理的幅度。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { detilingShift: value }));
   const normalDepthMaximum = Math.max(...snapshot.layers.map((layer) => layer.normalDepth), 1);
-  annotate(layerFolder.add(layerState, "normalDepth", 0, normalDepthMaximum, 0.01), "Normal depth / 法线强度", "纹理法线对最终材质法线的强度；范围取自当前 manifest。")
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { normalDepth: value }));
-  annotate(layerFolder.add(layerState, "aoStrength", 0, 2, 0.01), "AO strength / AO 强度", "纹理 height alpha 与 normal map 上朝分量共同衰减烘焙环境光；不改变直接光。")
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { aoStrength: value }));
+  annotate(
+    layerFolder.add(layerState, "normalDepth", 0, normalDepthMaximum, 0.01),
+    "Normal depth / 法线强度",
+    "纹理法线对最终材质法线的强度；范围取自当前 manifest。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { normalDepth: value }));
+  annotate(
+    layerFolder.add(layerState, "aoStrength", 0, 2, 0.01),
+    "AO strength / AO 强度",
+    "纹理 height alpha 参与 AO 的权重；当前 unlit 画面仅保留参数契约。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { aoStrength: value }));
   annotate(
     layerFolder.add(layerState, "roughnessMod", -1, 1, 0.01),
     "Roughness offset / 粗糙度偏移",
-    "加到 normal/roughness alpha；随后与 color map alpha 合成为最终地形粗糙度。"
-  )
-    .onChange((value: number) => api.setLayerTuning(sceneState.layer, { roughnessMod: value }));
-  annotate(layerFolder.add(snapshot.sampling, "bilerpEnabled"), "Bilerp / 四点插值", "开启后仅在放大采样的 loaded region 从四个 control texel 插值；默认开启以消除近处单 texel 的方块感。")
-    .onChange((value: boolean) => api.setSamplingTuning({ bilerpEnabled: value }));
-  annotate(layerFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01), "Blend sharpness / 高度混合锐度", "控制纹理 height alpha 对 base/overlay 混合的锐度。")
-    .onChange((value: number) => api.setSamplingTuning({ blendSharpness: value }));
-  annotate(samplingFolder.add(snapshot.sampling, "mipmapBias", 0.5, 1.5, 0.01), "Mipmap bias / Mip 偏差", "缩放 textureGrad 导数；更大更早使用低分辨率 Mip。")
-    .onChange((value: number) => api.setSamplingTuning({ mipmapBias: value }));
-  annotate(samplingFolder.add(snapshot.sampling, "biasDistance", 0, 16384, 1), "Bias distance / 偏差起距", "相机超过此距离后，Mip 导数向 Depth blur 过渡。")
-    .onChange((value: number) => api.setSamplingTuning({ biasDistance: value }));
-  annotate(samplingFolder.add(snapshot.sampling, "depthBlur", 0, 35, 0.1), "Depth blur / 远距模糊", "远距 Mip 导数附加值；用于抑制远处纹理闪烁。")
-    .onChange((value: number) => api.setSamplingTuning({ depthBlur: value }));
+    "加到 normal/roughness alpha；当前 unlit 画面仅保留参数契约。"
+  ).onChange((value: number) => api.setLayerTuning(sceneState.layer, { roughnessMod: value }));
+  annotate(
+    layerFolder.add(snapshot.sampling, "bilerpEnabled"),
+    "Bilerp / 四点插值",
+    "开启后仅在放大采样的 loaded region 从四个 control texel 插值；默认开启以消除近处单 texel 的方块感。"
+  ).onChange((value: boolean) => api.setSamplingTuning({ bilerpEnabled: value }));
+  annotate(
+    layerFolder.add(snapshot.sampling, "blendSharpness", 0, 1, 0.01),
+    "Blend sharpness / 高度混合锐度",
+    "控制纹理 height alpha 对 base/overlay 混合的锐度。"
+  ).onChange((value: number) => api.setSamplingTuning({ blendSharpness: value }));
+  annotate(
+    layerFolder.add(snapshot.sampling, "mipmapBias", 0.5, 1.5, 0.01),
+    "Mipmap bias / Mip 偏差",
+    "缩放 textureGrad 导数；更大更早使用低分辨率 Mip。"
+  ).onChange((value: number) => api.setSamplingTuning({ mipmapBias: value }));
+  annotate(
+    layerFolder.add(snapshot.sampling, "biasDistance", 0, 16384, 1),
+    "Bias distance / 偏差起距",
+    "相机超过此距离后，Mip 导数向 Depth blur 过渡。"
+  ).onChange((value: number) => api.setSamplingTuning({ biasDistance: value }));
+  annotate(
+    layerFolder.add(snapshot.sampling, "depthBlur", 0, 35, 0.1),
+    "Depth blur / 远距模糊",
+    "远距 Mip 导数附加值；用于抑制远处纹理闪烁。"
+  ).onChange((value: number) => api.setSamplingTuning({ depthBlur: value }));
 
   const autoFolder = inspector.subfolder(terrainFolder, "Auto shader / 自动材质", true);
-  annotate(autoFolder.add(materialState.autoShader, "enabled"), "Enabled / 启用", "允许 control bit 0 用坡度与高度生成 base/overlay 混合。")
-    .onChange((value: boolean) => api.setMaterialTuning({ autoShader: { enabled: value } }));
-  annotate(autoFolder.add(materialState.autoShader, "slope", 0, 10, 0.01), "Auto slope / 自动坡度", "坡度越陡，混合越偏向 Base texture。")
-    .onChange((value: number) => api.setMaterialTuning({ autoShader: { slope: value } }));
-  annotate(autoFolder.add(materialState.autoShader, "heightReduction", 0, 1, 0.01), "Height reduction / 高度削减", "高度越高，自动混合越减少 Overlay texture。")
-    .onChange((value: number) => api.setMaterialTuning({ autoShader: { heightReduction: value } }));
-  annotate(autoFolder.add(materialState.autoShader, "baseTexture", layerOptions(api)), "Base texture / 基础纹理", "自动材质在陡坡或高处使用的 texture asset。")
-    .onChange((value: number) => api.setMaterialTuning({ autoShader: { baseTexture: Number(value) } }));
-  annotate(autoFolder.add(materialState.autoShader, "overlayTexture", layerOptions(api)), "Overlay texture / 覆盖纹理", "自动材质在平坦区域叠加的 texture asset。")
-    .onChange((value: number) => api.setMaterialTuning({ autoShader: { overlayTexture: Number(value) } }));
+  annotate(
+    autoFolder.add(materialState.autoShader, "enabled"),
+    "Enabled / 启用",
+    "允许 control bit 0 用坡度与高度生成 base/overlay 混合。"
+  ).onChange((value: boolean) => api.setMaterialTuning({ autoShader: { enabled: value } }));
+  annotate(
+    autoFolder.add(materialState.autoShader, "slope", 0, 10, 0.01),
+    "Auto slope / 自动坡度",
+    "坡度越陡，混合越偏向 Base texture。"
+  ).onChange((value: number) => api.setMaterialTuning({ autoShader: { slope: value } }));
+  annotate(
+    autoFolder.add(materialState.autoShader, "heightReduction", 0, 1, 0.01),
+    "Height reduction / 高度削减",
+    "高度越高，自动混合越减少 Overlay texture。"
+  ).onChange((value: number) => api.setMaterialTuning({ autoShader: { heightReduction: value } }));
+  annotate(
+    autoFolder.add(materialState.autoShader, "baseTexture", layerOptions(api)),
+    "Base texture / 基础纹理",
+    "自动材质在陡坡或高处使用的 texture asset。"
+  ).onChange((value: number) => api.setMaterialTuning({ autoShader: { baseTexture: Number(value) } }));
+  annotate(
+    autoFolder.add(materialState.autoShader, "overlayTexture", layerOptions(api)),
+    "Overlay texture / 覆盖纹理",
+    "自动材质在平坦区域叠加的 texture asset。"
+  ).onChange((value: number) => api.setMaterialTuning({ autoShader: { overlayTexture: Number(value) } }));
 
   const dualFolder = inspector.subfolder(terrainFolder, "Dual scaling / 双尺度", true);
-  annotate(dualFolder.add(materialState.dualScaling, "enabled"), "Enabled / 启用", "用一个更大尺度的 texture 样本平滑近远尺度过渡。")
-    .onChange((value: boolean) => api.setMaterialTuning({ dualScaling: { enabled: value } }));
-  annotate(dualFolder.add(materialState.dualScaling, "texture", layerOptions(api)), "Texture / 纹理", "参与 dual scaling 的 texture asset。")
-    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { texture: Number(value) } }));
-  annotate(dualFolder.add(materialState.dualScaling, "reduction", 0.001, 1, 0.001), "Scale reduction / 尺度缩减", "第二尺度相对于原始 UV 的缩减系数。")
-    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { reduction: value } }));
-  annotate(dualFolder.add(materialState.dualScaling, "triScaleReduction", 0.001, 1, 0.001), "World background scale / 世界背景缩放", "区域外 world background 同时缩放材质 UV、去重复单元与导数；与近远双尺度过渡无关。")
-    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { triScaleReduction: value } }));
-  annotate(dualFolder.add(materialState.dualScaling, "near", 0, 1000, 1), "Near / 近距", "双尺度过渡开始的相机距离。")
-    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { near: value, far: materialState.dualScaling.far } }));
-  annotate(dualFolder.add(materialState.dualScaling, "far", 1, 1000, 1), "Far / 远距", "双尺度过渡结束的相机距离。")
-    .onChange((value: number) => api.setMaterialTuning({ dualScaling: { near: materialState.dualScaling.near, far: value } }));
+  annotate(
+    dualFolder.add(materialState.dualScaling, "enabled"),
+    "Enabled / 启用",
+    "用一个更大尺度的 texture 样本平滑近远尺度过渡。"
+  ).onChange((value: boolean) => api.setMaterialTuning({ dualScaling: { enabled: value } }));
+  annotate(
+    dualFolder.add(materialState.dualScaling, "texture", layerOptions(api)),
+    "Texture / 纹理",
+    "参与 dual scaling 的 texture asset。"
+  ).onChange((value: number) => api.setMaterialTuning({ dualScaling: { texture: Number(value) } }));
+  annotate(
+    dualFolder.add(materialState.dualScaling, "reduction", 0.001, 1, 0.001),
+    "Scale reduction / 尺度缩减",
+    "第二尺度相对于原始 UV 的缩减系数。"
+  ).onChange((value: number) => api.setMaterialTuning({ dualScaling: { reduction: value } }));
+  annotate(
+    dualFolder.add(materialState.dualScaling, "near", 0, 1000, 1),
+    "Near / 近距",
+    "双尺度过渡开始的相机距离。"
+  ).onChange((value: number) =>
+    api.setMaterialTuning({ dualScaling: { near: value, far: materialState.dualScaling.far } })
+  );
+  annotate(
+    dualFolder.add(materialState.dualScaling, "far", 1, 1000, 1),
+    "Far / 远距",
+    "双尺度过渡结束的相机距离。"
+  ).onChange((value: number) =>
+    api.setMaterialTuning({ dualScaling: { near: materialState.dualScaling.near, far: value } })
+  );
 
   const projectionFolder = inspector.subfolder(terrainFolder, "Projection / 投影采样", true);
-  annotate(projectionFolder.add(materialState.projection, "enabled"), "Enabled / 启用", "陡坡时从平面 UV 过渡到 terrain 的三向投影采样。")
-    .onChange((value: boolean) => api.setMaterialTuning({ projection: { enabled: value } }));
-  annotate(projectionFolder.add(materialState.projection, "threshold", 0, 0.99, 0.01), "Threshold / 阈值", "世界法线 Y 分量的投影转换阈值；值越高，越接近平面采样。")
-    .onChange((value: number) => api.setMaterialTuning({ projection: { threshold: value } }));
+  annotate(
+    projectionFolder.add(materialState.projection, "enabled"),
+    "Enabled / 启用",
+    "陡坡时从平面 UV 过渡到 terrain 的三向投影采样。"
+  ).onChange((value: boolean) => api.setMaterialTuning({ projection: { enabled: value } }));
+  annotate(
+    projectionFolder.add(materialState.projection, "threshold", 0, 0.99, 0.01),
+    "Threshold / 阈值",
+    "世界法线 Y 分量的投影转换阈值；值越高，越接近平面采样。"
+  ).onChange((value: number) => api.setMaterialTuning({ projection: { threshold: value } }));
 
   const macroFolder = inspector.subfolder(terrainFolder, "Macro variation / 宏观变化", true);
-  annotate(macroFolder.add(materialState.macroVariation, "enabled"), "Enabled / 启用", "用低频 noise 打散大面积的 albedo 色调。")
-    .onChange((value: boolean) => api.setMaterialTuning({ macroVariation: { enabled: value } }));
-  annotate(macroFolder.addColor(materialState.macroVariation, "color1"), "Color 1 / 颜色一", "macro noise 第一端的颜色乘数。")
-    .onChange((value: string) => api.setMaterialTuning({ macroVariation: { color1: hexToRgb(value) } }));
-  annotate(macroFolder.addColor(materialState.macroVariation, "color2"), "Color 2 / 颜色二", "macro noise 第二端的颜色乘数。")
-    .onChange((value: string) => api.setMaterialTuning({ macroVariation: { color2: hexToRgb(value) } }));
-  annotate(macroFolder.add(materialState.macroVariation, "slope", 0, 1, 0.001), "Slope / 坡度", "混合低频 macro noise 时使用的坡度权重。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { slope: value } }));
-  annotate(macroFolder.add(materialState.macroVariation, "noise1Scale", 0.001, 1, 0.001), "Noise 1 scale / 噪声一缩放", "第一低频噪声的 world UV 缩放。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Scale: value } }));
-  annotate(macroFolder.add(materialState.macroVariation, "noise1Angle", 0, 6.283, 0.001), "Noise 1 angle / 噪声一角度", "第一低频噪声的 world UV 旋转（弧度）。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Angle: value } }));
-  annotate(macroFolder.add(materialState.macroVariation, "noise1OffsetX", -4, 4, 0.01), "Noise 1 offset X / 噪声一 X 偏移", "第一低频噪声的 X 平移。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Offset: [value, materialState.macroVariation.noise1OffsetY] } }));
-  annotate(macroFolder.add(materialState.macroVariation, "noise1OffsetY", -4, 4, 0.01), "Noise 1 offset Y / 噪声一 Y 偏移", "第一低频噪声的 Y 平移。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Offset: [materialState.macroVariation.noise1OffsetX, value] } }));
-  annotate(macroFolder.add(materialState.macroVariation, "noise2Scale", 0.001, 1, 0.001), "Noise 2 scale / 噪声二缩放", "第二低频噪声的 world UV 缩放。")
-    .onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise2Scale: value } }));
+  annotate(
+    macroFolder.add(materialState.macroVariation, "enabled"),
+    "Enabled / 启用",
+    "用低频 noise 打散大面积的 albedo 色调。"
+  ).onChange((value: boolean) => api.setMaterialTuning({ macroVariation: { enabled: value } }));
+  annotate(
+    macroFolder.addColor(materialState.macroVariation, "color1"),
+    "Color 1 / 颜色一",
+    "macro noise 第一端的颜色乘数。"
+  ).onChange((value: string) => api.setMaterialTuning({ macroVariation: { color1: hexToRgb(value) } }));
+  annotate(
+    macroFolder.addColor(materialState.macroVariation, "color2"),
+    "Color 2 / 颜色二",
+    "macro noise 第二端的颜色乘数。"
+  ).onChange((value: string) => api.setMaterialTuning({ macroVariation: { color2: hexToRgb(value) } }));
+  annotate(
+    macroFolder.add(materialState.macroVariation, "slope", 0, 1, 0.001),
+    "Slope / 坡度",
+    "混合低频 macro noise 时使用的坡度权重。"
+  ).onChange((value: number) => api.setMaterialTuning({ macroVariation: { slope: value } }));
+  annotate(
+    macroFolder.add(materialState.macroVariation, "noise1Scale", 0.001, 1, 0.001),
+    "Noise 1 scale / 噪声一缩放",
+    "第一低频噪声的 world UV 缩放。"
+  ).onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Scale: value } }));
+  annotate(
+    macroFolder.add(materialState.macroVariation, "noise1Angle", 0, 6.283, 0.001),
+    "Noise 1 angle / 噪声一角度",
+    "第一低频噪声的 world UV 旋转（弧度）。"
+  ).onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise1Angle: value } }));
+  annotate(
+    macroFolder.add(materialState.macroVariation, "noise1OffsetX", -4, 4, 0.01),
+    "Noise 1 offset X / 噪声一 X 偏移",
+    "第一低频噪声的 X 平移。"
+  ).onChange((value: number) =>
+    api.setMaterialTuning({ macroVariation: { noise1Offset: [value, materialState.macroVariation.noise1OffsetY] } })
+  );
+  annotate(
+    macroFolder.add(materialState.macroVariation, "noise1OffsetY", -4, 4, 0.01),
+    "Noise 1 offset Y / 噪声一 Y 偏移",
+    "第一低频噪声的 Y 平移。"
+  ).onChange((value: number) =>
+    api.setMaterialTuning({ macroVariation: { noise1Offset: [materialState.macroVariation.noise1OffsetX, value] } })
+  );
+  annotate(
+    macroFolder.add(materialState.macroVariation, "noise2Scale", 0.001, 1, 0.001),
+    "Noise 2 scale / 噪声二缩放",
+    "第二低频噪声的 world UV 缩放。"
+  ).onChange((value: number) => api.setMaterialTuning({ macroVariation: { noise2Scale: value } }));
 
   if (options.showWater !== false) {
     const waterFolder = inspector.subfolder(terrainFolder, "Water debug / 水体调试", true);
-    annotate(waterFolder.add(waterState, "enabled"), "Enabled / 启用", "独立的 water-pcg 可视化；不会修改 control word、hole 或地形材质。")
-      .onChange((enabled: boolean) => api.setWaterDebug({ enabled }));
-    annotate(waterFolder.add(waterState, "height", -256, 512, 0.1), "Surface height / 水面高度", "水面 world Y；仅在水体调试开启时可见。")
-      .onChange((height: number) => api.setWaterDebug({ height }));
+    annotate(
+      waterFolder.add(waterState, "enabled"),
+      "Enabled / 启用",
+      "独立的 water-pcg 可视化；不会修改 control word、hole 或地形材质。"
+    ).onChange((enabled: boolean) => api.setWaterDebug({ enabled }));
+    annotate(
+      waterFolder.add(waterState, "height", -256, 512, 0.1),
+      "Surface height / 水面高度",
+      "水面 world Y；仅在水体调试开启时可见。"
+    ).onChange((height: number) => api.setWaterDebug({ height }));
   }
 
   selectLayer(initialLayer);
@@ -535,7 +690,11 @@ function replaceInspectorState(
   Object.assign(worldNoiseState, createWorldNoiseState(snapshot));
 }
 
-function annotate<T extends { domElement: HTMLElement; name(label: string): T }>(controller: T, label: string, description: string): T {
+function annotate<T extends { domElement: HTMLElement; name(label: string): T }>(
+  controller: T,
+  label: string,
+  description: string
+): T {
   controller.name(label);
   controller.domElement.title = description;
   return controller;
@@ -543,14 +702,20 @@ function annotate<T extends { domElement: HTMLElement; name(label: string): T }>
 
 function rgbToHex(rgb: readonly [number, number, number]): string {
   return `#${rgb
-    .map((value) => Math.round(Math.min(1, Math.max(0, value)) * 255).toString(16).padStart(2, "0"))
+    .map((value) =>
+      Math.round(Math.min(1, Math.max(0, Color.linearToSRGBSpace(value))) * 255)
+        .toString(16)
+        .padStart(2, "0")
+    )
     .join("")}`;
 }
 
 function hexToRgb(value: string): [number, number, number] {
   const hex = value.replace("#", "");
   if (!/^[0-9a-f]{6}$/i.test(hex)) throw new Error(`[terrain-debug] invalid color ${value}`);
-  return [Number.parseInt(hex.slice(0, 2), 16) / 255, Number.parseInt(hex.slice(2, 4), 16) / 255, Number.parseInt(hex.slice(4, 6), 16) / 255];
+  return [0, 2, 4].map((offset) =>
+    Color.sRGBToLinearSpace(Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+  ) as [number, number, number];
 }
 
 function replaceRenderingState(target: TerrainRenderingSnapshot, source: TerrainRenderingSnapshot): void {
@@ -562,15 +727,31 @@ function replaceRenderingState(target: TerrainRenderingSnapshot, source: Terrain
 function cloneSurfaceTuning(source: SurfaceRuntimeTuning): {
   enabled: Record<SurfaceCategory, boolean>;
   density: Record<SurfaceCategory, number>;
+  color: Record<SurfaceCategory, string>;
+  scale: Record<SurfaceCategory, number>;
   wind: { enabled: boolean; strength: number; direction: [number, number, number] };
   lod: { enabled: boolean; distanceScale: number };
+  world: {
+    enabled: boolean;
+    spacing: Record<SurfaceCategory, number>;
+    biomeOffset: [number, number];
+  };
   debugView: SurfaceRuntimeTuning["debugView"];
 } {
   return {
     enabled: { ...source.enabled },
     density: { ...source.density },
+    color: Object.fromEntries(
+      Object.entries(source.color).map(([category, color]) => [category, rgbToHex(color)])
+    ) as Record<SurfaceCategory, string>,
+    scale: { ...source.scale },
     wind: { ...source.wind, direction: [...source.wind.direction] },
     lod: { ...source.lod },
+    world: {
+      enabled: source.world.enabled,
+      spacing: { ...source.world.spacing },
+      biomeOffset: [...source.world.biomeOffset]
+    },
     debugView: source.debugView
   };
 }
@@ -578,8 +759,16 @@ function cloneSurfaceTuning(source: SurfaceRuntimeTuning): {
 function replaceSurfaceState(target: ReturnType<typeof cloneSurfaceTuning>, source: SurfaceRuntimeTuning): void {
   Object.assign(target.enabled, source.enabled);
   Object.assign(target.density, source.density);
+  Object.assign(
+    target.color,
+    Object.fromEntries(Object.entries(source.color).map(([category, color]) => [category, rgbToHex(color)]))
+  );
+  Object.assign(target.scale, source.scale);
   Object.assign(target.wind, source.wind, { direction: [...source.wind.direction] });
   Object.assign(target.lod, source.lod);
+  target.world.enabled = source.world.enabled;
+  Object.assign(target.world.spacing, source.world.spacing);
+  target.world.biomeOffset.splice(0, 2, ...source.world.biomeOffset);
   target.debugView = source.debugView;
 }
 

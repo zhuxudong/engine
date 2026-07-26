@@ -60,11 +60,7 @@ export interface GrasslandsArchitecture {
    * @param strength Source wind-force multiplier.
    * @param direction Normalized world-space wind direction.
    */
-  setWind(
-    enabled: boolean,
-    strength: number,
-    direction: SurfaceRuntimeTuning["wind"]["direction"]
-  ): void;
+  setWind(enabled: boolean, strength: number, direction: SurfaceRuntimeTuning["wind"]["direction"]): void;
 }
 
 /**
@@ -132,6 +128,8 @@ export async function loadGrasslandsArchitecture(
         SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
         SurfaceMaterial.setRendererInstanced(false, renderer.shaderData);
         SurfaceMaterial.setRendererBillboard(false, renderer.shaderData);
+        SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
+        SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
       }
       renderer.castShadows = true;
       renderer.receiveShadows = true;

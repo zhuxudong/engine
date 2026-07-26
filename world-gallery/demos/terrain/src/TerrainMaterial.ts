@@ -46,8 +46,8 @@ export enum TerrainDebugView {
   ColorMap = 28,
   RoughMap = 29,
   DetileRotationAxis = 30,
-  SurfaceFeatures = 31,
-  WorldMaterialScale = 32
+  Navigation = 31,
+  HeightSource = 32
 }
 
 /** Mutable per-layer inputs exposed to the terrain diagnostics surface. */
@@ -344,19 +344,32 @@ export class TerrainMaterial extends BaseMaterial {
       this._worldNoiseMinOctavesValue = minOctaves;
     }
     if (tuning.lodDistance !== undefined) {
-      this.shaderData.setFloat(TerrainMaterial._worldNoiseLodDistance, this._range("worldNoise.lodDistance", tuning.lodDistance, 0, 40000));
+      this.shaderData.setFloat(
+        TerrainMaterial._worldNoiseLodDistance,
+        this._range("worldNoise.lodDistance", tuning.lodDistance, 0, 40000)
+      );
     }
     if (tuning.scale !== undefined) {
-      this.shaderData.setFloat(TerrainMaterial._worldNoiseScale, this._range("worldNoise.scale", tuning.scale, 0.25, 20));
+      this.shaderData.setFloat(
+        TerrainMaterial._worldNoiseScale,
+        this._range("worldNoise.scale", tuning.scale, 0.25, 20)
+      );
     }
     if (tuning.height !== undefined) {
-      this.shaderData.setFloat(TerrainMaterial._worldNoiseHeight, this._range("worldNoise.height", tuning.height, 0, 1000));
+      this.shaderData.setFloat(
+        TerrainMaterial._worldNoiseHeight,
+        this._range("worldNoise.height", tuning.height, 0, 1000)
+      );
     }
     if (tuning.offset !== undefined) {
       const [x, y, z] = tuning.offset;
       this.shaderData.setVector3(
         TerrainMaterial._worldNoiseOffset,
-        new Vector3(this._finite("worldNoise.offset.x", x), this._finite("worldNoise.offset.y", y), this._finite("worldNoise.offset.z", z))
+        new Vector3(
+          this._finite("worldNoise.offset.x", x),
+          this._finite("worldNoise.offset.y", y),
+          this._finite("worldNoise.offset.z", z)
+        )
       );
     }
   }
@@ -490,8 +503,10 @@ export class TerrainMaterial extends BaseMaterial {
     if (tuning.normalDepth !== undefined) {
       this._normalDepthValues[layer] = this._nonNegative("normalDepth", tuning.normalDepth);
     }
-    if (tuning.aoStrength !== undefined) this._aoStrengthValues[layer] = this._range("aoStrength", tuning.aoStrength, 0, 2);
-    if (tuning.roughnessMod !== undefined) this._roughnessModValues[layer] = this._range("roughnessMod", tuning.roughnessMod, -1, 1);
+    if (tuning.aoStrength !== undefined)
+      this._aoStrengthValues[layer] = this._range("aoStrength", tuning.aoStrength, 0, 2);
+    if (tuning.roughnessMod !== undefined)
+      this._roughnessModValues[layer] = this._range("roughnessMod", tuning.roughnessMod, -1, 1);
     this._uploadLayerParameters();
   }
 
@@ -505,12 +520,18 @@ export class TerrainMaterial extends BaseMaterial {
       this.shaderData.setInt(TerrainMaterial._bilerpEnabled, tuning.bilerpEnabled ? 1 : 0);
     }
     if (tuning.blendSharpness !== undefined)
-      this.shaderData.setFloat(TerrainMaterial._blendSharpness, this._range("blendSharpness", tuning.blendSharpness, 0, 1));
+      this.shaderData.setFloat(
+        TerrainMaterial._blendSharpness,
+        this._range("blendSharpness", tuning.blendSharpness, 0, 1)
+      );
     if (tuning.mipmapBias !== undefined) {
       this.shaderData.setFloat(TerrainMaterial._mipmapBias, this._range("mipmapBias", tuning.mipmapBias, 0.5, 1.5));
     }
     if (tuning.biasDistance !== undefined) {
-      this.shaderData.setFloat(TerrainMaterial._biasDistance, this._range("biasDistance", tuning.biasDistance, 0, 16384));
+      this.shaderData.setFloat(
+        TerrainMaterial._biasDistance,
+        this._range("biasDistance", tuning.biasDistance, 0, 16384)
+      );
     }
     if (tuning.depthBlur !== undefined) {
       this.shaderData.setFloat(TerrainMaterial._depthBlur, this._range("depthBlur", tuning.depthBlur, 0, 35));
@@ -547,7 +568,8 @@ export class TerrainMaterial extends BaseMaterial {
 
     const projection = tuning.projection;
     if (projection) {
-      if (projection.enabled !== undefined) this.shaderData.setInt(TerrainMaterial._projectionEnabled, projection.enabled ? 1 : 0);
+      if (projection.enabled !== undefined)
+        this.shaderData.setInt(TerrainMaterial._projectionEnabled, projection.enabled ? 1 : 0);
       if (projection.threshold !== undefined) {
         this.shaderData.setFloat(
           TerrainMaterial._projectionThreshold,
@@ -563,7 +585,10 @@ export class TerrainMaterial extends BaseMaterial {
         this.shaderData.setInt(TerrainMaterial._dualTexture, dual.texture);
       }
       if (dual.reduction !== undefined) {
-        this.shaderData.setFloat(TerrainMaterial._dualReduction, this._range("dualScaling.reduction", dual.reduction, 0.001, 1));
+        this.shaderData.setFloat(
+          TerrainMaterial._dualReduction,
+          this._range("dualScaling.reduction", dual.reduction, 0.001, 1)
+        );
       }
       if (dual.triScaleReduction !== undefined) {
         this.shaderData.setFloat(
@@ -589,24 +614,39 @@ export class TerrainMaterial extends BaseMaterial {
 
     const macro = tuning.macroVariation;
     if (macro) {
-      if (macro.color1 !== undefined) this.shaderData.setVector3(TerrainMaterial._macroColor1, this._color("macroVariation.color1", macro.color1));
-      if (macro.color2 !== undefined) this.shaderData.setVector3(TerrainMaterial._macroColor2, this._color("macroVariation.color2", macro.color2));
-      if (macro.slope !== undefined) this.shaderData.setFloat(TerrainMaterial._macroSlope, this._range("macroVariation.slope", macro.slope, 0, 1));
+      if (macro.color1 !== undefined)
+        this.shaderData.setVector3(TerrainMaterial._macroColor1, this._color("macroVariation.color1", macro.color1));
+      if (macro.color2 !== undefined)
+        this.shaderData.setVector3(TerrainMaterial._macroColor2, this._color("macroVariation.color2", macro.color2));
+      if (macro.slope !== undefined)
+        this.shaderData.setFloat(TerrainMaterial._macroSlope, this._range("macroVariation.slope", macro.slope, 0, 1));
       if (macro.noise1Scale !== undefined) {
-        this.shaderData.setFloat(TerrainMaterial._noise1Scale, this._range("macroVariation.noise1Scale", macro.noise1Scale, 0.001, 1));
+        this.shaderData.setFloat(
+          TerrainMaterial._noise1Scale,
+          this._range("macroVariation.noise1Scale", macro.noise1Scale, 0.001, 1)
+        );
       }
       if (macro.noise1Angle !== undefined) {
-        this.shaderData.setFloat(TerrainMaterial._noise1Angle, this._range("macroVariation.noise1Angle", macro.noise1Angle, 0, 6.283));
+        this.shaderData.setFloat(
+          TerrainMaterial._noise1Angle,
+          this._range("macroVariation.noise1Angle", macro.noise1Angle, 0, 6.283)
+        );
       }
       if (macro.noise1Offset !== undefined) {
         const [x, y] = macro.noise1Offset;
         this.shaderData.setVector2(
           TerrainMaterial._noise1Offset,
-          new Vector2(this._finite("macroVariation.noise1Offset.x", x), this._finite("macroVariation.noise1Offset.y", y))
+          new Vector2(
+            this._finite("macroVariation.noise1Offset.x", x),
+            this._finite("macroVariation.noise1Offset.y", y)
+          )
         );
       }
       if (macro.noise2Scale !== undefined) {
-        this.shaderData.setFloat(TerrainMaterial._noise2Scale, this._range("macroVariation.noise2Scale", macro.noise2Scale, 0.001, 1));
+        this.shaderData.setFloat(
+          TerrainMaterial._noise2Scale,
+          this._range("macroVariation.noise2Scale", macro.noise2Scale, 0.001, 1)
+        );
       }
       if (macro.enabled !== undefined) this._setMacro(TerrainMaterial._macroVariationMacro, macro.enabled);
     }
@@ -653,7 +693,11 @@ export class TerrainMaterial extends BaseMaterial {
   }
 
   private _color(name: string, value: readonly [number, number, number]): Vector3 {
-    return new Vector3(this._finite(`${name}.r`, value[0]), this._finite(`${name}.g`, value[1]), this._finite(`${name}.b`, value[2]));
+    return new Vector3(
+      this._finite(`${name}.r`, value[0]),
+      this._finite(`${name}.g`, value[1]),
+      this._finite(`${name}.b`, value[2])
+    );
   }
 
   private _setMacro(macro: ShaderMacro, enabled: boolean): void {

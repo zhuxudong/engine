@@ -1,6 +1,16 @@
 import { Script, Vector3 } from "@galacean/engine";
 import { FreeControl } from "@galacean/engine-toolkit-controls";
-import { TerrainData } from "./data/TerrainData";
+
+/** Continuous CPU terrain height consumed by first-person ground contact. */
+export interface TerrainGroundHeightProvider {
+  /**
+   * Samples rendered terrain height at one world-space coordinate.
+   * @param worldX World-space X coordinate in metres.
+   * @param worldZ World-space Z coordinate in metres.
+   * @returns Ground height, or undefined when the active terrain mode has no surface.
+   */
+  sampleHeightInterpolated(worldX: number, worldZ: number): number | undefined;
+}
 
 /** Initial XZ position and view orientation for terrain first-person mode. */
 export interface TerrainFirstPersonPose {
@@ -42,7 +52,7 @@ export class TerrainFirstPersonController extends Script {
 
   private readonly _lookTarget = new Vector3();
   private readonly _lastGroundedPosition = new Vector3();
-  private _terrain: TerrainData | null = null;
+  private _terrain: TerrainGroundHeightProvider | null = null;
   private _freeControl: FreeControl | null = null;
   private _active = false;
   private _hasGroundedPosition = false;
@@ -67,9 +77,9 @@ export class TerrainFirstPersonController extends Script {
 
   /**
    * Connects the controller to the CPU-resident terrain data.
-   * @param terrain Loaded terrain height data used for each ground sample.
+   * @param terrain Active finite or procedural terrain-height provider.
    */
-  configure(terrain: TerrainData): void {
+  configure(terrain: TerrainGroundHeightProvider): void {
     this._terrain = terrain;
   }
 
@@ -106,7 +116,10 @@ export class TerrainFirstPersonController extends Script {
    * @param height Requested eye height in metres; this demo clamps it to 0.5–3 metres.
    */
   setEyeHeight(height: number): void {
-    this._eyeHeight = Math.min(TerrainFirstPersonController._maximumEyeHeight, Math.max(TerrainFirstPersonController._minimumEyeHeight, height));
+    this._eyeHeight = Math.min(
+      TerrainFirstPersonController._maximumEyeHeight,
+      Math.max(TerrainFirstPersonController._minimumEyeHeight, height)
+    );
     if (!this._active) return;
     const position = this.entity.transform.worldPosition;
     this._snapToTerrain(position.x, position.z);
@@ -117,7 +130,10 @@ export class TerrainFirstPersonController extends Script {
    * @param speed Requested horizontal speed in metres per second; this demo clamps it to 1–30 m/s.
    */
   setMoveSpeed(speed: number): void {
-    this._moveSpeed = Math.min(TerrainFirstPersonController._maximumMoveSpeed, Math.max(TerrainFirstPersonController._minimumMoveSpeed, speed));
+    this._moveSpeed = Math.min(
+      TerrainFirstPersonController._maximumMoveSpeed,
+      Math.max(TerrainFirstPersonController._minimumMoveSpeed, speed)
+    );
     if (this._freeControl) this._freeControl.movementSpeed = this._moveSpeed;
   }
 
@@ -131,7 +147,11 @@ export class TerrainFirstPersonController extends Script {
     const height = this._terrain?.sampleHeightInterpolated(worldX, worldZ);
     if (height === undefined) {
       if (this._hasGroundedPosition) {
-        this.entity.transform.setPosition(this._lastGroundedPosition.x, this._lastGroundedPosition.y, this._lastGroundedPosition.z);
+        this.entity.transform.setPosition(
+          this._lastGroundedPosition.x,
+          this._lastGroundedPosition.y,
+          this._lastGroundedPosition.z
+        );
       }
       return;
     }
@@ -150,5 +170,4 @@ export class TerrainFirstPersonController extends Script {
     );
     this.entity.transform.lookAt(this._lookTarget);
   }
-
 }

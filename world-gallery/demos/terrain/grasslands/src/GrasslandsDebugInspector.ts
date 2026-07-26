@@ -32,12 +32,9 @@ export interface GrasslandsSceneDebugApi {
  * @param inspector Shared terrain inspector.
  * @param api Ready scene runtime contract.
  */
-export function mountGrasslandsInspector(
-  inspector: DebugInspector,
-  api: GrasslandsSceneDebugApi
-): void {
+export function mountGrasslandsInspector(inspector: DebugInspector, api: GrasslandsSceneDebugApi): void {
   const state = { ...api.getScene() };
-  const sceneFolder = inspector.folder("Scene / 场景复刻", true);
+  const sceneFolder = inspector.folder("Scene / 场景复刻", false);
 
   const composition = inspector.subfolder(sceneFolder, "Composition / 场景构成", true);
   annotate(
@@ -67,24 +64,6 @@ export function mountGrasslandsInspector(
     "Fog / 雾",
     "切换导出的指数雾；density 0.0004，同时作用于地形、地表、建筑和云。"
   ).onChange((fog: boolean) => api.setScene({ fog }));
-  const diagnostics = inspector.subfolder(sceneFolder, "Diagnostics / 诊断", true);
-  const setReadout = inspector.addReadout(diagnostics, "Runtime / 运行时");
-  const updateReadout = (): void => {
-    const clouds = api.inspectClouds();
-    const surface = api.inspectSurface();
-    setReadout(
-      [
-        `clouds: ${clouds.instances} sky / ${clouds.authoredInstances} authored`,
-        `cloud batches: ${clouds.drawGroups}`,
-        `cloud time: ${clouds.time.toFixed(2)}s`,
-        `surface: ${surface.visibleInstances.toLocaleString("en-US")} / ${surface.totalInstances.toLocaleString("en-US")}`,
-        `surface batches: ${surface.rendererBatches}`,
-        `surface cells: ${surface.visibleRanges} / ${surface.totalRanges}`
-      ].join("\n")
-    );
-  };
-  updateReadout();
-  window.setInterval(updateReadout, 500);
 }
 
 function annotate<T extends { domElement: HTMLElement; name(label: string): T }>(

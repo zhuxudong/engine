@@ -115,7 +115,27 @@ Shader "Terrain/Surface" {
       int renderer_SurfaceLodFadeEnabled;
       vec3 renderer_SurfaceCategoryDebugColor;
       vec3 renderer_SurfaceCellDebugColor;
+      vec3 renderer_SurfaceTint;
+      float renderer_SurfaceScale;
+      float renderer_SurfaceWorldCellSize;
       int material_DebugView;
+      #ifdef RENDERER_SURFACE_WORLD_NOISE
+        highp usampler2D material_RegionMap;
+        vec4 material_TerrainParams;
+        int material_RegionMapSize;
+        float material_WorldNoiseRegionBlend;
+        int material_WorldNoiseMaxOctaves;
+        int material_WorldNoiseMinOctaves;
+        float material_WorldNoiseLodDistance;
+        float material_WorldNoiseScale;
+        float material_WorldNoiseHeight;
+        vec3 material_WorldNoiseOffset;
+
+        float regionSize() { return material_TerrainParams.x; }
+        float regionTexelSize() { return material_TerrainParams.y; }
+        float vertexDensity() { return material_TerrainParams.w; }
+        #include "Terrain/TerrainWorldNoise.glsl"
+      #endif
 
       VertexShader = vert;
       FragmentShader = frag;
@@ -268,7 +288,7 @@ Shader "Terrain/Surface" {
         #ifdef RENDERER_SURFACE_INSTANCED
           vec3 prototypePosition = renderer_SurfaceLocalPosition +
             rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
-          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz * renderer_SurfaceScale;
           #ifdef RENDERER_SURFACE_BILLBOARD
             vec3 billboardRight;
             vec3 billboardUp;
@@ -342,6 +362,14 @@ Shader "Terrain/Surface" {
             worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
           #endif
           fadeAnchor = (renderer_ModelMat * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #endif
+        #ifdef RENDERER_SURFACE_WORLD_NOISE
+          float groundHeight = getWorldNoiseHeightAtWorldPosition(
+            worldPosition.xz,
+            length(worldPosition.xz - camera_Position.xz)
+          );
+          worldPosition.y += groundHeight;
+          fadeAnchor.y += groundHeight;
         #endif
 
         surfaceWindWeight = effectiveWindWeight(attributes);
@@ -662,7 +690,7 @@ Shader "Terrain/Surface" {
           surfaceColor = mix(material_BaseColor.rgb, material_SecondColor.rgb, blend);
         }
         vec4 baseColor = vec4(
-          textureColor.rgb * surfaceColor * varyings.instanceColor.rgb,
+          textureColor.rgb * surfaceColor * varyings.instanceColor.rgb * renderer_SurfaceTint,
           textureColor.a
         );
         if (baseColor.a < material_AlphaCutoff) discard;
@@ -710,7 +738,7 @@ Shader "Terrain/Surface" {
           );
           baseColor.rgb = mix(
             baseColor.rgb,
-            material_CoverageColor.rgb * coverageColor.rgb * varyings.instanceColor.rgb,
+            material_CoverageColor.rgb * coverageColor.rgb * varyings.instanceColor.rgb * renderer_SurfaceTint,
             coverageMask
           );
           float coverageSmoothness = mix(
@@ -762,7 +790,20 @@ Shader "Terrain/Surface" {
         } else if (material_DebugView == 3) {
           outputColor = vec4(renderer_SurfaceCategoryDebugColor, 1.0);
         } else if (material_DebugView == 4) {
-          outputColor = vec4(renderer_SurfaceCellDebugColor, 1.0);
+          if (renderer_SurfaceWorldCellSize > 0.0) {
+            vec2 cell = floor(varyings.worldPosition.xz / renderer_SurfaceWorldCellSize);
+            float hue = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+            outputColor = vec4(
+              clamp(abs(hue * 6.0 - 3.0) - 1.0, 0.0, 1.0),
+              clamp(2.0 - abs(hue * 6.0 - 2.0), 0.0, 1.0),
+              clamp(2.0 - abs(hue * 6.0 - 4.0), 0.0, 1.0),
+              1.0
+            );
+          } else {
+            outputColor = vec4(renderer_SurfaceCellDebugColor, 1.0);
+          }
+        } else if (material_DebugView == 5) {
+          outputColor = vec4(vec3(varyings.instanceColor.a), 1.0);
         } else {
           outputColor = vec4(
             shadeSurface(varyings, baseColor.rgb, normal, metallic, roughness, occlusion),
@@ -826,6 +867,24 @@ Shader "Terrain/Surface" {
       int renderer_SurfaceLodFadeEnabled;
       vec2 scene_ShadowBias;
       vec3 scene_LightDirection;
+      float renderer_SurfaceScale;
+      #ifdef RENDERER_SURFACE_WORLD_NOISE
+        highp usampler2D material_RegionMap;
+        vec4 material_TerrainParams;
+        int material_RegionMapSize;
+        float material_WorldNoiseRegionBlend;
+        int material_WorldNoiseMaxOctaves;
+        int material_WorldNoiseMinOctaves;
+        float material_WorldNoiseLodDistance;
+        float material_WorldNoiseScale;
+        float material_WorldNoiseHeight;
+        vec3 material_WorldNoiseOffset;
+
+        float regionSize() { return material_TerrainParams.x; }
+        float regionTexelSize() { return material_TerrainParams.y; }
+        float vertexDensity() { return material_TerrainParams.w; }
+        #include "Terrain/TerrainWorldNoise.glsl"
+      #endif
 
       VertexShader = vert;
       FragmentShader = frag;
@@ -931,7 +990,7 @@ Shader "Terrain/Surface" {
         #ifdef RENDERER_SURFACE_INSTANCED
           vec3 prototypePosition = renderer_SurfaceLocalPosition +
             rotateByQuaternion(attributes.POSITION * renderer_SurfaceLocalScale, renderer_SurfaceLocalRotation);
-          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz;
+          vec3 scaledPosition = prototypePosition * attributes.INSTANCE_SCALE_WIND.xyz * renderer_SurfaceScale;
           #ifdef RENDERER_SURFACE_BILLBOARD
             vec3 billboardRight;
             vec3 billboardUp;
@@ -968,6 +1027,14 @@ Shader "Terrain/Surface" {
           worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;
           worldNormal = normalize((renderer_NormalMat * vec4(attributes.NORMAL, 0.0)).xyz);
           fadeAnchor = (renderer_ModelMat * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #endif
+        #ifdef RENDERER_SURFACE_WORLD_NOISE
+          float groundHeight = getWorldNoiseHeightAtWorldPosition(
+            worldPosition.xz,
+            length(worldPosition.xz - camera_Position.xz)
+          );
+          worldPosition.y += groundHeight;
+          fadeAnchor.y += groundHeight;
         #endif
         if (material_WindEnabled != 0) {
           float timeOffset = material_Time * material_GlobalWindForce * material_WindForce * 5.0 +

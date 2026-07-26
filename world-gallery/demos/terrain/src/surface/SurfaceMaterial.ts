@@ -17,6 +17,9 @@ import {
 } from "@galacean/engine";
 import type { SurfaceCategory } from "./SurfaceContract";
 import type { SurfaceMaterialSpec, SurfacePrototypeRendererSpec } from "./SurfaceRuntimeContract";
+import type { TerrainData } from "../data/TerrainData";
+import type { TerrainWorldNoiseTuning } from "../TerrainMaterial";
+import type { TerrainWorldNoiseSpec } from "../loader/ManifestLoader";
 
 const WHITE_PIXEL = new Uint8Array([255, 255, 255, 255]);
 const FLAT_NORMAL_PIXEL = new Uint8Array([128, 128, 255, 255]);
@@ -81,10 +84,24 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _lodFadeEnabled = ShaderProperty.getByName("renderer_SurfaceLodFadeEnabled");
   private static readonly _categoryDebugColor = ShaderProperty.getByName("renderer_SurfaceCategoryDebugColor");
   private static readonly _cellDebugColor = ShaderProperty.getByName("renderer_SurfaceCellDebugColor");
+  private static readonly _rendererTint = ShaderProperty.getByName("renderer_SurfaceTint");
+  private static readonly _rendererScale = ShaderProperty.getByName("renderer_SurfaceScale");
+  private static readonly _worldCellSize = ShaderProperty.getByName("renderer_SurfaceWorldCellSize");
+  private static readonly _regionMap = ShaderProperty.getByName("material_RegionMap");
+  private static readonly _terrainParams = ShaderProperty.getByName("material_TerrainParams");
+  private static readonly _regionMapSize = ShaderProperty.getByName("material_RegionMapSize");
+  private static readonly _worldNoiseRegionBlend = ShaderProperty.getByName("material_WorldNoiseRegionBlend");
+  private static readonly _worldNoiseMaxOctaves = ShaderProperty.getByName("material_WorldNoiseMaxOctaves");
+  private static readonly _worldNoiseMinOctaves = ShaderProperty.getByName("material_WorldNoiseMinOctaves");
+  private static readonly _worldNoiseLodDistance = ShaderProperty.getByName("material_WorldNoiseLodDistance");
+  private static readonly _worldNoiseScale = ShaderProperty.getByName("material_WorldNoiseScale");
+  private static readonly _worldNoiseHeight = ShaderProperty.getByName("material_WorldNoiseHeight");
+  private static readonly _worldNoiseOffset = ShaderProperty.getByName("material_WorldNoiseOffset");
   private static readonly _vertexColorMacro = ShaderMacro.getByName("RENDERER_ENABLE_VERTEXCOLOR");
   private static readonly _billboardMacro = ShaderMacro.getByName("RENDERER_SURFACE_BILLBOARD");
   private static readonly _instancedMacro = ShaderMacro.getByName("RENDERER_SURFACE_INSTANCED");
   private static readonly _coverageMacro = ShaderMacro.getByName("MATERIAL_SURFACE_COVERAGE");
+  private static readonly _worldNoiseMacro = ShaderMacro.getByName("RENDERER_SURFACE_WORLD_NOISE");
 
   readonly id: string;
   readonly kind: SurfaceMaterialSpec["kind"];
@@ -127,19 +144,13 @@ export class SurfaceMaterial extends BaseMaterial {
       this.shaderData.setFloat(SurfaceMaterial._coverageBalance, coverage.balance);
       this.shaderData.setFloat(SurfaceMaterial._coverageMaskContrast, coverage.maskContrast);
       this.shaderData.setFloat(SurfaceMaterial._coverageNormalBlending, coverage.normalBlending);
-      this.shaderData.setVector2(
-        SurfaceMaterial._coverageMaskTiling,
-        new Vector2(...coverage.maskTiling)
-      );
+      this.shaderData.setVector2(SurfaceMaterial._coverageMaskTiling, new Vector2(...coverage.maskTiling));
     }
     this.shaderData.setFloat(SurfaceMaterial._windForce, spec.wind.force);
     this.shaderData.setFloat(SurfaceMaterial._windWavesScale, spec.wind.wavesScale);
     this.shaderData.setFloat(SurfaceMaterial._windFlowDensity, spec.wind.flowDensity);
     this.shaderData.setInt(SurfaceMaterial._windBaseLock, spec.wind.baseLock ? 1 : 0);
-    this.shaderData.setInt(
-      SurfaceMaterial._windBaseLockUvInverted,
-      spec.wind.baseLockUvInverted ? 1 : 0
-    );
+    this.shaderData.setInt(SurfaceMaterial._windBaseLockUvInverted, spec.wind.baseLockUvInverted ? 1 : 0);
     this.shaderData.setInt(SurfaceMaterial._windSupported, spec.wind.enabled ? 1 : 0);
     this.shaderData.setInt(SurfaceMaterial._windEnabled, spec.wind.enabled ? 1 : 0);
     this.shaderData.setFloat(SurfaceMaterial._globalWindForce, 1);
@@ -179,7 +190,12 @@ export class SurfaceMaterial extends BaseMaterial {
     const material = new SurfaceMaterial(engine, spec);
     const [albedo, normal, metallicSmoothness, occlusion, lodDither, coverageTextures] = await Promise.all([
       loadSurfaceTexture(engine, spec.albedo ? new URL(spec.albedo, manifestUrl).href : undefined, true, WHITE_PIXEL),
-      loadSurfaceTexture(engine, spec.normal ? new URL(spec.normal, manifestUrl).href : undefined, false, FLAT_NORMAL_PIXEL),
+      loadSurfaceTexture(
+        engine,
+        spec.normal ? new URL(spec.normal, manifestUrl).href : undefined,
+        false,
+        FLAT_NORMAL_PIXEL
+      ),
       loadSurfaceTexture(
         engine,
         spec.metallicSmoothness ? new URL(spec.metallicSmoothness, manifestUrl).href : undefined,
@@ -203,10 +219,7 @@ export class SurfaceMaterial extends BaseMaterial {
     if (coverageTextures) {
       material.shaderData.setTexture(SurfaceMaterial._coverageAlbedo, coverageTextures.albedo);
       material.shaderData.setTexture(SurfaceMaterial._coverageNormal, coverageTextures.normal);
-      material.shaderData.setTexture(
-        SurfaceMaterial._coverageMetallicSmoothness,
-        coverageTextures.metallicSmoothness
-      );
+      material.shaderData.setTexture(SurfaceMaterial._coverageMetallicSmoothness, coverageTextures.metallicSmoothness);
       material.shaderData.setTexture(SurfaceMaterial._coverageMask, coverageTextures.mask);
     }
     return material;
@@ -230,8 +243,57 @@ export class SurfaceMaterial extends BaseMaterial {
    * Selects a shared material diagnostic.
    * @param view Shared surface diagnostic identifier.
    */
-  setDebugView(view: 0 | 1 | 2 | 3 | 4): void {
+  setDebugView(view: 0 | 1 | 2 | 3 | 4 | 5): void {
     this.shaderData.setInt(SurfaceMaterial._debugView, view);
+  }
+
+  /**
+   * Binds the exact terrain world-noise resources used to ground streamed surface instances.
+   * @param data Terrain region lookup and dimensional invariants.
+   * @param spec Procedural world-height parameters shared with TerrainMaterial.
+   */
+  bindWorldNoise(data: TerrainData, spec: TerrainWorldNoiseSpec): void {
+    this.shaderData.setTexture(SurfaceMaterial._regionMap, data.regionMap);
+    this.shaderData.setVector4(
+      SurfaceMaterial._terrainParams,
+      new Vector4(data.regionSize, 1 / data.regionSize, data.vertexSpacing, 1 / data.vertexSpacing)
+    );
+    this.shaderData.setInt(SurfaceMaterial._regionMapSize, data.regionMapSize);
+    this.shaderData.setFloat(SurfaceMaterial._worldNoiseRegionBlend, spec.regionBlend);
+    this.shaderData.setInt(SurfaceMaterial._worldNoiseMaxOctaves, spec.maxOctaves);
+    this.shaderData.setInt(SurfaceMaterial._worldNoiseMinOctaves, spec.minOctaves);
+    this.shaderData.setFloat(SurfaceMaterial._worldNoiseLodDistance, spec.lodDistance);
+    this.shaderData.setFloat(SurfaceMaterial._worldNoiseScale, spec.scale);
+    this.shaderData.setFloat(SurfaceMaterial._worldNoiseHeight, spec.height);
+    this.shaderData.setVector3(SurfaceMaterial._worldNoiseOffset, new Vector3(...spec.offset));
+  }
+
+  /**
+   * Updates shader grounding after the shared terrain world-noise controls change.
+   * @param tuning Partial values already validated by TerrainMaterial.
+   */
+  setWorldNoiseTuning(tuning: TerrainWorldNoiseTuning): void {
+    if (tuning.regionBlend !== undefined) {
+      this.shaderData.setFloat(SurfaceMaterial._worldNoiseRegionBlend, tuning.regionBlend);
+    }
+    if (tuning.maxOctaves !== undefined) {
+      this.shaderData.setInt(SurfaceMaterial._worldNoiseMaxOctaves, tuning.maxOctaves);
+    }
+    if (tuning.minOctaves !== undefined) {
+      this.shaderData.setInt(SurfaceMaterial._worldNoiseMinOctaves, tuning.minOctaves);
+    }
+    if (tuning.lodDistance !== undefined) {
+      this.shaderData.setFloat(SurfaceMaterial._worldNoiseLodDistance, tuning.lodDistance);
+    }
+    if (tuning.scale !== undefined) {
+      this.shaderData.setFloat(SurfaceMaterial._worldNoiseScale, tuning.scale);
+    }
+    if (tuning.height !== undefined) {
+      this.shaderData.setFloat(SurfaceMaterial._worldNoiseHeight, tuning.height);
+    }
+    if (tuning.offset !== undefined) {
+      this.shaderData.setVector3(SurfaceMaterial._worldNoiseOffset, new Vector3(...tuning.offset));
+    }
   }
 
   /**
@@ -239,8 +301,13 @@ export class SurfaceMaterial extends BaseMaterial {
    * @param enabled Whether the source mesh contains a vertex color stream.
    * @param shaderData Renderer-local shader data.
    */
-  static setRendererVertexColor(enabled: boolean, shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }): void {
-    enabled ? shaderData.enableMacro(SurfaceMaterial._vertexColorMacro) : shaderData.disableMacro(SurfaceMaterial._vertexColorMacro);
+  static setRendererVertexColor(
+    enabled: boolean,
+    shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }
+  ): void {
+    enabled
+      ? shaderData.enableMacro(SurfaceMaterial._vertexColorMacro)
+      : shaderData.disableMacro(SurfaceMaterial._vertexColorMacro);
   }
 
   /**
@@ -252,7 +319,9 @@ export class SurfaceMaterial extends BaseMaterial {
     enabled: boolean,
     shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }
   ): void {
-    enabled ? shaderData.enableMacro(SurfaceMaterial._instancedMacro) : shaderData.disableMacro(SurfaceMaterial._instancedMacro);
+    enabled
+      ? shaderData.enableMacro(SurfaceMaterial._instancedMacro)
+      : shaderData.disableMacro(SurfaceMaterial._instancedMacro);
   }
 
   /**
@@ -264,7 +333,47 @@ export class SurfaceMaterial extends BaseMaterial {
     enabled: boolean,
     shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }
   ): void {
-    enabled ? shaderData.enableMacro(SurfaceMaterial._billboardMacro) : shaderData.disableMacro(SurfaceMaterial._billboardMacro);
+    enabled
+      ? shaderData.enableMacro(SurfaceMaterial._billboardMacro)
+      : shaderData.disableMacro(SurfaceMaterial._billboardMacro);
+  }
+
+  /**
+   * Enables shader-side grounding against the shared terrain world-noise height.
+   * @param enabled Whether this renderer contains streamed background instances.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererWorldNoise(
+    enabled: boolean,
+    shaderData: { enableMacro(macro: ShaderMacro): void; disableMacro(macro: ShaderMacro): void }
+  ): void {
+    enabled
+      ? shaderData.enableMacro(SurfaceMaterial._worldNoiseMacro)
+      : shaderData.disableMacro(SurfaceMaterial._worldNoiseMacro);
+  }
+
+  /**
+   * Applies live category tint and uniform scale without rewriting instance buffers.
+   * @param tint Linear RGB category multiplier.
+   * @param scale Uniform prototype scale multiplier.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererTuning(
+    tint: readonly [r: number, g: number, b: number],
+    scale: number,
+    shaderData: ShaderData
+  ): void {
+    shaderData.setVector3(SurfaceMaterial._rendererTint, new Vector3(...tint));
+    shaderData.setFloat(SurfaceMaterial._rendererScale, scale);
+  }
+
+  /**
+   * Binds the streamed world partition size used by the cell diagnostic.
+   * @param cellSize World-space cell edge length in metres.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererWorldCellSize(cellSize: number, shaderData: ShaderData): void {
+    shaderData.setFloat(SurfaceMaterial._worldCellSize, cellSize);
   }
 
   /**
@@ -289,14 +398,8 @@ export class SurfaceMaterial extends BaseMaterial {
     cell: readonly [x: number, z: number],
     shaderData: ShaderData
   ): void {
-    shaderData.setVector3(
-      SurfaceMaterial._categoryDebugColor,
-      new Vector3(...categoryDebugColor(category))
-    );
-    shaderData.setVector3(
-      SurfaceMaterial._cellDebugColor,
-      new Vector3(...hashColor(cell[0], cell[1]))
-    );
+    shaderData.setVector3(SurfaceMaterial._categoryDebugColor, new Vector3(...categoryDebugColor(category)));
+    shaderData.setVector3(SurfaceMaterial._cellDebugColor, new Vector3(...hashColor(cell[0], cell[1])));
   }
 
   /**
@@ -334,14 +437,8 @@ function hashColor(x: number, z: number): [number, number, number] {
   value = Math.imul(value, 0x7feb352d);
   value ^= value >>> 15;
   const hue = (value >>> 0) / 0x100000000;
-  const rainbow = [
-    Math.abs(hue * 6 - 3) - 1,
-    2 - Math.abs(hue * 6 - 2),
-    2 - Math.abs(hue * 6 - 4)
-  ];
-  return rainbow.map((component) =>
-    0.35 + Math.min(1, Math.max(0, component)) * 0.65
-  ) as [number, number, number];
+  const rainbow = [Math.abs(hue * 6 - 3) - 1, 2 - Math.abs(hue * 6 - 2), 2 - Math.abs(hue * 6 - 4)];
+  return rainbow.map((component) => 0.35 + Math.min(1, Math.max(0, component)) * 0.65) as [number, number, number];
 }
 
 async function loadCoverageTextures(
@@ -364,18 +461,11 @@ async function loadCoverageTextures(
     loadSurfaceTexture(engine, new URL(coverage.normal, manifestUrl).href, false, FLAT_NORMAL_PIXEL),
     loadSurfaceTexture(
       engine,
-      coverage.metallicSmoothness
-        ? new URL(coverage.metallicSmoothness, manifestUrl).href
-        : undefined,
+      coverage.metallicSmoothness ? new URL(coverage.metallicSmoothness, manifestUrl).href : undefined,
       false,
       WHITE_PIXEL
     ),
-    loadSurfaceTexture(
-      engine,
-      coverage.mask ? new URL(coverage.mask, manifestUrl).href : undefined,
-      false,
-      WHITE_PIXEL
-    )
+    loadSurfaceTexture(engine, coverage.mask ? new URL(coverage.mask, manifestUrl).href : undefined, false, WHITE_PIXEL)
   ]);
   return { albedo, normal, metallicSmoothness, mask };
 }

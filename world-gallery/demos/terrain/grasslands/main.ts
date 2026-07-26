@@ -13,7 +13,6 @@ import {
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
-import { Stats } from "@galacean/engine-toolkit-stats";
 import { TerrainMaterial } from "../src/TerrainMaterial";
 import {
   TerrainFirstPersonController,
@@ -27,7 +26,6 @@ import {
   type TerrainDebugApi,
   type TerrainDebugViewName,
   type TerrainLightingSnapshot,
-  type TerrainProbeSnapshot,
   type TerrainRenderingTuning
 } from "../src/debug/TerrainDebugContract";
 import { mountTerrainInspector } from "../src/debug/TerrainDebugInspector";
@@ -39,6 +37,8 @@ import {
   replaceTerrainWorldNoiseTuning,
   terrainBackgroundModeToShader
 } from "../src/debug/TerrainDebugTuning";
+import { applyTerrainControlFixture } from "../src/debug/TerrainControlFixture";
+import { createTerrainProbeSnapshot } from "../src/debug/TerrainProbe";
 import { loadLayerTextures } from "../src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "../src/loader/MacroNoiseLoader";
 import { loadManifest } from "../src/loader/ManifestLoader";
@@ -48,19 +48,13 @@ import terrainShaderSource from "../src/shaders/Terrain.shader?raw";
 import { registerTerrainShaderIncludes } from "../src/shaders/registerTerrainShaderIncludes";
 import { SurfaceWorld } from "../src/surface/SurfaceWorld";
 import type { SurfaceRuntimeTuningUpdate } from "../src/surface/SurfaceRuntimeContract";
-import {
-  loadGrasslandsArchitecture,
-  type GrasslandsArchitectureSpec
-} from "./src/GrasslandsArchitecture";
+import { loadGrasslandsArchitecture, type GrasslandsArchitectureSpec } from "./src/GrasslandsArchitecture";
 import {
   GrasslandsCloudSystem,
   type GrasslandsCloudPlacementSpec,
   type GrasslandsCloudPresetSpec
 } from "./src/GrasslandsCloudSystem";
-import {
-  mountGrasslandsInspector,
-  type GrasslandsSceneTuning
-} from "./src/GrasslandsDebugInspector";
+import { mountGrasslandsInspector, type GrasslandsSceneTuning } from "./src/GrasslandsDebugInspector";
 import {
   createGrasslandsEnvironment,
   type GrasslandsEnvironmentSpec,
@@ -93,8 +87,8 @@ interface GrasslandsSceneLayout {
 }
 
 const GRASSLANDS_POSES: readonly TerrainCameraPoseName[] = [
-  "hero",
   "first-person",
+  "hero",
   "overview",
   "valley-overview",
   "terrain-horizon",
@@ -147,11 +141,7 @@ declare global {
        * Updates authored scene rendering without changing SurfaceWorld data.
        * @param values Partial architecture, sky, fog, light, environment, or post-process switches.
        */
-      setScene(
-        values: Partial<
-          GrasslandsSceneTuning
-        >
-      ): void;
+      setScene(values: Partial<GrasslandsSceneTuning>): void;
     };
   }
 }
@@ -187,12 +177,12 @@ async function boot(): Promise<void> {
   const bloom = postProcess.addEffect(BloomEffect);
   const exposure = new GrasslandsExposurePass(engine);
   engine.addPostProcessPass(exposure);
-  if (new URLSearchParams(location.search).has("stats")) cameraEntity.addComponent(Stats);
 
   const manifestUrl = new URL("../data/grasslands/terrain-manifest.json", import.meta.url).href;
   const surfaceManifestUrl = new URL("../data/grasslands/surface-manifest.json", import.meta.url).href;
   const sceneLayoutUrl = new URL("../data/grasslands/scene-layout.json", import.meta.url);
   const sceneLayout = await loadJson<GrasslandsSceneLayout>(sceneLayoutUrl);
+  const query = new URLSearchParams(location.search);
   camera.fieldOfView = sceneLayout.camera.fieldOfView;
   camera.nearClipPlane = sceneLayout.camera.nearClip;
   camera.farClipPlane = sceneLayout.camera.farClip;
@@ -206,6 +196,7 @@ async function boot(): Promise<void> {
     loadLayerTextures(engine, manifest.layers, manifestUrl),
     loadMacroNoiseTexture(engine, new URL(manifest.material.macroVariation.noiseTexture, manifestUrl).href)
   ]);
+  const controlFixture = query.get("fixture") === "control" ? applyTerrainControlFixture(terrainData) : undefined;
   const firstPerson = cameraEntity.addComponent(TerrainFirstPersonController);
   firstPerson.configure(terrainData);
   const orbit = cameraEntity.addComponent(OrbitControl);
@@ -243,12 +234,7 @@ async function boot(): Promise<void> {
   );
 
   setStatus("loading 291,069 deterministic surface instances");
-  const surfaceWorld = await SurfaceWorld.create(
-    engine,
-    root.createChild("surface-world"),
-    camera,
-    surfaceManifestUrl
-  );
+  const surfaceWorld = await SurfaceWorld.create(engine, root.createChild("surface-world"), camera, surfaceManifestUrl);
   const surfaceDefaults = surfaceWorld.getTuning();
   setStatus("loading authored architecture");
   const architecture = await loadGrasslandsArchitecture(
@@ -266,6 +252,13 @@ async function boot(): Promise<void> {
     sceneLayoutUrl.href,
     (worldX, worldZ) => terrainData.sampleHeightInterpolated(worldX, worldZ)
   );
+  let terrainCompositionVisible = true;
+  let architectureVisible = architecture.root.isActive;
+  let cloudsVisible = clouds.inspect().visible;
+  const applyTerrainCompositionVisibility = (): void => {
+    architecture.root.isActive = terrainCompositionVisible && architectureVisible;
+    clouds.setTuning({ visible: terrainCompositionVisible && cloudsVisible });
+  };
   const setSurfaceTuning = (values: SurfaceRuntimeTuningUpdate): void => {
     surfaceWorld.setTuning(values);
     if (values.wind) {
@@ -275,8 +268,8 @@ async function boot(): Promise<void> {
   };
   const getSceneTuning = (): GrasslandsSceneTuning => ({
     ...environment.getTuning(),
-    architecture: architecture.root.isActive,
-    clouds: clouds.inspect().visible,
+    architecture: architectureVisible,
+    clouds: cloudsVisible,
     postProcess: camera.enablePostProcess
   });
   const setSceneTuning = (values: Partial<GrasslandsSceneTuning>): void => {
@@ -297,16 +290,15 @@ async function boot(): Promise<void> {
       terrainMaterial.setIndirectLightingEnabled(values.environment);
     }
     if (values.architecture !== undefined) {
-      architecture.root.isActive = values.architecture;
+      architectureVisible = values.architecture;
     }
     if (values.postProcess !== undefined) {
       camera.enablePostProcess = values.postProcess;
       exposure.isActive = values.postProcess;
     }
-    clouds.setTuning({
-      visible: values.clouds,
-      animation: values.animation
-    });
+    if (values.clouds !== undefined) cloudsVisible = values.clouds;
+    clouds.setTuning({ animation: values.animation });
+    applyTerrainCompositionVisibility();
   };
   const grasslandsDebug: NonNullable<Window["grasslandsDebug"]> = {
     ready: true,
@@ -342,6 +334,9 @@ async function boot(): Promise<void> {
       }
       clipmap.setWireframe(view === "clipmap-lod" || view === "wireframe");
       terrainMaterial.setDebugView(TERRAIN_DEBUG_VIEWS[view]);
+      terrainCompositionVisible = view === "surface";
+      surfaceWorld.setVisible(terrainCompositionVisible);
+      applyTerrainCompositionVisibility();
     },
     setPose(pose) {
       if (!GRASSLANDS_POSES.includes(pose)) {
@@ -387,6 +382,21 @@ async function boot(): Promise<void> {
       cameraEntity.transform.worldRotationQuaternion.set(...snapshot.rotation);
       camera.fieldOfView = snapshot.fieldOfView;
       setOrbitTargetFromCamera(cameraEntity, orbit);
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
+    focusProbe(worldX, worldZ) {
+      const height = terrainData.sampleHeight(worldX, worldZ);
+      if (height === undefined) {
+        throw new Error(`[terrain-debug] no terrain height at (${worldX}, ${worldZ})`);
+      }
+      firstPerson.exit();
+      firstPerson.setFreeControl(null);
+      freeControl?.destroy();
+      freeControl = null;
+      orbit.enabled = false;
+      cameraEntity.transform.setPosition(worldX, height + 80, worldZ);
+      cameraEntity.transform.worldRotationQuaternion.set(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+      camera.fieldOfView = 20;
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
     setDebugLayer: (layer) => terrainMaterial.setDebugLayer(layer),
@@ -507,41 +517,15 @@ async function boot(): Promise<void> {
       };
     },
     readProbe(worldX, worldZ) {
-      const rawControl = terrainData.sampleControl(worldX, worldZ);
-      const snapshot: TerrainProbeSnapshot = {
-        world: [worldX, worldZ],
-        height: terrainData.sampleHeight(worldX, worldZ)
-      };
-      if (rawControl === undefined) return snapshot;
-      const raw = rawControl >>> 0;
-      const scaleIndex = (raw >>> 7) & 0x7;
-      return {
-        ...snapshot,
-        control: {
-          raw,
-          base: (raw >>> 27) & 0x1f,
-          overlay: (raw >>> 22) & 0x1f,
-          blend: ((raw >>> 14) & 0xff) / 255,
-          angleIndex: (raw >>> 10) & 0xf,
-          scaleIndex,
-          scale: 0.9 - (((scaleIndex + 3) % 8) + 1) * 0.1,
-          hole: (raw & 0x4) !== 0,
-          navigation: (raw & 0x2) !== 0,
-          autoshader: (raw & 0x1) !== 0
-        }
-      };
-    }
+      return createTerrainProbeSnapshot(terrainData, worldX, worldZ);
+    },
+    getControlFixture: () => controlFixture
   };
   window.terrainDebug = terrainDebug;
-  const query = new URLSearchParams(location.search);
   const requestedView = query.get("view") as TerrainDebugViewName | null;
   const requestedPose = query.get("pose") as TerrainCameraPoseName | null;
   if (requestedView && requestedView in TERRAIN_DEBUG_VIEWS) terrainDebug.setView(requestedView);
-  terrainDebug.setPose(
-    requestedPose && GRASSLANDS_POSES.includes(requestedPose)
-      ? requestedPose
-      : "hero"
-  );
+  terrainDebug.setPose(requestedPose && GRASSLANDS_POSES.includes(requestedPose) ? requestedPose : "first-person");
   mountTerrainInspector(terrainDebug, {
     title: "Grasslands terrain inspector",
     showWater: false,
@@ -613,11 +597,7 @@ function applyGrasslandsCameraPose(
     camera.fieldOfView = 50;
   } else if (pose === "valley-overview" || pose === "terrain-horizon") {
     const diagnostic = GRASSLANDS_DIAGNOSTIC_CAMERAS[pose];
-    cameraEntity.transform.setPosition(
-      diagnostic.position[0],
-      diagnostic.position[1],
-      diagnostic.position[2]
-    );
+    cameraEntity.transform.setPosition(diagnostic.position[0], diagnostic.position[1], diagnostic.position[2]);
     cameraEntity.transform.worldRotationQuaternion.set(
       diagnostic.rotation[0],
       diagnostic.rotation[1],
@@ -635,11 +615,7 @@ function applyGrasslandsCameraPose(
 function setOrbitTargetFromCamera(cameraEntity: Entity, orbit: OrbitControl): void {
   const position = cameraEntity.transform.worldPosition;
   const forward = cameraEntity.transform.worldForward;
-  orbit.target.set(
-    position.x + forward.x * 100,
-    position.y + forward.y * 100,
-    position.z + forward.z * 100
-  );
+  orbit.target.set(position.x + forward.x * 100, position.y + forward.y * 100, position.z + forward.z * 100);
 }
 
 async function loadJson<T>(url: URL): Promise<T> {

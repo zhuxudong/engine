@@ -42,6 +42,8 @@ export interface SurfacePlacementConstraints {
   readonly height: readonly [min: number, max: number];
   readonly slope: readonly [min: number, max: number];
   readonly terrainLayers?: readonly number[];
+  /** Minimum summed top-two control weight for the selected terrain layers. */
+  readonly minimumLayerWeight?: number;
   readonly excludeHoles: boolean;
 }
 
@@ -53,6 +55,7 @@ export interface SurfaceRule {
   readonly mode: Exclude<SurfaceCompileMode, "explicit">;
   readonly mask: string;
   readonly densityPerSquareMetre: number;
+  /** Candidate lattice spacing; scatter additionally enforces this as the minimum accepted distance. */
   readonly spacing: number;
   readonly scale: SurfaceScaleRange;
   readonly yaw: readonly [minRadians: number, maxRadians: number];

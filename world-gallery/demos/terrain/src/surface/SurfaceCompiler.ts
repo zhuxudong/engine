@@ -9,10 +9,20 @@ import type {
   SurfaceRule,
   SurfaceTerrainSample
 } from "./SurfaceContract";
+import {
+  mapCompilerMask,
+  passesSurfaceConstraints,
+  sampleSurfaceMask,
+  surfaceCandidatePosition,
+  surfaceInstanceVariation,
+  surfaceLatticeId,
+  surfaceUintHash,
+  surfaceUnitHash,
+  type SurfaceMaskMapping
+} from "./SurfaceDistribution";
 
 const BINARY_HEADER_SIZE = 16;
 const BINARY_RECORD_SIZE = 56;
-const TWO_PI = Math.PI * 2;
 
 const CATEGORY_IDS: Readonly<Record<SurfaceCategory, number>> = {
   grass: 0,
@@ -30,7 +40,10 @@ const CATEGORY_IDS: Readonly<Record<SurfaceCategory, number>> = {
  * @returns Deterministically ordered instances, manifest and little-endian binary payload.
  * @throws If the contract is invalid or references an unknown mask.
  */
-export function compileSurface(input: SurfaceCompileInput, binaryUrl = "./surface-instances.bin"): SurfaceCompileResult {
+export function compileSurface(
+  input: SurfaceCompileInput,
+  binaryUrl = "./surface-instances.bin"
+): SurfaceCompileResult {
   validateInput(input);
   const masks = new Map(input.masks.map((mask) => [mask.id, mask]));
   const generated: SurfaceInstance[] = [];
@@ -69,48 +82,81 @@ export function compileSurface(input: SurfaceCompileInput, binaryUrl = "./surfac
   return { manifest, instances: generated, binary };
 }
 
-function compileCoverage(input: SurfaceCompileInput, rule: SurfaceRule, mask: SurfaceMask, output: SurfaceInstance[]): void {
-  const step = Math.sqrt(1 / rule.densityPerSquareMetre);
+function compileCoverage(
+  input: SurfaceCompileInput,
+  rule: SurfaceRule,
+  mask: SurfaceMask,
+  output: SurfaceInstance[]
+): void {
+  const step = rule.spacing;
+  const densityProbability = Math.min(1, rule.densityPerSquareMetre * step * step);
   const countX = Math.ceil(input.size[0] / step);
   const countZ = Math.ceil(input.size[1] / step);
+  const mappedMask = mapCompilerMask(mask, input.origin, input.size);
   for (let gridZ = 0; gridZ < countZ; gridZ++) {
     for (let gridX = 0; gridX < countX; gridX++) {
-      const sourceId = latticeId(gridX, gridZ, countX);
+      const sourceId = surfaceLatticeId(gridX, gridZ, countX);
       const candidate = candidateAt(input, rule, gridX, gridZ, step, sourceId);
-      const probability = sampleMask(mask, input, candidate.x, candidate.z);
-      if (unitHash(input.seed, rule.id, sourceId, 4) >= probability) continue;
+      const probability = sampleSurfaceMask(mappedMask, candidate.x, candidate.z) * densityProbability;
+      if (surfaceUnitHash(input.seed, rule.id, sourceId, 4) >= probability) continue;
       const terrain = input.terrain.sample(candidate.x, candidate.z);
-      if (!terrain || !passesConstraints(rule, terrain)) continue;
+      if (!terrain || !passesSurfaceConstraints(rule.constraints, terrain)) continue;
       output.push(instanceFor(rule, sourceId, candidate.x, candidate.z, terrain.height, input.seed));
     }
   }
 }
 
-function compileScatter(input: SurfaceCompileInput, rule: SurfaceRule, mask: SurfaceMask, output: SurfaceInstance[]): void {
+function compileScatter(
+  input: SurfaceCompileInput,
+  rule: SurfaceRule,
+  mask: SurfaceMask,
+  output: SurfaceInstance[]
+): void {
   const step = rule.spacing / Math.SQRT2;
   const countX = Math.ceil(input.size[0] / step);
   const countZ = Math.ceil(input.size[1] / step);
   const radius = Math.ceil(rule.spacing / step);
+  const mappedMask = mapCompilerMask(mask, input.origin, input.size);
 
   for (let gridZ = 0; gridZ < countZ; gridZ++) {
     for (let gridX = 0; gridX < countX; gridX++) {
-      const sourceId = latticeId(gridX, gridZ, countX);
-      const candidate = validScatterCandidate(input, rule, mask, gridX, gridZ, countX, countZ, step);
+      const sourceId = surfaceLatticeId(gridX, gridZ, countX);
+      const candidate = validScatterCandidate(input, rule, mappedMask, gridX, gridZ, countX, countZ, step);
       if (!candidate) continue;
 
       let retained = true;
-      for (let neighbourZ = Math.max(0, gridZ - radius); neighbourZ <= Math.min(countZ - 1, gridZ + radius) && retained; neighbourZ++) {
-        for (let neighbourX = Math.max(0, gridX - radius); neighbourX <= Math.min(countX - 1, gridX + radius); neighbourX++) {
+      for (
+        let neighbourZ = Math.max(0, gridZ - radius);
+        neighbourZ <= Math.min(countZ - 1, gridZ + radius) && retained;
+        neighbourZ++
+      ) {
+        for (
+          let neighbourX = Math.max(0, gridX - radius);
+          neighbourX <= Math.min(countX - 1, gridX + radius);
+          neighbourX++
+        ) {
           if (neighbourX === gridX && neighbourZ === gridZ) continue;
-          const neighbourId = latticeId(neighbourX, neighbourZ, countX);
-          const neighbour = validScatterCandidate(input, rule, mask, neighbourX, neighbourZ, countX, countZ, step);
+          const neighbourId = surfaceLatticeId(neighbourX, neighbourZ, countX);
+          const neighbour = validScatterCandidate(
+            input,
+            rule,
+            mappedMask,
+            neighbourX,
+            neighbourZ,
+            countX,
+            countZ,
+            step
+          );
           if (!neighbour) continue;
           const dx = neighbour.x - candidate.x;
           const dz = neighbour.z - candidate.z;
           if (dx * dx + dz * dz >= rule.spacing * rule.spacing) continue;
-          const candidatePriority = uintHash(input.seed, rule.id, sourceId, 9);
-          const neighbourPriority = uintHash(input.seed, rule.id, neighbourId, 9);
-          if (neighbourPriority < candidatePriority || (neighbourPriority === candidatePriority && neighbourId < sourceId)) {
+          const candidatePriority = surfaceUintHash(input.seed, rule.id, sourceId, 9);
+          const neighbourPriority = surfaceUintHash(input.seed, rule.id, neighbourId, 9);
+          if (
+            neighbourPriority < candidatePriority ||
+            (neighbourPriority === candidatePriority && neighbourId < sourceId)
+          ) {
             retained = false;
             break;
           }
@@ -126,7 +172,7 @@ function compileScatter(input: SurfaceCompileInput, rule: SurfaceRule, mask: Sur
 function validScatterCandidate(
   input: SurfaceCompileInput,
   rule: SurfaceRule,
-  mask: SurfaceMask,
+  mask: SurfaceMaskMapping,
   gridX: number,
   gridZ: number,
   countX: number,
@@ -134,14 +180,14 @@ function validScatterCandidate(
   step: number
 ): { x: number; z: number; terrain: SurfaceTerrainSample } | undefined {
   if (gridX < 0 || gridX >= countX || gridZ < 0 || gridZ >= countZ) return undefined;
-  const sourceId = latticeId(gridX, gridZ, countX);
+  const sourceId = surfaceLatticeId(gridX, gridZ, countX);
   const candidate = candidateAt(input, rule, gridX, gridZ, step, sourceId);
-  const maskDensity = sampleMask(mask, input, candidate.x, candidate.z);
+  const maskDensity = sampleSurfaceMask(mask, candidate.x, candidate.z);
   const cellArea = step * step;
   const probability = Math.min(1, maskDensity * rule.densityPerSquareMetre * cellArea);
-  if (unitHash(input.seed, rule.id, sourceId, 4) >= probability) return undefined;
+  if (surfaceUnitHash(input.seed, rule.id, sourceId, 4) >= probability) return undefined;
   const terrain = input.terrain.sample(candidate.x, candidate.z);
-  if (!terrain || !passesConstraints(rule, terrain)) return undefined;
+  if (!terrain || !passesSurfaceConstraints(rule.constraints, terrain)) return undefined;
   return { ...candidate, terrain };
 }
 
@@ -153,32 +199,8 @@ function candidateAt(
   step: number,
   sourceId: number
 ): { x: number; z: number } {
-  const jitterX = unitHash(input.seed, rule.id, sourceId, 0);
-  const jitterZ = unitHash(input.seed, rule.id, sourceId, 1);
-  return {
-    x: input.origin[0] + (gridX + jitterX) * step,
-    z: input.origin[1] + (gridZ + jitterZ) * step
-  };
-}
-
-function passesConstraints(rule: SurfaceRule, terrain: SurfaceTerrainSample): boolean {
-  const { constraints } = rule;
-  if (constraints.excludeHoles && terrain.hole) return false;
-  if (terrain.height < constraints.height[0] || terrain.height > constraints.height[1]) return false;
-  if (terrain.slope < constraints.slope[0] || terrain.slope > constraints.slope[1]) return false;
-  if (!constraints.terrainLayers || constraints.terrainLayers.length === 0) return true;
-  const base = (terrain.control >>> 27) & 0x1f;
-  const overlay = (terrain.control >>> 22) & 0x1f;
-  return constraints.terrainLayers.includes(base) || constraints.terrainLayers.includes(overlay);
-}
-
-function sampleMask(mask: SurfaceMask, input: SurfaceCompileInput, worldX: number, worldZ: number): number {
-  const normalizedX = (worldX - input.origin[0]) / input.size[0];
-  const normalizedZ = (worldZ - input.origin[1]) / input.size[1];
-  if (normalizedX < 0 || normalizedX >= 1 || normalizedZ < 0 || normalizedZ >= 1) return 0;
-  const x = Math.min(mask.width - 1, Math.floor(normalizedX * mask.width));
-  const z = Math.min(mask.height - 1, Math.floor(normalizedZ * mask.height));
-  return mask.pixels[z * mask.width + x] / 255;
+  const position = surfaceCandidatePosition(input.seed, rule.id, sourceId, input.origin, step, gridX, gridZ);
+  return { x: position[0], z: position[1] };
 }
 
 function instanceFor(
@@ -189,15 +211,22 @@ function instanceFor(
   height: number,
   seed: number
 ): SurfaceInstance {
-  const scaleHorizontal = mix(rule.scale.horizontal, unitHash(seed, rule.id, sourceId, 5));
-  const scaleVertical = mix(rule.scale.vertical, unitHash(seed, rule.id, sourceId, 6));
+  const variation = surfaceInstanceVariation(
+    seed,
+    rule.id,
+    sourceId,
+    rule.yaw,
+    rule.scale.horizontal,
+    rule.scale.vertical,
+    rule.wind
+  );
   return {
     prototype: rule.prototype,
     category: rule.category,
     position: [x, height, z],
-    rotation: quaternionFromYaw(mix(rule.yaw, unitHash(seed, rule.id, sourceId, 2))),
-    scale: [scaleHorizontal, scaleVertical, scaleHorizontal],
-    windPhase: rule.wind ? unitHash(seed, rule.id, sourceId, 3) * TWO_PI : 0,
+    rotation: variation.rotation,
+    scale: variation.scale,
+    windPhase: variation.windPhase,
     color: 0xffffffff,
     sourceId,
     cell: [Math.floor(x / rule.cellSize), Math.floor(z / rule.cellSize)]
@@ -308,7 +337,11 @@ function encodeInstances(instances: readonly SurfaceInstance[], prototypes: Read
   return bytes;
 }
 
-function compareInstances(left: SurfaceInstance, right: SurfaceInstance, prototypes: ReadonlyMap<string, number>): number {
+function compareInstances(
+  left: SurfaceInstance,
+  right: SurfaceInstance,
+  prototypes: ReadonlyMap<string, number>
+): number {
   return (
     prototypes.get(left.prototype)! - prototypes.get(right.prototype)! ||
     left.cell[1] - right.cell[1] ||
@@ -319,53 +352,18 @@ function compareInstances(left: SurfaceInstance, right: SurfaceInstance, prototy
   );
 }
 
-function latticeId(x: number, z: number, width: number): number {
-  return (z * width + x) >>> 0;
-}
-
-function mix(range: readonly [number, number], amount: number): number {
-  return range[0] + (range[1] - range[0]) * amount;
-}
-
-function quaternionFromYaw(yaw: number): readonly [number, number, number, number] {
-  const halfYaw = yaw * 0.5;
-  return [0, Math.sin(halfYaw), 0, Math.cos(halfYaw)];
-}
-
 function packColor(color: readonly [number, number, number, number]): number {
   return (
-    Math.round(clamp01(color[0]) * 255) |
-    (Math.round(clamp01(color[1]) * 255) << 8) |
-    (Math.round(clamp01(color[2]) * 255) << 16) |
-    (Math.round(clamp01(color[3]) * 255) << 24)
-  ) >>> 0;
+    (Math.round(clamp01(color[0]) * 255) |
+      (Math.round(clamp01(color[1]) * 255) << 8) |
+      (Math.round(clamp01(color[2]) * 255) << 16) |
+      (Math.round(clamp01(color[3]) * 255) << 24)) >>>
+    0
+  );
 }
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
-}
-
-function unitHash(seed: number, ruleId: string, sourceId: number, channel: number): number {
-  return uintHash(seed, ruleId, sourceId, channel) / 0x100000000;
-}
-
-function uintHash(seed: number, ruleId: string, sourceId: number, channel: number): number {
-  let value = (seed ^ hashString(ruleId) ^ Math.imul(sourceId + 1, 0x9e3779b1) ^ Math.imul(channel + 1, 0x85ebca6b)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x7feb352d);
-  value ^= value >>> 15;
-  value = Math.imul(value, 0x846ca68b);
-  value ^= value >>> 16;
-  return value >>> 0;
-}
-
-function hashString(value: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
 }
 
 function fnv1a(bytes: Uint8Array): number {
@@ -392,17 +390,31 @@ function validateInput(input: SurfaceCompileInput): void {
       throw new Error(`[SurfaceCompiler] mask ${mask.id} dimensions must be positive integers`);
     }
     if (mask.pixels.length !== mask.width * mask.height) {
-      throw new Error(`[SurfaceCompiler] mask ${mask.id} has ${mask.pixels.length} pixels, expected ${mask.width * mask.height}`);
+      throw new Error(
+        `[SurfaceCompiler] mask ${mask.id} has ${mask.pixels.length} pixels, expected ${mask.width * mask.height}`
+      );
     }
     maskIds.add(mask.id);
   }
   const ruleIds = new Set<string>();
   for (const rule of input.rules) {
     if (!rule.id || ruleIds.has(rule.id)) throw new Error(`[SurfaceCompiler] duplicate or empty rule id ${rule.id}`);
-    if (!(rule.densityPerSquareMetre > 0)) throw new Error(`[SurfaceCompiler] rule ${rule.id} density must be positive`);
-    if (!(rule.spacing > 0) || !(rule.cellSize > 0)) throw new Error(`[SurfaceCompiler] rule ${rule.id} spacing and cellSize must be positive`);
+    if (!(rule.densityPerSquareMetre > 0))
+      throw new Error(`[SurfaceCompiler] rule ${rule.id} density must be positive`);
+    if (!(rule.spacing > 0) || !(rule.cellSize > 0))
+      throw new Error(`[SurfaceCompiler] rule ${rule.id} spacing and cellSize must be positive`);
     if (rule.scale.horizontal[0] <= 0 || rule.scale.vertical[0] <= 0) {
       throw new Error(`[SurfaceCompiler] rule ${rule.id} scale minima must be positive`);
+    }
+    if (
+      rule.constraints.terrainLayers?.length &&
+      !(
+        Number.isFinite(rule.constraints.minimumLayerWeight) &&
+        rule.constraints.minimumLayerWeight! > 0 &&
+        rule.constraints.minimumLayerWeight! <= 1
+      )
+    ) {
+      throw new Error(`[SurfaceCompiler] rule ${rule.id} minimumLayerWeight must be in (0, 1]`);
     }
     ruleIds.add(rule.id);
   }

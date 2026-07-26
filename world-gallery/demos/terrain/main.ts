@@ -19,7 +19,6 @@ import {
   type TerrainDebugApi,
   type TerrainDebugViewName,
   type TerrainLightingSnapshot,
-  type TerrainProbeSnapshot,
   type TerrainRenderingTuning,
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
@@ -32,7 +31,10 @@ import {
   terrainBackgroundModeToShader
 } from "./src/debug/TerrainDebugTuning";
 import { TerrainWaterDebug } from "./src/debug/TerrainWaterDebug";
+import { applyTerrainControlFixture } from "./src/debug/TerrainControlFixture";
+import { createTerrainProbeSnapshot } from "./src/debug/TerrainProbe";
 import { TerrainFirstPersonController, type TerrainFirstPersonPose } from "./src/TerrainFirstPersonController";
+import { TerrainGroundSampler } from "./src/data/TerrainGroundSampler";
 import { loadLayerTextures } from "./src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "./src/loader/MacroNoiseLoader";
 import { loadManifest } from "./src/loader/ManifestLoader";
@@ -102,6 +104,10 @@ const STATIC_CAMERA_POSES = {
   "background-seam": {
     position: [1024, 900, -1536],
     target: [1024, 0, -1536]
+  },
+  "world-surface": {
+    position: [2450, 145, -1480],
+    target: [2300, 100, -1650]
   }
 };
 
@@ -164,6 +170,7 @@ async function boot(): Promise<void> {
   orbit.minDistance = 20;
   orbit.maxDistance = 10000;
   applyCameraPose(cameraEntity, orbit, "overview");
+  const query = new URLSearchParams(location.search);
 
   setStatus("loading manifest and region arrays");
   const manifestUrl = new URL("./data/manifest.json", import.meta.url).href;
@@ -179,8 +186,10 @@ async function boot(): Promise<void> {
     loadLayerTextures(engine, manifest.layers, manifestUrl),
     loadMacroNoiseTexture(engine, new URL(manifest.material.macroVariation.noiseTexture, manifestUrl).href)
   ]);
+  const controlFixture = query.get("fixture") === "control" ? applyTerrainControlFixture(terrainData) : undefined;
+  const groundSampler = new TerrainGroundSampler(terrainData, manifest.world.background, manifest.world.noise);
   const firstPerson = cameraEntity.addComponent(TerrainFirstPersonController);
-  firstPerson.configure(terrainData);
+  firstPerson.configure(groundSampler);
   let freeControl: FreeControl | null = applyTerrainCameraPose(cameraEntity, orbit, firstPerson, null, "first-person");
 
   const material = new TerrainMaterial(engine);
@@ -208,8 +217,10 @@ async function boot(): Promise<void> {
     engine,
     root.createChild("surface-world"),
     camera,
-    new URL("./data/surface/surface-manifest.json", import.meta.url).href
+    new URL("./data/surface/surface-manifest.json", import.meta.url).href,
+    { terrain: terrainData, worldNoise: manifest.world.noise }
   );
+  surfaceWorld.setProceduralTerrainActive(manifest.world.background === "noise");
   const surfaceDefaults = surfaceWorld.getTuning();
   const waterDebug = new TerrainWaterDebug(engine, root, terrainWaterBounds(terrainData));
   const waterDebugState: TerrainWaterDebugSnapshot = { enabled: false, height: 10 };
@@ -229,12 +240,18 @@ async function boot(): Promise<void> {
     manifestUrl,
     views: Object.keys(TERRAIN_DEBUG_VIEWS) as TerrainDebugViewName[],
     poses: Object.keys(CAMERA_POSES) as TerrainCameraPoseName[],
-    layers: manifest.layers.map(({ id, name, albedoHeight, normalRoughness }) => ({ id, name, albedoHeight, normalRoughness })),
+    layers: manifest.layers.map(({ id, name, albedoHeight, normalRoughness }) => ({
+      id,
+      name,
+      albedoHeight,
+      normalRoughness
+    })),
     setView(view) {
       if (!Object.hasOwn(TERRAIN_DEBUG_VIEWS, view)) throw new Error(`[terrain-debug] unknown view ${view}`);
       const debugView = TERRAIN_DEBUG_VIEWS[view];
       clipmap.setWireframe(view === "clipmap-lod" || view === "wireframe");
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugView(debugView);
+      material.setDebugView(debugView);
+      surfaceWorld.setVisible(view === "surface");
     },
     setPose(pose) {
       if (!Object.hasOwn(CAMERA_POSES, pose)) throw new Error(`[terrain-debug] unknown pose ${pose}`);
@@ -274,6 +291,21 @@ async function boot(): Promise<void> {
       camera.fieldOfView = snapshot.fieldOfView;
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
+    focusProbe(worldX, worldZ) {
+      const height = terrainData.sampleHeight(worldX, worldZ);
+      if (height === undefined) {
+        throw new Error(`[terrain-debug] no terrain height at (${worldX}, ${worldZ})`);
+      }
+      firstPerson.exit();
+      firstPerson.setFreeControl(null);
+      freeControl?.destroy();
+      freeControl = null;
+      orbit.enabled = false;
+      cameraEntity.transform.setPosition(worldX, height + 80, worldZ);
+      cameraEntity.transform.worldRotationQuaternion.set(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+      camera.fieldOfView = 20;
+      clipmap.snap(cameraEntity.transform.worldPosition);
+    },
     setDebugLayer(layer) {
       for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugLayer(layer);
     },
@@ -295,10 +327,14 @@ async function boot(): Promise<void> {
     },
     setWorldBackground(mode) {
       material.setBackgroundMode(terrainBackgroundModeToShader(mode));
+      surfaceWorld.setProceduralTerrainActive(mode === "noise");
+      groundSampler.setBackground(mode);
       tuning.world.background = mode;
     },
     setWorldNoiseTuning(values) {
       material.setWorldNoiseTuning(values);
+      surfaceWorld.setWorldNoiseTuning(values);
+      groundSampler.setWorldNoiseTuning(values);
       replaceTerrainWorldNoiseTuning(tuning.world.noise, values);
     },
     getShaderStartup() {
@@ -363,7 +399,11 @@ async function boot(): Promise<void> {
       material.setSamplingTuning(defaults.sampling);
       material.setMaterialTuning(defaults.material);
       material.configureWorldNoise(defaults.world.noise);
+      surfaceWorld.setWorldNoiseTuning(defaults.world.noise);
+      groundSampler.setWorldNoiseTuning(defaults.world.noise);
       material.setBackgroundMode(terrainBackgroundModeToShader(defaults.world.background));
+      surfaceWorld.setProceduralTerrainActive(defaults.world.background === "noise");
+      groundSampler.setBackground(defaults.world.background);
       replaceTerrainDebugTuning(tuning, defaults);
       waterDebugState.enabled = false;
       waterDebugState.height = 10;
@@ -386,45 +426,23 @@ async function boot(): Promise<void> {
       };
     },
     readProbe(worldX, worldZ) {
-      const rawControl = terrainData.sampleControl(worldX, worldZ);
-      const snapshot: TerrainProbeSnapshot = {
-        world: [worldX, worldZ],
-        height: terrainData.sampleHeight(worldX, worldZ)
-      };
-      if (rawControl === undefined) return snapshot;
-      const raw = rawControl >>> 0;
-      const scaleIndex = (raw >>> 7) & 0x7;
-      return {
-        ...snapshot,
-        control: {
-          raw,
-          base: (raw >>> 27) & 0x1f,
-          overlay: (raw >>> 22) & 0x1f,
-          blend: ((raw >>> 14) & 0xff) / 255,
-          angleIndex: (raw >>> 10) & 0xf,
-          scaleIndex,
-          scale: 0.9 - (((scaleIndex + 3) % 8) + 1) * 0.1,
-          surfaceFeatures: (raw >>> 3) & 0xf,
-          hole: (raw & 0x4) !== 0,
-          navigation: (raw & 0x2) !== 0,
-          autoshader: (raw & 0x1) !== 0
-        }
-      };
-    }
+      return createTerrainProbeSnapshot(terrainData, worldX, worldZ);
+    },
+    getControlFixture: () => controlFixture
   };
   window.terrainDebug = api;
-
-  const query = new URLSearchParams(location.search);
   const requestedView = query.get("view") as TerrainDebugViewName | null;
   const requestedPose = query.get("pose") as TerrainCameraPoseName | null;
   if (requestedView && requestedView in TERRAIN_DEBUG_VIEWS) api.setView(requestedView);
   if (requestedPose && requestedPose in CAMERA_POSES) api.setPose(requestedPose);
 
-  if (document.body.dataset.terrainInspector === "true") mountTerrainInspector(api);
+  if (document.body.dataset.terrainInspector === "true") {
+    mountTerrainInspector(api);
+  }
   engine.run();
   setStatus(
     `ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments · ` +
-      `${surfaceWorld.inspect().totalInstances.toLocaleString("en-US")} surface instances`
+      "deterministic surface streaming"
   );
 }
 
@@ -460,7 +478,10 @@ function applyCameraPose(cameraEntity: Entity, orbit: OrbitControl, poseName: St
   if (orbit) orbit.target.copyFrom(target);
 }
 
-function terrainWaterBounds(terrain: { readonly regionSize: number; readonly regions: readonly { location: readonly [number, number] }[] }) {
+function terrainWaterBounds(terrain: {
+  readonly regionSize: number;
+  readonly regions: readonly { location: readonly [number, number] }[];
+}) {
   let minimumX = Infinity;
   let minimumZ = Infinity;
   let maximumX = -Infinity;

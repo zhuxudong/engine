@@ -1,6 +1,5 @@
 import {
   AssetType,
-  BoundingBox,
   Buffer,
   BufferBindFlag,
   BufferMesh,
@@ -9,18 +8,24 @@ import {
   Engine,
   Entity,
   GLTFResource,
-  IndexBufferBinding,
-  IndexFormat,
   MeshRenderer,
-  ModelMesh,
   Script,
-  Vector3,
-  VertexElement,
-  VertexElementFormat
+  Vector3
 } from "@galacean/engine";
 import type { SurfaceCategory, SurfaceCellRange } from "./SurfaceContract";
+import type { TerrainData } from "../data/TerrainData";
+import type { TerrainWorldNoiseSpec } from "../loader/ManifestLoader";
+import type { TerrainWorldNoiseTuning } from "../TerrainMaterial";
 import { loadSurfaceManifest } from "./SurfaceManifestLoader";
 import { SurfaceMaterial } from "./SurfaceMaterial";
+import { RegionCoverageStreamer } from "./RegionCoverageStreamer";
+import {
+  createSurfaceInstancedMesh,
+  expandSurfaceBounds,
+  findSurfaceModelMeshes,
+  transformSurfaceBounds
+} from "./SurfaceInstancedMesh";
+import { SURFACE_RUNTIME_SCALE_MAX, SURFACE_RUNTIME_SCALE_MIN } from "./SurfaceRuntimeContract";
 import type {
   SurfacePrototypeRendererSpec,
   SurfacePrototypeSpec,
@@ -29,18 +34,26 @@ import type {
   SurfaceRuntimeTuning,
   SurfaceRuntimeTuningUpdate
 } from "./SurfaceRuntimeContract";
+import { WorldSurfaceStreamer } from "./WorldSurfaceStreamer";
 
-const INSTANCE_STRIDE = 64;
+/** Optional terrain continuation inputs used only when the manifest declares streamed world rules. */
+export interface SurfaceWorldCreateOptions {
+  readonly terrain?: TerrainData;
+  readonly worldNoise?: TerrainWorldNoiseSpec;
+}
+
 const CATEGORIES: readonly SurfaceCategory[] = ["grass", "flower", "shrub", "tree", "rock", "cliff"];
-const indexBindings = new WeakMap<ModelMesh, IndexBufferBinding>();
 
 interface SurfaceBatch {
   readonly range: SurfaceCellRange;
   readonly prototype: SurfacePrototypeSpec;
   readonly lods: readonly SurfaceLodBatch[];
   readonly centre: Vector3;
-  readonly radius: number;
+  readonly placementRadius: number;
+  readonly prototypeRadius: number;
+  readonly maxInstanceScale: number;
   activeLod: number;
+  instanceCount: number;
   transition: SurfaceLodTransition | null;
 }
 
@@ -62,34 +75,48 @@ interface SurfaceLodTransition {
  */
 export class SurfaceWorld {
   private readonly _manifest: SurfaceRuntimeManifest;
-  private readonly _manifestUrl: string;
   private readonly _camera: Camera;
   private readonly _materials: readonly SurfaceMaterial[];
   private readonly _batches: readonly SurfaceBatch[];
   private readonly _categoryCounts: Record<SurfaceCategory, number>;
   private readonly _impostorInstances: number;
+  private readonly _worldStreamer: WorldSurfaceStreamer | null;
+  private readonly _coverageStreamer: RegionCoverageStreamer | null;
   private readonly _tuning: MutableSurfaceRuntimeTuning;
+  private _visible = true;
   private _time = 0;
 
   private constructor(
     manifest: SurfaceRuntimeManifest,
-    manifestUrl: string,
     camera: Camera,
     materials: readonly SurfaceMaterial[],
     batches: readonly SurfaceBatch[],
     categoryCounts: Record<SurfaceCategory, number>,
-    impostorInstances: number
+    impostorInstances: number,
+    worldStreamer: WorldSurfaceStreamer | null,
+    coverageStreamer: RegionCoverageStreamer | null
   ) {
     this._manifest = manifest;
-    this._manifestUrl = manifestUrl;
     this._camera = camera;
     this._materials = materials;
     this._batches = batches;
     this._categoryCounts = categoryCounts;
     this._impostorInstances = impostorInstances;
+    this._worldStreamer = worldStreamer;
+    this._coverageStreamer = coverageStreamer;
+    const defaultColors = categoryRecordFactory(() => [1, 1, 1] as [number, number, number]);
+    const defaultScales = categoryRecord(1);
+    for (const [category, color] of Object.entries(manifest.runtimeDefaults?.color ?? {}) as Array<
+      [SurfaceCategory, readonly [number, number, number]]
+    >) {
+      defaultColors[category] = [...color];
+    }
+    Object.assign(defaultScales, manifest.runtimeDefaults?.scale);
     this._tuning = {
       enabled: categoryRecord(true),
       density: categoryRecord(1),
+      color: defaultColors,
+      scale: defaultScales,
       wind: {
         enabled: true,
         strength: 1,
@@ -98,6 +125,11 @@ export class SurfaceWorld {
       lod: {
         enabled: true,
         distanceScale: 1
+      },
+      world: {
+        enabled: worldStreamer !== null,
+        spacing: categoryRecord(1),
+        biomeOffset: [0, 0]
       },
       debugView: "surface"
     };
@@ -111,13 +143,17 @@ export class SurfaceWorld {
    * @param manifestUrl Absolute surface manifest URL.
    * @returns Ready-to-render surface world.
    */
-  static async create(engine: Engine, root: Entity, camera: Camera, manifestUrl: string): Promise<SurfaceWorld> {
+  static async create(
+    engine: Engine,
+    root: Entity,
+    camera: Camera,
+    manifestUrl: string,
+    options: SurfaceWorldCreateOptions = {}
+  ): Promise<SurfaceWorld> {
     const loaded = await loadSurfaceManifest(engine, manifestUrl);
     const lodDitherUrl = new URL(loaded.manifest.lodDitherTexture, manifestUrl).href;
     const materialList = await Promise.all(
-      loaded.manifest.materials.map((spec) =>
-        SurfaceMaterial.create(engine, spec, manifestUrl, lodDitherUrl)
-      )
+      loaded.manifest.materials.map((spec) => SurfaceMaterial.create(engine, spec, manifestUrl, lodDitherUrl))
     );
     const materials = new Map(materialList.map((material) => [material.id, material]));
     const modelUrls = Array.from(
@@ -128,14 +164,17 @@ export class SurfaceWorld {
       )
     );
     const modelResources = await Promise.all(
-      modelUrls.map(async (url) => [
-        url,
-        await engine.resourceManager.load<GLTFResource>({
-          type: AssetType.GLTF,
-          url,
-          params: { keepMeshData: true }
-        })
-      ] as const)
+      modelUrls.map(
+        async (url) =>
+          [
+            url,
+            await engine.resourceManager.load<GLTFResource>({
+              type: AssetType.GLTF,
+              url,
+              params: { keepMeshData: true }
+            })
+          ] as const
+      )
     );
     const models = new Map(modelResources);
     const prototypes = new Map(loaded.manifest.prototypeLibrary.map((prototype) => [prototype.id, prototype]));
@@ -145,35 +184,31 @@ export class SurfaceWorld {
     for (const range of loaded.manifest.ranges) {
       const prototype = prototypes.get(range.prototype)!;
       const decodedInstances = decodeInstanceRange(binary, range);
-      const instanceBuffer = new Buffer(
-        engine,
-        BufferBindFlag.VertexBuffer,
-        decodedInstances.data,
-        BufferUsage.Static
-      );
+      const instanceBuffer = new Buffer(engine, BufferBindFlag.VertexBuffer, decodedInstances.data, BufferUsage.Static);
       const lods: SurfaceLodBatch[] = [];
+      let prototypeRadius = 0;
       for (const lod of prototype.lods) {
         const renderers: MeshRenderer[] = [];
         let lodHeight = 0;
         for (let rendererIndex = 0; rendererIndex < lod.renderers.length; rendererIndex++) {
           const rendererSpec = lod.renderers[rendererIndex];
           const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
-          const sourceMeshes = findModelMeshes(models.get(modelUrl)!, rendererSpec.meshName);
+          const sourceMeshes = findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName);
           for (let primitiveIndex = 0; primitiveIndex < sourceMeshes.length; primitiveIndex++) {
             const sourceMesh = sourceMeshes[primitiveIndex];
-            const prototypeBounds = transformBounds(sourceMesh.bounds, rendererSpec);
+            const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
             lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
+            prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
             const entity = root.createChild(
               `${range.prototype}-${range.cell[0]}-${range.cell[1]}-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
             );
             const renderer = entity.addComponent(MeshRenderer);
-            renderer.mesh = createInstancedMesh(
+            renderer.mesh = createSurfaceInstancedMesh(
               engine,
               sourceMesh,
               instanceBuffer,
-              range,
-              decodedInstances.maxScale,
-              prototypeBounds
+              expandSurfaceBounds(range.bounds, prototypeBounds, decodedInstances.maxScale * SURFACE_RUNTIME_SCALE_MAX),
+              range.count
             );
             renderer.castShadows = rendererSpec.castShadows;
             renderer.receiveShadows = rendererSpec.receiveShadows;
@@ -184,9 +219,12 @@ export class SurfaceWorld {
             SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
             SurfaceMaterial.setRendererDebugInfo(range.category, range.cell, renderer.shaderData);
             SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
+            SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
+            SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
             const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
             const material = materials.get(materialId);
-            if (!material) throw new Error(`[SurfaceWorld] ${range.prototype} references unknown material ${materialId}`);
+            if (!material)
+              throw new Error(`[SurfaceWorld] ${range.prototype} references unknown material ${materialId}`);
             for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
               renderer.setMaterial(subMeshIndex, material);
             }
@@ -202,10 +240,18 @@ export class SurfaceWorld {
         (bounds[1] + bounds[4]) * 0.5,
         (bounds[2] + bounds[5]) * 0.5
       );
-      const radius =
-        Math.hypot(bounds[3] - centre.x, bounds[4] - centre.y, bounds[5] - centre.z) +
-        Math.max(...lods.map((lod) => lod.height)) * decodedInstances.maxScale;
-      batches.push({ range, prototype, lods, centre, radius, activeLod: 0, transition: null });
+      batches.push({
+        range,
+        prototype,
+        lods,
+        centre,
+        placementRadius: Math.hypot(bounds[3] - centre.x, bounds[4] - centre.y, bounds[5] - centre.z),
+        prototypeRadius: prototypeRadius * decodedInstances.maxScale,
+        maxInstanceScale: decodedInstances.maxScale,
+        activeLod: 0,
+        instanceCount: range.count,
+        transition: null
+      });
     }
 
     const categoryCounts = categoryRecord(0);
@@ -214,18 +260,52 @@ export class SurfaceWorld {
       categoryCounts[range.category] += range.count;
       if (prototypes.get(range.prototype)!.impostor) impostorInstances += range.count;
     }
+    const resources = { models, materials, prototypes };
+    const worldDistribution = loaded.manifest.worldDistribution;
+    let worldStreamer: WorldSurfaceStreamer | null = null;
+    if (worldDistribution) {
+      if (!options.terrain || !options.worldNoise) {
+        throw new Error("[SurfaceWorld] worldDistribution requires terrain and worldNoise inputs");
+      }
+      worldStreamer = WorldSurfaceStreamer.create(
+        engine,
+        root.createChild("world-noise-surface"),
+        camera,
+        options.terrain,
+        options.worldNoise,
+        worldDistribution,
+        manifestUrl,
+        resources
+      );
+    }
+    let coverageStreamer: RegionCoverageStreamer | null = null;
+    if (loaded.manifest.coverageStreaming?.enabled) {
+      if (!options.terrain) {
+        throw new Error("[SurfaceWorld] coverageStreaming requires finite terrain data");
+      }
+      coverageStreamer = await RegionCoverageStreamer.create(
+        engine,
+        root.createChild("region-coverage-surface"),
+        camera,
+        options.terrain,
+        loaded.manifest,
+        manifestUrl,
+        resources
+      );
+    }
     const world = new SurfaceWorld(
       loaded.manifest,
-      loaded.manifestUrl,
       camera,
       materialList,
       batches,
       categoryCounts,
-      impostorInstances
+      impostorInstances,
+      worldStreamer,
+      coverageStreamer
     );
     const follower = root.addComponent(SurfaceWorldFollower);
     follower.initialize(world);
-    world.update(0);
+    world.setTuning({});
     return world;
   }
 
@@ -249,19 +329,100 @@ export class SurfaceWorld {
         this._tuning.density[category] = density;
       }
     }
+    if (values.color) {
+      for (const [category, color] of Object.entries(values.color) as Array<
+        [SurfaceCategory, readonly [number, number, number]]
+      >) {
+        if (color.length !== 3 || color.some((value) => !(value >= 0 && value <= 2))) {
+          throw new Error(`[SurfaceWorld] ${category} color components must be in 0..2`);
+        }
+        this._tuning.color[category] = [...color];
+      }
+    }
+    if (values.scale) {
+      for (const [category, scale] of Object.entries(values.scale) as Array<[SurfaceCategory, number]>) {
+        if (!(scale >= SURFACE_RUNTIME_SCALE_MIN && scale <= SURFACE_RUNTIME_SCALE_MAX)) {
+          throw new Error(
+            `[SurfaceWorld] ${category} scale must be in ${SURFACE_RUNTIME_SCALE_MIN}..${SURFACE_RUNTIME_SCALE_MAX}`
+          );
+        }
+        this._tuning.scale[category] = scale;
+      }
+    }
     if (values.wind) Object.assign(this._tuning.wind, values.wind);
     if (values.lod) Object.assign(this._tuning.lod, values.lod);
+    if (values.world) {
+      if (values.world.enabled !== undefined) this._tuning.world.enabled = values.world.enabled;
+      if (values.world.spacing) {
+        for (const [category, spacing] of Object.entries(values.world.spacing) as Array<[SurfaceCategory, number]>) {
+          if (!(spacing >= 0.5 && spacing <= 4)) {
+            throw new Error(`[SurfaceWorld] ${category} world spacing must be in 0.5..4`);
+          }
+          this._tuning.world.spacing[category] = spacing;
+        }
+      }
+      if (values.world.biomeOffset) {
+        if (values.world.biomeOffset.some((value) => !Number.isFinite(value))) {
+          throw new Error("[SurfaceWorld] world biome offset must contain finite values");
+        }
+        this._tuning.world.biomeOffset = [...values.world.biomeOffset];
+      }
+    }
     if (values.debugView) this._tuning.debugView = values.debugView;
-    const debugView = this._tuning.debugView === "normal"
-      ? 1
-      : this._tuning.debugView === "wind-weight"
-        ? 2
-        : this._tuning.debugView === "category"
-          ? 3
-          : this._tuning.debugView === "cell"
-            ? 4
-            : 0;
+    const debugView =
+      this._tuning.debugView === "normal"
+        ? 1
+        : this._tuning.debugView === "wind-weight"
+          ? 2
+          : this._tuning.debugView === "category"
+            ? 3
+            : this._tuning.debugView === "cell"
+              ? 4
+              : this._tuning.debugView === "world-biome"
+                ? 5
+                : 0;
     for (const material of this._materials) material.setDebugView(debugView);
+    for (const batch of this._batches) {
+      for (const lod of batch.lods) {
+        for (const renderer of lod.renderers) {
+          SurfaceMaterial.setRendererTuning(
+            this._tuning.color[batch.range.category],
+            this._tuning.scale[batch.range.category],
+            renderer.shaderData
+          );
+        }
+      }
+    }
+    this.update(0);
+  }
+
+  /**
+   * Keeps streamed surface grounding and CPU constraints aligned with live terrain noise.
+   * @param tuning Validated terrain world-noise values.
+   */
+  setWorldNoiseTuning(tuning: TerrainWorldNoiseTuning): void {
+    for (const material of this._materials) material.setWorldNoiseTuning(tuning);
+    this._worldStreamer?.setWorldNoiseTuning(tuning);
+  }
+
+  /**
+   * Aligns streamed world-surface visibility with the terrain background implementation.
+   * @param active Whether terrain world noise is the active procedural continuation.
+   */
+  setProceduralTerrainActive(active: boolean): void {
+    this._worldStreamer?.setProceduralTerrainActive(active);
+    this.update(0);
+  }
+
+  /**
+   * Shows or isolates every surface renderer without changing user category controls.
+   * @param visible Whether finite and streamed surface batches may be submitted.
+   */
+  setVisible(visible: boolean): void {
+    if (this._visible === visible) return;
+    this._visible = visible;
+    this._worldStreamer?.setVisible(visible);
+    this._coverageStreamer?.setVisible(visible);
     this.update(0);
   }
 
@@ -271,49 +432,74 @@ export class SurfaceWorld {
    */
   inspect(): SurfaceRuntimeSnapshot {
     const visible = this._batches.filter((batch) => batch.activeLod >= 0);
-    const lodCounts = new Array(
-      Math.max(1, ...this._batches.map((batch) => batch.lods.length)),
-    ).fill(0);
+    const lodCounts = new Array(Math.max(1, ...this._batches.map((batch) => batch.lods.length))).fill(0);
     let visibleInstances = 0;
+    const visibleCategoryCounts = categoryRecord(0);
     for (const batch of visible) {
       const count = Math.floor(batch.range.count * this._tuning.density[batch.range.category]);
       visibleInstances += count;
+      visibleCategoryCounts[batch.range.category] += count;
       if (batch.activeLod >= 0) lodCounts[batch.activeLod] += count;
     }
+    const world = this._worldStreamer?.inspect() ?? {
+      instances: 0,
+      rendererBatches: 0,
+      activeRendererBatches: 0,
+      rejectedByBudget: 0,
+      categoryCounts: categoryRecord(0),
+      fingerprint: 0
+    };
+    const coverage = this._coverageStreamer?.inspect() ?? {
+      instances: 0,
+      rendererBatches: 0,
+      activeRendererBatches: 0,
+      categoryCounts: categoryRecord(0),
+      fingerprint: 0
+    };
+    visibleInstances += coverage.instances;
+    for (const category of CATEGORIES) {
+      visibleCategoryCounts[category] += coverage.categoryCounts[category];
+    }
+    const staticRendererBatches = this._batches.reduce(
+      (count, batch) => count + batch.lods.reduce((lodCount, lod) => lodCount + lod.renderers.length, 0),
+      0
+    );
+    const visibleStaticRendererBatches = visible.reduce(
+      (count, batch) =>
+        count +
+        batch.lods.reduce(
+          (lodCount, lod) => lodCount + lod.renderers.filter((renderer) => renderer.entity.isActive).length,
+          0
+        ),
+      0
+    );
     return {
       totalInstances: this._manifest.binary.count,
       totalRanges: this._manifest.ranges.length,
       prototypes: this._manifest.prototypeLibrary.length,
-      rendererBatches: this._batches.reduce(
-        (count, batch) => count + batch.lods.reduce((lodCount, lod) => lodCount + lod.renderers.length, 0),
-        0
-      ),
+      rendererBatches: coverage.rendererBatches + world.rendererBatches + staticRendererBatches,
+      visibleRendererBatches:
+        coverage.activeRendererBatches + world.activeRendererBatches + visibleStaticRendererBatches,
       visibleRanges: visible.length,
       visibleInstances,
+      visibleCategoryCounts,
       transitioningRanges: visible.filter((batch) => batch.transition !== null).length,
       lodCounts,
       categoryCounts: { ...this._categoryCounts },
       impostorInstances: this._impostorInstances,
-      debugMasks: (this._manifest.debugMasks ?? []).map((mask) => ({
-        id: mask.id,
-        url: new URL(mask.url, this._manifestUrl).href,
-        origin: [...mask.origin],
-        size: [...mask.size]
-      })),
-      sourceRules: (this._manifest.sourceRules ?? []).map((rule) => ({
-        ...rule,
-        scale: {
-          horizontal: [...rule.scale.horizontal],
-          vertical: [...rule.scale.vertical]
-        },
-        yaw: [...rule.yaw],
-        constraints: {
-          ...rule.constraints,
-          height: [...rule.constraints.height],
-          slope: [...rule.constraints.slope],
-          terrainLayers: rule.constraints.terrainLayers ? [...rule.constraints.terrainLayers] : undefined
-        }
-      })),
+      worldSurfaceAvailable: this._worldStreamer !== null,
+      worldInstances: world.instances,
+      worldRendererBatches: world.rendererBatches,
+      worldActiveRendererBatches: world.activeRendererBatches,
+      worldRejectedByBudget: world.rejectedByBudget,
+      worldCategoryCounts: { ...world.categoryCounts },
+      worldFingerprint: world.fingerprint,
+      coverageAvailable: this._coverageStreamer !== null,
+      coverageInstances: coverage.instances,
+      coverageRendererBatches: coverage.rendererBatches,
+      coverageActiveRendererBatches: coverage.activeRendererBatches,
+      coverageCategoryCounts: { ...coverage.categoryCounts },
+      coverageFingerprint: coverage.fingerprint,
       tuning: this.getTuning()
     };
   }
@@ -330,21 +516,18 @@ export class SurfaceWorld {
     for (const batch of this._batches) {
       const categoryEnabled = this._tuning.enabled[batch.range.category];
       const density = this._tuning.density[batch.range.category];
+      const runtimeScale = this._tuning.scale[batch.range.category];
       const centreDistance = Vector3.distance(cameraPosition, batch.centre);
-      const cullingDistance = centreDistance - batch.radius;
+      const cullingDistance = centreDistance - batch.placementRadius - batch.prototypeRadius * runtimeScale;
       let selectedLod = -1;
       if (
+        this._visible &&
         categoryEnabled &&
         density > 0 &&
         cullingDistance <= batch.prototype.maxDistance * this._tuning.lod.distanceScale
       ) {
         selectedLod = this._tuning.lod.enabled
-          ? selectLod(
-              batch,
-              Math.max(centreDistance, 0.01),
-              tangent,
-              this._tuning.lod.distanceScale
-            )
+          ? selectLod(batch, Math.max(centreDistance, 0.01), tangent, this._tuning.lod.distanceScale, runtimeScale)
           : 0;
       }
       updateBatchLod(
@@ -355,12 +538,16 @@ export class SurfaceWorld {
         this._manifest.lodCrossfadeDuration
       );
     }
+    this._coverageStreamer?.update(this._tuning);
+    this._worldStreamer?.update(this._tuning);
   }
 }
 
 interface MutableSurfaceRuntimeTuning {
   enabled: Record<SurfaceCategory, boolean>;
   density: Record<SurfaceCategory, number>;
+  color: Record<SurfaceCategory, [number, number, number]>;
+  scale: Record<SurfaceCategory, number>;
   wind: {
     enabled: boolean;
     strength: number;
@@ -370,7 +557,12 @@ interface MutableSurfaceRuntimeTuning {
     enabled: boolean;
     distanceScale: number;
   };
-  debugView: "surface" | "normal" | "wind-weight" | "category" | "cell";
+  world: {
+    enabled: boolean;
+    spacing: Record<SurfaceCategory, number>;
+    biomeOffset: [number, number];
+  };
+  debugView: "surface" | "normal" | "wind-weight" | "category" | "cell" | "world-biome";
 }
 
 class SurfaceWorldFollower extends Script {
@@ -383,112 +575,6 @@ class SurfaceWorldFollower extends Script {
   override onUpdate(deltaTime: number): void {
     this._world.update(deltaTime);
   }
-}
-
-function createInstancedMesh(
-  engine: Engine,
-  source: ModelMesh,
-  instanceBuffer: Buffer,
-  range: SurfaceCellRange,
-  maxScale: number,
-  prototypeBounds: BoundingBox
-): BufferMesh {
-  const mesh = new BufferMesh(engine, `${source.name}-instances-${range.offset}`);
-  source.vertexBufferBindings.forEach((binding, index) => mesh.setVertexBufferBinding(binding, index));
-  const indexBufferBinding = getIndexBufferBinding(engine, source);
-  if (indexBufferBinding) mesh.setIndexBufferBinding(indexBufferBinding);
-  const bindingIndex = source.vertexBufferBindings.length;
-  mesh.setVertexBufferBinding(instanceBuffer, INSTANCE_STRIDE, bindingIndex);
-  mesh.setVertexElements([
-    ...source.vertexElements,
-    new VertexElement("INSTANCE_POSITION_HASH", 0, VertexElementFormat.Vector4, bindingIndex, 1),
-    new VertexElement("INSTANCE_ROTATION", 16, VertexElementFormat.Vector4, bindingIndex, 1),
-    new VertexElement("INSTANCE_SCALE_WIND", 32, VertexElementFormat.Vector4, bindingIndex, 1),
-    new VertexElement("INSTANCE_COLOR", 48, VertexElementFormat.Vector4, bindingIndex, 1)
-  ]);
-  for (const subMesh of source.subMeshes) mesh.addSubMesh(subMesh.start, subMesh.count, subMesh.topology);
-  const sourceRadius = Math.max(
-    Math.abs(prototypeBounds.min.x),
-    Math.abs(prototypeBounds.min.y),
-    Math.abs(prototypeBounds.min.z),
-    Math.abs(prototypeBounds.max.x),
-    Math.abs(prototypeBounds.max.y),
-    Math.abs(prototypeBounds.max.z)
-  ) * maxScale;
-  mesh.bounds = new BoundingBox(
-    new Vector3(
-      range.bounds[0] - sourceRadius,
-      range.bounds[1] - sourceRadius,
-      range.bounds[2] - sourceRadius
-    ),
-    new Vector3(
-      range.bounds[3] + sourceRadius,
-      range.bounds[4] + sourceRadius,
-      range.bounds[5] + sourceRadius
-    )
-  );
-  mesh.instanceCount = range.count;
-  return mesh;
-}
-
-function getIndexBufferBinding(engine: Engine, source: ModelMesh): IndexBufferBinding | null {
-  const cached = indexBindings.get(source);
-  if (cached) return cached;
-  const indices = source.getIndices();
-  if (!indices) return null;
-  const format =
-    indices instanceof Uint8Array
-      ? IndexFormat.UInt8
-      : indices instanceof Uint16Array
-        ? IndexFormat.UInt16
-        : IndexFormat.UInt32;
-  const binding = new IndexBufferBinding(
-    new Buffer(engine, BufferBindFlag.IndexBuffer, indices, BufferUsage.Static),
-    format
-  );
-  indexBindings.set(source, binding);
-  return binding;
-}
-
-function transformBounds(bounds: BoundingBox, spec: SurfacePrototypeRendererSpec): BoundingBox {
-  const minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
-  const maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
-  for (const x of [bounds.min.x, bounds.max.x]) {
-    for (const y of [bounds.min.y, bounds.max.y]) {
-      for (const z of [bounds.min.z, bounds.max.z]) {
-        const point = rotateVector(
-          [x * spec.localScale[0], y * spec.localScale[1], z * spec.localScale[2]],
-          spec.localRotation
-        );
-        point[0] += spec.localPosition[0];
-        point[1] += spec.localPosition[1];
-        point[2] += spec.localPosition[2];
-        minimum.x = Math.min(minimum.x, point[0]);
-        minimum.y = Math.min(minimum.y, point[1]);
-        minimum.z = Math.min(minimum.z, point[2]);
-        maximum.x = Math.max(maximum.x, point[0]);
-        maximum.y = Math.max(maximum.y, point[1]);
-        maximum.z = Math.max(maximum.z, point[2]);
-      }
-    }
-  }
-  return new BoundingBox(minimum, maximum);
-}
-
-function rotateVector(
-  value: readonly [number, number, number],
-  rotation: readonly [number, number, number, number]
-): [number, number, number] {
-  const [x, y, z] = value;
-  const [qx, qy, qz, qw] = rotation;
-  const tx = 2 * (qy * z - qz * y);
-  const ty = 2 * (qz * x - qx * z);
-  const tz = 2 * (qx * y - qy * x);
-  return [
-    x + qw * tx + (qy * tz - qz * ty),
-    y + qw * ty + (qz * tx - qx * tz),
-    z + qw * tz + (qx * ty - qy * tx)
-  ];
 }
 
 function decodeInstanceRange(binary: DataView, range: SurfaceCellRange): { data: Float32Array; maxScale: number } {
@@ -515,24 +601,32 @@ function decodeInstanceRange(binary: DataView, range: SurfaceCellRange): { data:
     output[targetOffset + 14] = ((color >>> 16) & 0xff) / 255;
     output[targetOffset + 15] = ((color >>> 24) & 0xff) / 255;
   }
-  return { data: output, maxScale };
+  return { data: sortInstanceDataByPriority(output), maxScale };
 }
 
-function findModelMeshes(resource: GLTFResource, meshName: string): readonly ModelMesh[] {
-  const meshGroups = resource.meshes ?? [];
-  const exact = meshGroups.find((meshes) => meshes[0]?.name === meshName);
-  if (exact) return exact;
-  const normalized = meshGroups.find((meshes) => meshes[0]?.name.replace(/\.\d{3}$/, "") === meshName);
-  if (normalized) return normalized;
-  throw new Error(`[SurfaceWorld] ${resource.url} does not contain mesh ${meshName}`);
-}
-
-function selectLod(batch: SurfaceBatch, distance: number, fovTangent: number, distanceScale: number): number {
-  const projectedHeight = batch.lods[0].height / (2 * distance * fovTangent);
+function selectLod(
+  batch: SurfaceBatch,
+  distance: number,
+  fovTangent: number,
+  distanceScale: number,
+  runtimeScale: number
+): number {
+  const projectedHeight = (batch.lods[0].height * batch.maxInstanceScale * runtimeScale) / (2 * distance * fovTangent);
   for (const lod of batch.prototype.lods) {
     if (projectedHeight >= lod.screenRelativeHeight / distanceScale) return lod.index;
   }
   return batch.lods[batch.lods.length - 1].index;
+}
+
+function boundsRadius(bounds: { readonly min: Vector3; readonly max: Vector3 }): number {
+  return Math.max(
+    Math.abs(bounds.min.x),
+    Math.abs(bounds.min.y),
+    Math.abs(bounds.min.z),
+    Math.abs(bounds.max.x),
+    Math.abs(bounds.max.y),
+    Math.abs(bounds.max.z)
+  );
 }
 
 function updateBatchLod(
@@ -542,6 +636,10 @@ function updateBatchLod(
   deltaTime: number,
   duration: number
 ): void {
+  if (batch.transition === null && targetLod === batch.activeLod && instanceCount === batch.instanceCount) {
+    return;
+  }
+  batch.instanceCount = instanceCount;
   if (targetLod < 0) {
     batch.activeLod = -1;
     batch.transition = null;
@@ -583,13 +681,7 @@ function updateBatchLod(
 
   batch.transition.elapsed = Math.min(batch.transition.elapsed + deltaTime, duration);
   const remaining = 1 - batch.transition.elapsed / duration;
-  setBatchLodState(
-    batch,
-    batch.transition.from,
-    batch.transition.to,
-    remaining,
-    instanceCount
-  );
+  setBatchLodState(batch, batch.transition.from, batch.transition.to, remaining, instanceCount);
   if (batch.transition.elapsed >= duration) {
     batch.activeLod = batch.transition.to;
     batch.transition = null;
@@ -612,11 +704,7 @@ function setBatchLodState(
       renderer.entity.isActive = active;
       (renderer.mesh as BufferMesh).instanceCount = active ? instanceCount : 0;
       if (secondaryLod >= 0) {
-        SurfaceMaterial.setRendererLodFade(
-          true,
-          isPrimary ? remaining : -remaining,
-          renderer.shaderData
-        );
+        SurfaceMaterial.setRendererLodFade(true, isPrimary ? remaining : -remaining, renderer.shaderData);
       } else {
         SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
       }
@@ -637,14 +725,38 @@ function categoryRecord<T>(value: T): Record<SurfaceCategory, T> {
   return Object.fromEntries(CATEGORIES.map((category) => [category, value])) as Record<SurfaceCategory, T>;
 }
 
+function categoryRecordFactory<T>(factory: () => T): Record<SurfaceCategory, T> {
+  return Object.fromEntries(CATEGORIES.map((category) => [category, factory()])) as Record<SurfaceCategory, T>;
+}
+
 function cloneTuning(tuning: MutableSurfaceRuntimeTuning): SurfaceRuntimeTuning {
   return {
     enabled: { ...tuning.enabled },
     density: { ...tuning.density },
+    color: Object.fromEntries(CATEGORIES.map((category) => [category, [...tuning.color[category]]])) as Record<
+      SurfaceCategory,
+      [number, number, number]
+    >,
+    scale: { ...tuning.scale },
     wind: { ...tuning.wind, direction: [...tuning.wind.direction] as [number, number, number] },
     lod: { ...tuning.lod },
+    world: {
+      enabled: tuning.world.enabled,
+      spacing: { ...tuning.world.spacing },
+      biomeOffset: [...tuning.world.biomeOffset]
+    },
     debugView: tuning.debugView
   };
+}
+
+function sortInstanceDataByPriority(source: Float32Array): Float32Array {
+  const records = Array.from({ length: source.length / 16 }, (_, index) => index);
+  records.sort((left, right) => source[left * 16 + 3] - source[right * 16 + 3] || left - right);
+  const output = new Float32Array(source.length);
+  for (let target = 0; target < records.length; target++) {
+    output.set(source.subarray(records[target] * 16, records[target] * 16 + 16), target * 16);
+  }
+  return output;
 }
 
 function normalizeDirection(direction: readonly [number, number, number]): [number, number, number] {

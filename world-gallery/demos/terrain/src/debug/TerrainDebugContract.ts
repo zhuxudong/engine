@@ -27,6 +27,7 @@ export const TERRAIN_DEBUG_VIEWS = {
   checkerboard: TerrainDebugView.Checkerboard,
   grey: TerrainDebugView.Grey,
   height: TerrainDebugView.Height,
+  "height-source": TerrainDebugView.HeightSource,
   jaggedness: TerrainDebugView.Jaggedness,
   normal: TerrainDebugView.TerrainNormal,
   region: TerrainDebugView.Region,
@@ -42,6 +43,7 @@ export const TERRAIN_DEBUG_VIEWS = {
   "control-scale": TerrainDebugView.ControlScale,
   autoshader: TerrainDebugView.AutoShader,
   holes: TerrainDebugView.Holes,
+  navigation: TerrainDebugView.Navigation,
   bilerp: TerrainDebugView.Bilerp,
   "texture-height": TerrainDebugView.TextureHeight,
   "texture-normal": TerrainDebugView.TextureNormal,
@@ -71,6 +73,7 @@ export type TerrainCameraPoseName =
   | "top"
   | "seam"
   | "background-seam"
+  | "world-surface"
   | "hero"
   | "valley-overview"
   | "terrain-horizon"
@@ -116,18 +119,48 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
     group: "surface",
     description: "最终地形光照：terrain albedo、纹理法线、粗糙度、方向光阴影接收与烘焙环境漫反射。"
   },
-  checkerboard: { label: "Checkerboard / 世界棋盘", group: "geometry", description: "世界坐标棋盘；用于确认 clipmap 覆盖与坐标连续性。" },
+  checkerboard: {
+    label: "Checkerboard / 世界棋盘",
+    group: "geometry",
+    description: "世界坐标棋盘；用于确认 clipmap 覆盖与坐标连续性。"
+  },
   grey: { label: "Grey / 灰色基线", group: "geometry", description: "不读取任何 terrain 数据或纹理的几何基线。" },
   height: {
     label: "Height / 高度",
     group: "data",
     description: "terrain 的 smoothstep(-0.1, 2.0, 0.5 + world Y / 300) 灰阶：黑低、白高；不是最终材质颜色。"
   },
-  jaggedness: { label: "Jaggedness / 法线突变", group: "data", description: "相邻 height normal 的差异；亮处表示高度数据或 region seam 不连续。" },
-  normal: { label: "Terrain normal / 地形法线", group: "data", description: "heightmap 导出的世界法线 RGB 编码；不是 normal-map 纹理预览。" },
-  region: { label: "Region / 区域层", group: "data", description: "region-map 命中的 height/control array layer；黑色表示空区域。" },
-  "region-grid": { label: "Region grid / 区域网格", group: "geometry", description: "1024m region 边界与 region-map layer。" },
-  "vertex-grid": { label: "Vertex grid / 顶点网格", group: "geometry", description: "vertex-density 对应的 terrain grid。" },
+  "height-source": {
+    label: "Height source / 高度源",
+    group: "data",
+    description:
+      "按最终 world XZ 直接读取 height texture-array 的米制 R 值；用于区分源数据与 clipmap 顶点 morph 后的 Height。"
+  },
+  jaggedness: {
+    label: "Jaggedness / 法线突变",
+    group: "data",
+    description: "相邻 height normal 的差异；亮处表示高度数据或 region seam 不连续。"
+  },
+  normal: {
+    label: "Terrain normal / 地形法线",
+    group: "data",
+    description: "heightmap 导出的世界法线 RGB 编码；不是 normal-map 纹理预览。"
+  },
+  region: {
+    label: "Region / 区域层",
+    group: "data",
+    description: "region-map 命中的 height/control array layer；黑色表示空区域。"
+  },
+  "region-grid": {
+    label: "Region grid / 区域网格",
+    group: "geometry",
+    description: "1024m region 边界与 region-map layer。"
+  },
+  "vertex-grid": {
+    label: "Vertex grid / 顶点网格",
+    group: "geometry",
+    description: "vertex-density 对应的 terrain grid。"
+  },
   "clipmap-lod": {
     label: "Clipmap LOD / 裁剪图层级",
     group: "geometry",
@@ -135,7 +168,8 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
       "真实高度位移后的 clipmap 三角线框；每个离散 LOD 环有固定颜色，同色亮度按相机距离的 vertex morph 系数变化。"
   },
   wireframe: {
-    label: "Wireframe / 三角线框", group: "geometry",
+    label: "Wireframe / 三角线框",
+    group: "geometry",
     description: "与 production height sampling 和 vertex geomorph 同路径的三角形线框。"
   },
   "control-texture": {
@@ -143,45 +177,69 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
     group: "data",
     description: "terrain 原始 32 色 base/overlay ID 调色板；中心圆区按 control blend 显示 Overlay，其余显示 Base。"
   },
-  "control-base": { label: "Control base / 基础层 ID", group: "data", description: "原始 control word 的 base texture ID 灰度值；不是 albedo。" },
-  "control-overlay": { label: "Control overlay / 覆盖层 ID", group: "data", description: "原始 control word 的 overlay texture ID 灰度值；不是 albedo。" },
+  "control-base": {
+    label: "Control base / 基础层 ID",
+    group: "data",
+    description: "原始 control word 的 base texture ID 灰度值；不是 albedo。"
+  },
+  "control-overlay": {
+    label: "Control overlay / 覆盖层 ID",
+    group: "data",
+    description: "原始 control word 的 overlay texture ID 灰度值；不是 albedo。"
+  },
   "control-blend": {
     label: "Control blend / 控制混合",
     group: "data",
-    description: "terrain debug insert：红色为原始 8-bit control blend，绿色固定为 0，蓝色为启用 autoshader 后的 slope/height blend。"
+    description:
+      "terrain debug insert：红色为原始 8-bit control blend，绿色固定为 0，蓝色为启用 autoshader 后的 slope/height blend。"
   },
-  "control-angle": { label: "Control rotation / 控制旋转", group: "data", description: "原始 control word 的 rotation index 灰度值。" },
-  "control-scale": { label: "Control scale / 控制缩放", group: "data", description: "原始 control word 解码后的 UV scale 灰度值。" },
-  "surface-features": {
-    label: "Surface features / 地表标记",
+  "control-angle": {
+    label: "Control rotation / 控制旋转",
     group: "data",
-    description: "Galacean 地表系统使用的 control 保留 bits 3–6：绿=bit 3（当前树木）、蓝=bit 4、红=bit 5、白=bit 6；原始导入文件不写入这些位。"
+    description: "原始 control word 的 rotation index 灰度值。"
   },
-  "world-material-scale": {
-    label: "World material scale / 世界材质缩放",
-    group: "sampling",
-    description: "区域内保持原始材质尺度（蓝）；区域外在 world-noise 过渡带之后平滑过渡到 Tri scale reduction（红），避免 region 与 world 的 UV 相位突变。"
+  "control-scale": {
+    label: "Control scale / 控制缩放",
+    group: "data",
+    description: "原始 control word 解码后的 UV scale 灰度值。"
   },
   autoshader: {
     label: "Autoshader flag / 自动材质标志",
     group: "data",
-    description: "terrain DEBUG_AUTOSHADER：白色表示 control bit 0（或区域外）会使用 slope/height 自动混合；黑色表示保留手绘控制字。"
+    description:
+      "terrain DEBUG_AUTOSHADER：白色表示 control bit 0（或区域外）会使用 slope/height 自动混合；黑色表示保留手绘控制字。"
   },
   holes: {
     label: "Hole flag / 洞标志（Galacean）",
     group: "data",
-    description: "terrain 1.0.2 在 vertex 阶段直接剔除 hole，未注入独立 fragment debug view；此 Galacean 诊断把 raw bit 2 显示为红色。"
+    description:
+      "terrain 1.0.2 在 vertex 阶段直接剔除 hole，未注入独立 fragment debug view；此 Galacean 诊断把 raw bit 2 显示为红色。"
+  },
+  navigation: {
+    label: "Navigation flag / 导航标志",
+    group: "data",
+    description: "原始 control word bit 1；白色表示该地形 texel 被标记为可导航，黑色表示未标记。"
   },
   bilerp: {
-    label: "Bilerp / 四点插值", group: "sampling",
+    label: "Bilerp / 四点插值",
+    group: "sampling",
     description: "绿色为 four-corner material interpolation；红色为单 control texel 路径。"
   },
   "texture-height": {
-    label: "Texture height / 纹理高度", group: "sampling",
+    label: "Texture height / 纹理高度",
+    group: "sampling",
     description: "完成 terrain material accumulation 后的 albedo-height alpha。"
   },
-  "texture-normal": { label: "Texture normal / 纹理法线", group: "sampling", description: "完成 material accumulation 后的 normal sample RGB。" },
-  "texture-roughness": { label: "Texture roughness / 纹理粗糙度", group: "sampling", description: "完成 material accumulation 后的 normal/roughness alpha 灰度值。" },
+  "texture-normal": {
+    label: "Texture normal / 纹理法线",
+    group: "sampling",
+    description: "完成 material accumulation 后的 normal sample RGB。"
+  },
+  "texture-roughness": {
+    label: "Texture roughness / 纹理粗糙度",
+    group: "sampling",
+    description: "完成 material accumulation 后的 normal/roughness alpha 灰度值。"
+  },
   "color-map": {
     label: "Color map / 区域颜色图",
     group: "data",
@@ -192,29 +250,42 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
     group: "data",
     description: "terrain _color_maps 的 alpha 灰阶；与 texture asset 的 roughness 合成为最终地形粗糙度。"
   },
-  "detile-cell": { label: "Detile cell / 去重复单元", group: "sampling", description: "选定 layer 的 terrain detile cell 和单元边界。", usesLayer: true },
+  "detile-cell": {
+    label: "Detile cell / 去重复单元",
+    group: "sampling",
+    description: "选定 layer 的 terrain detile cell 和单元边界。",
+    usesLayer: true
+  },
   "sampling-mip": {
-    label: "Sampling mip / 采样 Mip", group: "sampling",
+    label: "Sampling mip / 采样 Mip",
+    group: "sampling",
     description: "选定 layer 的 textureGrad mip estimate；蓝低、红高。",
     usesLayer: true
   },
   "layer-source": {
-    label: "Layer original / 原始层采样", group: "sampling",
+    label: "Layer original / 原始层采样",
+    group: "sampling",
     description: "选定 layer，保留 projection/control transform，但移除 detile 的原始 textureGrad。",
     usesLayer: true
   },
   "layer-detiled": {
-    label: "Layer detiled / 去重复层采样", group: "sampling",
+    label: "Layer detiled / 去重复层采样",
+    group: "sampling",
     description: "选定 layer 的去重复 textureGrad，直接与原始层采样对照。",
     usesLayer: true
   },
   "detile-rotation-axis": {
     label: "Detile rotation axis / 去重复旋转轴",
     group: "sampling",
-    description: "验证视图：每个地形单元的线条方向来自最终 id_cs。Detiling rotation 会转动线条；Detiling shift 不会改变它。",
+    description:
+      "验证视图：每个地形单元的线条方向来自最终 id_cs。Detiling rotation 会转动线条；Detiling shift 不会改变它。",
     usesLayer: true
   },
-  "dual-factor": { label: "Dual factor / 双尺度因子", group: "sampling", description: "dual scaling transition：蓝近、红远。" }
+  "dual-factor": {
+    label: "Dual factor / 双尺度因子",
+    group: "sampling",
+    description: "dual scaling transition：蓝近、红远。"
+  }
 };
 
 /** Localized labels for the inspector's diagnostic groups. */
@@ -229,8 +300,21 @@ export const TERRAIN_DEBUG_VIEW_GROUP_LABELS: Record<TerrainDebugViewGroup, stri
 export interface TerrainProbeSnapshot {
   /** World-space XZ coordinate. */
   readonly world: readonly [x: number, z: number];
+  /** Raw uint16 height before manifest min/max range decoding. */
+  readonly heightRaw?: number;
   /** Decoded metre height when the point belongs to a region. */
   readonly height?: number;
+  /** CPU source address selected by the world-to-region mapping. */
+  readonly region?: {
+    /** Transient texture-array layer. */
+    readonly layer: number;
+    /** Stable region-space location. */
+    readonly location: readonly [x: number, z: number];
+    /** Local source texel inside the region. */
+    readonly texel: readonly [x: number, z: number];
+    /** Row-major source index inside the region payload. */
+    readonly sourceIndex: number;
+  };
   /** Raw control word and its terrain fields when the point belongs to a region. */
   readonly control?: {
     readonly raw: number;
@@ -246,6 +330,22 @@ export interface TerrainProbeSnapshot {
     readonly navigation: boolean;
     readonly autoshader: boolean;
   };
+}
+
+/** One named branch in the query-gated atomic terrain fixture. */
+export interface TerrainControlFixtureCaseSnapshot {
+  /** Stable fixture case identifier. */
+  readonly id: string;
+  /** CPU source and decoded values after the fixture was applied. */
+  readonly probe: TerrainProbeSnapshot;
+}
+
+/** Atomic height/control fixture applied to one loaded texture-array layer. */
+export interface TerrainControlFixtureSnapshot {
+  /** First region layer patched in both CPU and GPU storage. */
+  readonly layer: number;
+  /** Named fixture cases and their fixed world-space probes. */
+  readonly cases: readonly TerrainControlFixtureCaseSnapshot[];
 }
 
 export type { TerrainFirstPersonSnapshot } from "../TerrainFirstPersonController";
@@ -399,6 +499,12 @@ export interface TerrainDebugApi {
    * @param snapshot Reproducible camera transform.
    */
   setCamera(snapshot: TerrainCameraSnapshot): void;
+  /**
+   * Locks the camera vertically above one terrain coordinate for framebuffer diagnostics.
+   * @param worldX World-space X coordinate in metres.
+   * @param worldZ World-space Z coordinate in metres.
+   */
+  focusProbe(worldX: number, worldZ: number): void;
   /** Selects the asset used by layer-specific debug outputs. */
   setDebugLayer(layer: number): void;
   /** Returns a copy of all inspector-controlled values. */
@@ -450,6 +556,8 @@ export interface TerrainDebugApi {
   };
   /** Reads raw fixture values at a world-space coordinate. */
   readProbe(worldX: number, worldZ: number): TerrainProbeSnapshot;
+  /** Returns the query-gated atomic control fixture, or undefined in the normal demo. */
+  getControlFixture(): TerrainControlFixtureSnapshot | undefined;
 }
 
 declare global {
