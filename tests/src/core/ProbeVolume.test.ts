@@ -70,6 +70,53 @@ describe("ProbeVolume", () => {
     expect(volume.localToWorldMatrix.elements[12]).to.equal(4);
   });
 
+  it("keeps a prepared scenario target stable at blend endpoints", () => {
+    const volume = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    volume.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], new Matrix(), "Night")
+    );
+
+    volume.setLightingScenarioBlendTarget("Night");
+    // Simulate resources having been built after the one-time target preparation.
+    (volume as unknown as { _dirty: boolean })._dirty = false;
+    volume.setLightingScenarioBlendFactor(0);
+    expect(volume.lightingScenario).to.equal("Day");
+    expect(volume.scenarioBlendTarget).to.equal("Night");
+    expect((volume as unknown as { _dirty: boolean })._dirty).to.equal(false);
+
+    volume.setLightingScenarioBlendFactor(1);
+    expect(volume.lightingScenario).to.equal("Day");
+    expect(volume.scenarioBlendTarget).to.equal("Night");
+    expect(volume.scenarioBlendingFactor).to.equal(1);
+    expect((volume as unknown as { _dirty: boolean })._dirty).to.equal(false);
+  });
+
+  it("retains the current scenario blend when a streamed chunk becomes resident", () => {
+    const volume = ProbeVolume.fromManifestJSON({
+      version: 1,
+      minBrickSize: 2,
+      cellSize: 24,
+      lightingScenarios: ["Day", "Night"],
+      lightingScenario: "Day",
+      chunks: [{ id: "center", url: "./center.bin", minCell: [0, 0, 0], maxCell: [0, 0, 0] }]
+    });
+    const chunk = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    chunk.setCells([{ coordinate: new Vector3(0, 0, 0), bricks: chunk.bricks }], 24);
+    chunk.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], new Matrix(), "Night")
+    );
+
+    volume.setLightingScenarioBlendTarget("Night");
+    volume.setLightingScenarioBlendFactor(0.35);
+    volume.addChunk("center", chunk);
+
+    expect(volume.scenarioBlendTarget).to.equal("Night");
+    expect(volume.scenarioBlendingFactor).to.equal(0.35);
+    expect(volume.loadedChunkCount).to.equal(1);
+  });
+
   it("loads serialized probe bricks", () => {
     const coefficients = Array.from(createProbeSH(2).coefficients);
     const volume = ProbeVolume.fromJSON({
@@ -125,6 +172,264 @@ describe("ProbeVolume", () => {
     expect(decoded.bricks[0].skyOcclusionSH![2]).to.be.closeTo(-0.25, 0.001);
     expect(decoded.bricks[0].skyOcclusionSH![3]).to.be.closeTo(0.0625, 0.001);
     expect(ProbeVolumeBinary.encode(source).byteLength).to.be.lessThan(120000);
+  });
+
+  it("registers and releases independently decoded binary chunks from a manifest", () => {
+    const manifest = {
+      version: 1 as const,
+      minBrickSize: 2,
+      cellSize: 24,
+      lightingScenarios: ["Day", "Night"],
+      lightingScenario: "Day",
+      chunks: [
+        {
+          id: "west",
+          url: "./west.bin",
+          minCell: [-1, 0, 0],
+          maxCell: [-1, 0, 0],
+          cellCount: 1,
+          brickCount: 1
+        },
+        {
+          id: "east",
+          url: "./east.bin",
+          minCell: [0, 0, 0],
+          maxCell: [0, 0, 0],
+          cellCount: 1,
+          brickCount: 1
+        }
+      ]
+    };
+    const volume = ProbeVolume.fromManifestJSON(manifest);
+    const west = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    west.setCells([{ coordinate: new Vector3(-1, 0, 0), bricks: west.bricks }], 24);
+    west.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], new Matrix(), "Night")
+    );
+    const decodedWest = ProbeVolumeBinary.decode(ProbeVolumeBinary.encode(west));
+
+    expect(volume.cells).to.have.length(0);
+    expect(volume.loadedChunkCount).to.equal(0);
+    volume.addChunk("west", decodedWest);
+    expect(volume.loadedChunkIds).to.deep.equal(["west"]);
+    expect(volume.cells[0].coordinate).to.deep.equal(new Vector3(-1, 0, 0));
+    expect(volume.bricks[0].sphericalHarmonics[0].coefficients[0]).to.be.closeTo(1, 1e-4);
+
+    volume.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.5)], new Matrix(), "Night")
+    );
+    volume.lightingScenario = "Night";
+    expect(volume.bricks[0].sphericalHarmonics[0].coefficients[0]).to.be.closeTo(0.5, 1e-4);
+    expect(() =>
+      volume.addLightingScenario(
+        "Dusk",
+        new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.25)], new Matrix(), "Dusk")
+      )
+    ).to.throw("unloaded chunks do not contain it");
+    expect(volume.removeChunk("west")).to.equal(true);
+    expect(volume.removeChunk("west")).to.equal(false);
+    expect(volume.loadedChunkCount).to.equal(0);
+    expect(volume.cells).to.have.length(0);
+    expect(volume.bricks).to.have.length(0);
+  });
+
+  it("validates chunk manifests and independently loaded binary layout", () => {
+    expect(() =>
+      ProbeVolume.fromManifestJSON({
+        version: 1,
+        minBrickSize: 2,
+        cellSize: 24,
+        chunks: [
+          { id: "duplicate", url: "./a.bin", minCell: [0, 0, 0], maxCell: [0, 0, 0] },
+          { id: "duplicate", url: "./b.bin", minCell: [1, 0, 0], maxCell: [1, 0, 0] }
+        ]
+      })
+    ).to.throw("duplicate chunk id");
+
+    const volume = ProbeVolume.fromManifestJSON({
+      version: 1,
+      minBrickSize: 2,
+      cellSize: 24,
+      chunks: [{ id: "west", url: "./west.bin", minCell: [-1, 0, 0], maxCell: [-1, 0, 0] }]
+    });
+    const wrongCell = new ProbeVolume(2, [createBrick()]);
+    wrongCell.setCells([{ coordinate: new Vector3(0, 0, 0), bricks: wrongCell.bricks }], 24);
+
+    expect(() => volume.addChunk("missing", wrongCell)).to.throw("not declared");
+    expect(() => volume.addChunk("west", wrongCell)).to.throw("outside its manifest bounds");
+    expect(() => volume.setCells([])).to.throw("manifest-backed");
+  });
+
+  it("stores and blends named lighting scenarios on one shared probe layout", () => {
+    const day = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    const night = new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 4)], new Matrix(), "Night");
+
+    day.addLightingScenario("Night", night);
+
+    expect(day.lightingScenarioNames).to.deep.equal(["Day", "Night"]);
+    expect(day.lightingScenario).to.equal("Day");
+    day.blendLightingScenario("Night", 0.25);
+    expect(day.scenarioBlendTarget).to.equal("Night");
+    expect(day.scenarioBlendingFactor).to.equal(0.25);
+    expect(day.bricks[0].sphericalHarmonics[0].coefficients[0]).to.equal(1);
+
+    day.blendLightingScenario("Night", 1);
+    expect(day.lightingScenario).to.equal("Night");
+    expect(day.scenarioBlendTarget).to.equal(null);
+    expect(day.scenarioBlendingFactor).to.equal(0);
+    expect(day.bricks[0].sphericalHarmonics[0].coefficients[0]).to.equal(4);
+  });
+
+  it("requires lighting scenarios to share the same probe layout", () => {
+    const volume = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    const mismatchedBrick = createBrick();
+    mismatchedBrick.position.x = 1;
+    const mismatched = new ProbeVolume(2, [mismatchedBrick], new Matrix(), "Night");
+
+    expect(() => volume.addLightingScenario("Night", mismatched)).to.throw("shared probe layout");
+    expect(() => volume.blendLightingScenario("Missing", 0.5)).to.throw("does not exist");
+  });
+
+  it("renames a lighting scenario without duplicating its data", () => {
+    const volume = new ProbeVolume(2, [createBrick()], new Matrix());
+
+    volume.renameLightingScenario("Default", "Day");
+
+    expect(volume.lightingScenarioNames).to.deep.equal(["Day"]);
+    expect(volume.lightingScenario).to.equal("Day");
+    expect(volume.bricks[0].sphericalHarmonics[0].coefficients[0]).to.equal(1);
+    expect(() => volume.renameLightingScenario("Missing", "Night")).to.throw("does not exist");
+    expect(() => volume.renameLightingScenario("Day", "Day")).not.to.throw();
+  });
+
+  it("round-trips shared data and multiple lighting scenarios", () => {
+    const matrix = new Matrix();
+    matrix.elements[12] = 3;
+    const source = new ProbeVolume(2, [createBrick()], matrix, "Day");
+    source.setCells([{ coordinate: new Vector3(1, 0, 0), bricks: source.bricks }], 24);
+    source.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], matrix, "Night")
+    );
+
+    const decoded = ProbeVolumeBinary.decode(ProbeVolumeBinary.encode(source));
+
+    expect(decoded.lightingScenarioNames).to.deep.equal(["Day", "Night"]);
+    expect(decoded.lightingScenario).to.equal("Day");
+    decoded.lightingScenario = "Night";
+    expect(decoded.bricks[0].sphericalHarmonics[0].coefficients[0]).to.be.closeTo(0.125, 1e-4);
+    expect(decoded.cells[0].coordinate).to.deep.equal(new Vector3(1, 0, 0));
+    expect(decoded.bricks[0].skyOcclusionSH![0]).to.be.closeTo(0.75, 0.001);
+  });
+
+  it("binds active and target scenario atlases for GPU blending", async () => {
+    const engine = await WebGLEngine.create({ canvas: document.createElement("canvas") });
+    const volume = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    volume.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], new Matrix(), "Night")
+    );
+    volume.samplingMode = ProbeVolumeSamplingMode.PerFragment;
+    volume.blendLightingScenario("Night", 0.4);
+
+    const shaderData = engine.sceneManager.activeScene.shaderData;
+    expect(volume._updateShaderData(engine, shaderData)).to.equal(true);
+    const scenarioTexture = shaderData.getTexture("scene_ProbeVolumeSHRTexture") as Texture2DArray;
+    const scenarioLayerOffset = shaderData.getFloat("scene_ProbeVolumeScenarioLayerOffset");
+    expect(scenarioTexture).not.to.equal(null);
+    expect(scenarioTexture.length).to.equal(scenarioLayerOffset * 2);
+    expect(shaderData.getFloat("scene_ProbeVolumeScenarioBlend")).to.equal(0.4);
+    expect(shaderData.getMacros().map((macro) => macro.name)).to.include("SCENE_PROBE_VOLUME_SCENARIO_BLEND");
+    volume.blendLightingScenario("Night", 0.6);
+    volume._updateShaderData(engine, shaderData);
+    expect(shaderData.getTexture("scene_ProbeVolumeSHRTexture")).to.equal(scenarioTexture);
+    expect(shaderData.getFloat("scene_ProbeVolumeScenarioBlend")).to.equal(0.6);
+
+    const scene = engine.sceneManager.activeScene;
+    const root = scene.createRootEntity("scenario_blend_test");
+    const cameraEntity = root.createChild("camera");
+    cameraEntity.transform.setPosition(0, 0, 5);
+    const camera = cameraEntity.addComponent(Camera);
+    const renderer = root.createChild("mesh").addComponent(MeshRenderer);
+    renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
+    renderer.setMaterial(new PBRMaterial(engine));
+    scene.environmentLighting.probeVolume = volume;
+    camera.render();
+
+    scene.environmentLighting.probeVolume = undefined;
+    volume.dispose();
+    engine.destroy();
+  });
+
+  it("advances an adjacent scenario pair without rebuilding GPU textures", async () => {
+    const engine = await WebGLEngine.create({ canvas: document.createElement("canvas") });
+    const volume = new ProbeVolume(2, [createBrick()], new Matrix(), "Day");
+    volume.addLightingScenario(
+      "Night",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.125)], new Matrix(), "Night")
+    );
+    volume.addLightingScenario(
+      "Dawn",
+      new ProbeVolume(2, [createBrick(ProbeBrickProbeCount, 0.5)], new Matrix(), "Dawn")
+    );
+    volume.samplingMode = ProbeVolumeSamplingMode.PerFragment;
+    volume.setLightingScenarioBlendPair("Day", "Night");
+
+    const shaderData = engine.sceneManager.activeScene.shaderData;
+    volume._updateShaderData(engine, shaderData);
+    const shRTexture = shaderData.getTexture("scene_ProbeVolumeSHRTexture") as Texture2DArray;
+    const shGTexture = shaderData.getTexture("scene_ProbeVolumeSHGTexture");
+    const shBTexture = shaderData.getTexture("scene_ProbeVolumeSHBTexture");
+    const firstActiveOffset = shaderData.getFloat("scene_ProbeVolumeScenarioActiveLayerOffset");
+    const firstTargetOffset = shaderData.getFloat("scene_ProbeVolumeScenarioLayerOffset");
+    const layerValueCount = shRTexture.width * shRTexture.height * 4;
+    const initialActiveLayer = new Uint16Array(layerValueCount);
+    const initialTargetLayer = new Uint16Array(layerValueCount);
+    shRTexture.getPixelBuffer(firstActiveOffset, initialActiveLayer);
+    shRTexture.getPixelBuffer(firstTargetOffset, initialTargetLayer);
+
+    volume.setLightingScenarioBlendFactor(1);
+    volume.setLightingScenarioBlendPair("Night", "Dawn");
+    expect((volume as unknown as { _dirty: boolean })._dirty).to.equal(false);
+    volume.setLightingScenarioBlendFactor(0.25);
+    volume._updateShaderData(engine, shaderData);
+
+    expect(shaderData.getTexture("scene_ProbeVolumeSHRTexture")).to.equal(shRTexture);
+    expect(shaderData.getTexture("scene_ProbeVolumeSHGTexture")).to.equal(shGTexture);
+    expect(shaderData.getTexture("scene_ProbeVolumeSHBTexture")).to.equal(shBTexture);
+    expect(shaderData.getFloat("scene_ProbeVolumeScenarioActiveLayerOffset")).to.equal(firstTargetOffset);
+    expect(shaderData.getFloat("scene_ProbeVolumeScenarioLayerOffset")).to.equal(firstActiveOffset);
+    expect(shaderData.getFloat("scene_ProbeVolumeScenarioBlend")).to.equal(0.25);
+    expect(shaderData.getMacros().map((macro) => macro.name)).to.include("SCENE_PROBE_VOLUME_SCENARIO_BLEND");
+    const advancedActiveLayer = new Uint16Array(layerValueCount);
+    const advancedTargetLayer = new Uint16Array(layerValueCount);
+    shRTexture.getPixelBuffer(firstTargetOffset, advancedActiveLayer);
+    shRTexture.getPixelBuffer(firstActiveOffset, advancedTargetLayer);
+    expect(advancedActiveLayer).to.deep.equal(initialTargetLayer);
+    expect(advancedTargetLayer).not.to.deep.equal(initialActiveLayer);
+
+    volume.dispose();
+    engine.destroy();
+  });
+
+  it("loads legacy single-scenario version 4 artifacts", () => {
+    const current = ProbeVolumeBinary.encode(new ProbeVolume(1, [createBrick()]));
+    const scenarioTableSize = 12;
+    const legacy = new ArrayBuffer(current.byteLength - scenarioTableSize);
+    const legacyBytes = new Uint8Array(legacy);
+    legacyBytes.set(new Uint8Array(current, 0, 96), 0);
+    legacyBytes.set(new Uint8Array(current, 96 + scenarioTableSize), 96);
+    const legacyView = new DataView(legacy);
+    legacyView.setUint16(4, 4, true);
+    legacyView.setUint16(6, 0, true);
+    legacyView.setUint32(92, 0, true);
+
+    const decoded = ProbeVolumeBinary.decode(legacy);
+
+    expect(decoded.lightingScenarioNames).to.deep.equal(["Default"]);
+    expect(decoded.bricks[0].sphericalHarmonics[0].coefficients[0]).to.equal(1);
   });
 
   it("rejects obsolete probe artifacts", () => {
