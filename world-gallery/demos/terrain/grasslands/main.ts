@@ -39,6 +39,7 @@ import {
 } from "../src/debug/TerrainDebugTuning";
 import { applyTerrainControlFixture } from "../src/debug/TerrainControlFixture";
 import { createTerrainProbeSnapshot } from "../src/debug/TerrainProbe";
+import { TerrainPerformancePanel } from "../src/performance/TerrainPerformancePanel";
 import { loadLayerTextures } from "../src/loader/LayerTextureLoader";
 import { loadMacroNoiseTexture } from "../src/loader/MacroNoiseLoader";
 import { loadManifest } from "../src/loader/ManifestLoader";
@@ -157,6 +158,7 @@ void boot().catch((error: unknown) => {
 async function boot(): Promise<void> {
   setStatus("initializing engine");
   const engine = await WebGLEngine.create({ canvas: "canvas", shaderCompiler: new ShaderCompiler() });
+  const performancePanel = new TerrainPerformancePanel(engine);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
   registerTerrainShaderIncludes();
@@ -235,6 +237,18 @@ async function boot(): Promise<void> {
 
   setStatus("loading 291,069 deterministic surface instances");
   const surfaceWorld = await SurfaceWorld.create(engine, root.createChild("surface-world"), camera, surfaceManifestUrl);
+  performancePanel.setSceneMetricsProvider(() => {
+    const surface = surfaceWorld.inspect();
+    return {
+      clipmapSegments: clipmap.segmentCount,
+      visibleSurfaceInstances: surface.visibleInstances,
+      visibleSurfaceBatches: surface.visibleRendererBatches,
+      totalSurfaceBatches: surface.rendererBatches,
+      coverageInstances: surface.coverageInstances,
+      worldInstances: surface.worldInstances,
+      surfaceLodCounts: surface.lodCounts
+    };
+  });
   const surfaceDefaults = surfaceWorld.getTuning();
   setStatus("loading authored architecture");
   const architecture = await loadGrasslandsArchitecture(

@@ -44,6 +44,7 @@ import terrainShaderSource from "./src/shaders/Terrain.shader?raw";
 import { registerTerrainShaderIncludes } from "./src/shaders/registerTerrainShaderIncludes";
 import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
 import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
+import { TerrainPerformancePanel } from "./src/performance/TerrainPerformancePanel";
 import { SurfaceWorld } from "./src/surface/SurfaceWorld";
 
 export {
@@ -138,15 +139,9 @@ void boot().catch((error: unknown) => {
 });
 
 async function boot(): Promise<void> {
-  const backend = resolveBackend();
-  configureBackendSelector(backend);
-  window.terrainBackend = backend;
-  setStatus(`initializing ${backend}`);
-  const configuration = { canvas: "canvas", shaderCompiler: new ShaderCompiler() };
-  const engine =
-    backend === "webgpu"
-      ? await WebGPUEngine.create(configuration)
-      : await WebGLEngine.create(configuration);
+  setStatus("initializing engine");
+  const engine = await WebGLEngine.create({ canvas: "canvas", shaderCompiler: new ShaderCompiler() });
+  const performancePanel = new TerrainPerformancePanel(engine);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
   registerTerrainShaderIncludes();
@@ -220,6 +215,18 @@ async function boot(): Promise<void> {
     new URL("./data/surface/surface-manifest.json", import.meta.url).href,
     { terrain: terrainData, worldNoise: manifest.world.noise }
   );
+  performancePanel.setSceneMetricsProvider(() => {
+    const surface = surfaceWorld.inspect();
+    return {
+      clipmapSegments: clipmap.segmentCount,
+      visibleSurfaceInstances: surface.visibleInstances,
+      visibleSurfaceBatches: surface.visibleRendererBatches,
+      totalSurfaceBatches: surface.rendererBatches,
+      coverageInstances: surface.coverageInstances,
+      worldInstances: surface.worldInstances,
+      surfaceLodCounts: surface.lodCounts
+    };
+  });
   surfaceWorld.setProceduralTerrainActive(manifest.world.background === "noise");
   const surfaceDefaults = surfaceWorld.getTuning();
   const waterDebug = new TerrainWaterDebug(engine, root, terrainWaterBounds(terrainData));

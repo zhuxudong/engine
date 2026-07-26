@@ -1356,6 +1356,26 @@ test("both terrain inspectors retain a minimal collapse smoke path", async ({ pa
   await verifyCameraOutput(page);
 });
 
+test("both terrain entries expose live foldable performance metrics", async ({ page }) => {
+  test.setTimeout(600_000);
+  const entries = [
+    {
+      url: "/demos/terrain/index.html",
+      ready: "ready · 3 regions · 144 clipmap segments"
+    },
+    {
+      url: "/demos/terrain/grasslands/index.html",
+      ready: "ready · 9 terrain tiles · 291,069 surface instances"
+    }
+  ] as const;
+
+  for (const entry of entries) {
+    await page.goto(entry.url);
+    await expect(page.locator("#status")).toContainText(entry.ready, { timeout: 120_000 });
+    await verifyPerformancePanel(page);
+  }
+});
+
 test.describe("Grasslands authored scene", () => {
   test.use({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
 
@@ -1833,6 +1853,87 @@ async function verifyCameraOutput(page: Page): Promise<void> {
   await expect(output).toContainText('"rotation"');
   await expect(output).toContainText('"forward"');
   await expect(output).toContainText('"fieldOfView"');
+}
+
+async function verifyPerformancePanel(page: Page): Promise<void> {
+  const panel = page.locator("#terrain-performance-panel");
+  const metrics = panel.locator("[data-role='metrics']");
+  const toggle = panel.locator("[data-action='toggle']");
+  const hide = panel.locator("[data-action='hide']");
+  const show = panel.locator("[data-action='show']");
+  await expect(panel).toHaveAttribute("data-state", "hidden");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(metrics).toBeHidden();
+  await expect(show).toBeVisible();
+
+  await expect.poll(async () => numericMetric(page, "fps"), { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect.poll(async () => numericMetric(page, "gpuMemory")).toBeGreaterThan(0);
+  await expect(page.locator("[data-metric='webgl']")).toHaveText("2.0");
+
+  await expect
+    .poll(async () => {
+      const displayed = await numericMetric(page, "surfaceInstances");
+      const runtime = await page.evaluate(() => window.terrainDebug!.inspectSurface().visibleInstances);
+      return displayed === runtime;
+    })
+    .toBe(true);
+  await expect
+    .poll(async () => {
+      const displayed = await page.locator("[data-metric='surfaceBatches']").textContent();
+      const runtime = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+      return (
+        displayed ===
+        `${runtime.visibleRendererBatches.toLocaleString("en-US")} / ${runtime.rendererBatches.toLocaleString("en-US")}`
+      );
+    })
+    .toBe(true);
+  await expect
+    .poll(async () => {
+      const displayed = await numericMetric(page, "coverageInstances");
+      const runtime = await page.evaluate(() => window.terrainDebug!.inspectSurface().coverageInstances);
+      return displayed === runtime;
+    })
+    .toBe(true);
+  await expect
+    .poll(async () => {
+      const displayed = await numericMetric(page, "worldInstances");
+      const runtime = await page.evaluate(() => window.terrainDebug!.inspectSurface().worldInstances);
+      return displayed === runtime;
+    })
+    .toBe(true);
+  await expect
+    .poll(async () => {
+      const displayed = await numericMetric(page, "clipmapSegments");
+      const runtime = await page.evaluate(() => window.terrainDebug!.inspect().segmentCount);
+      return displayed === runtime;
+    })
+    .toBe(true);
+  await expect(page.locator("[data-metric='surfaceLods']")).not.toHaveText("—");
+
+  await show.click();
+  await expect(panel).toHaveAttribute("data-state", "expanded");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(metrics).toBeVisible();
+
+  await toggle.click();
+  await expect(panel).toHaveAttribute("data-state", "collapsed");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(metrics).toBeHidden();
+  await toggle.click();
+  await expect(panel).toHaveAttribute("data-state", "expanded");
+  await expect(metrics).toBeVisible();
+
+  await hide.click();
+  await expect(panel).toHaveAttribute("data-state", "hidden");
+  await expect(show).toBeVisible();
+  await show.click();
+  await expect(panel).toHaveAttribute("data-state", "expanded");
+  await expect(metrics).toBeVisible();
+}
+
+async function numericMetric(page: Page, key: string): Promise<number> {
+  const value = (await page.locator(`[data-metric='${key}']`).textContent()) ?? "";
+  return Number.parseFloat(value.replaceAll(",", "")) || 0;
 }
 
 interface SourceTerrainProbe {
