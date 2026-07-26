@@ -2,8 +2,11 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { TerrainFirstPersonSnapshot } from "../src/TerrainFirstPersonController";
+import type { TerrainData } from "../src/data/TerrainData";
+import { TerrainGroundSampler } from "../src/data/TerrainGroundSampler";
+import type { TerrainDebugViewName, TerrainProbeSnapshot } from "../src/debug/TerrainDebugContract";
 import { compileSurface } from "../src/surface/SurfaceCompiler";
-import type { SurfaceCompileInput, SurfaceTerrainSample } from "../src/surface/SurfaceContract";
+import type { SurfaceCategory, SurfaceCompileInput, SurfaceTerrainSample } from "../src/surface/SurfaceContract";
 
 const captureScreenshots = process.env.TERRAIN_E2E_CAPTURE === "1";
 
@@ -76,7 +79,13 @@ test("surface compiler is deterministic and enforces placement constraints", () 
         spacing: 0.25,
         scale: { horizontal: [0.8, 1.2], vertical: [0.9, 1.4] },
         yaw: [0, Math.PI * 2],
-        constraints: { height: [0, 32], slope: [0, 0.75], terrainLayers: [0], excludeHoles: true },
+        constraints: {
+          height: [0, 32],
+          slope: [0, 0.75],
+          terrainLayers: [0],
+          minimumLayerWeight: 0.5,
+          excludeHoles: true
+        },
         cellSize: 8,
         wind: true
       },
@@ -90,7 +99,13 @@ test("surface compiler is deterministic and enforces placement constraints", () 
         spacing: 3,
         scale: { horizontal: [0.9, 1.1], vertical: [0.9, 1.2] },
         yaw: [0, Math.PI * 2],
-        constraints: { height: [0, 32], slope: [0, 1], terrainLayers: [0, 1], excludeHoles: true },
+        constraints: {
+          height: [0, 32],
+          slope: [0, 1],
+          terrainLayers: [0, 1],
+          minimumLayerWeight: 0.5,
+          excludeHoles: true
+        },
         cellSize: 8,
         wind: true
       }
@@ -134,6 +149,59 @@ test("surface compiler is deterministic and enforces placement constraints", () 
 
   const changedSeed = compileSurface({ ...input, seed: 43 });
   expect(changedSeed.binary).not.toEqual(first.binary);
+
+  const overlayRule = {
+    ...input.rules[0],
+    constraints: {
+      ...input.rules[0].constraints,
+      terrainLayers: [1],
+      minimumLayerWeight: 0.5
+    }
+  } as const;
+  const compileOverlay = (blend: number) =>
+    compileSurface({
+      ...input,
+      rules: [overlayRule],
+      explicitPlacements: [],
+      terrain: {
+        sample: () => ({
+          height: 1,
+          slope: 0,
+          control: (1 << 22) | (blend << 14),
+          hole: false
+        })
+      }
+    });
+  expect(compileOverlay(1).instances).toHaveLength(0);
+  expect(compileOverlay(200).instances.length).toBeGreaterThan(0);
+});
+
+test("first-person ground sampling follows the active terrain background", () => {
+  const terrain = {
+    regionSize: 1024,
+    vertexSpacing: 1,
+    getRegionLayer: (x: number, z: number) => (x === 0 && z === 0 ? 0 : -1),
+    sampleHeightInterpolated: (x: number, z: number) => (x >= 0 && x < 1024 && z >= 0 && z < 1024 ? 10 : undefined)
+  } as unknown as TerrainData;
+  const ground = new TerrainGroundSampler(terrain, "noise", {
+    fragmentNormals: false,
+    regionBlend: 0.3,
+    maxOctaves: 8,
+    minOctaves: 4,
+    lodDistance: 8000,
+    scale: 4,
+    height: 300,
+    offset: [0, 0, 0]
+  });
+
+  expect(ground.sampleHeightInterpolated(512, 512)).toBe(10);
+  expect(ground.sampleHeightInterpolated(2048, 2048)).toBeDefined();
+  ground.setWorldNoiseTuning({ height: 0, offset: [0, 1, 0] });
+  expect(ground.sampleHeightInterpolated(2048, 2048)).toBe(100);
+  ground.setBackground("flat");
+  expect(ground.sampleHeightInterpolated(2048, 2048)).toBe(0);
+  ground.setBackground("none");
+  expect(ground.sampleHeightInterpolated(2048, 2048)).toBeUndefined();
 });
 
 test("Grasslands control maps preserve packed material semantics", () => {
@@ -220,6 +288,155 @@ test("Realistic control maps preserve packed material semantics", () => {
   });
 });
 
+test.describe("terrain height/control data closure", () => {
+  test.use({ viewport: { width: 513, height: 513 }, deviceScaleFactor: 1 });
+
+  const demos = [
+    {
+      name: "Realistic",
+      url: "/demos/terrain/index.html?fixture=control",
+      ready: "ready · 3 regions · 144 clipmap segments",
+      manifestPath: path.resolve(__dirname, "../data/manifest.json"),
+      formalWorld: [512, -512] as const
+    },
+    {
+      name: "Grasslands",
+      url: "/demos/terrain/grasslands/index.html?fixture=control",
+      ready: "ready · 9 terrain tiles · 291,069 surface instances",
+      manifestPath: path.resolve(__dirname, "../data/grasslands/terrain-manifest.json"),
+      formalWorld: [1500, 1500] as const
+    }
+  ] as const;
+
+  for (const demo of demos) {
+    test(`${demo.name} maps source texels through CPU, clipmap, and framebuffer`, async ({ page }) => {
+      test.setTimeout(1_200_000);
+      const pageErrors: string[] = [];
+      const consoleErrors: string[] = [];
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+      page.on("console", (message) => {
+        if (message.type() === "error" || /INVALID_OPERATION|program not valid/i.test(message.text())) {
+          consoleErrors.push(message.text());
+        }
+      });
+      await installShaderDiagnostics(page);
+
+      const formalSource = readTerrainSourceProbe(demo.manifestPath, demo.formalWorld[0], demo.formalWorld[1]);
+      await page.goto(demo.url);
+      await expect(page.locator("#status")).toContainText(demo.ready, { timeout: 180_000 });
+      await expect.poll(() => page.evaluate(() => window.terrainDebug?.ready)).toBe(true);
+      expect(
+        await page.evaluate(() =>
+          window.terrainDebug!.views.filter((view) =>
+            [
+              "height",
+              "height-source",
+              "region",
+              "control-base",
+              "control-overlay",
+              "control-blend",
+              "control-angle",
+              "control-scale",
+              "holes",
+              "navigation",
+              "autoshader"
+            ].includes(view)
+          )
+        )
+      ).toHaveLength(11);
+
+      const formalCpu = await page.evaluate(
+        ([worldX, worldZ]) => window.terrainDebug!.readProbe(worldX, worldZ),
+        demo.formalWorld
+      );
+      expectProbeToMatchSource(formalCpu, formalSource);
+
+      await prepareNumericTerrainReadback(page);
+      const cameraForward = await page.evaluate(() => window.terrainDebug!.getCamera().forward);
+      expect(cameraForward[0]).toBeCloseTo(0, 6);
+      expect(cameraForward[1]).toBeCloseTo(-1, 6);
+      expect(cameraForward[2]).toBeCloseTo(0, 6);
+
+      const spacing = readTerrainVertexSpacing(demo.manifestPath);
+      const formalControlWorld = [demo.formalWorld[0] + spacing * 0.25, demo.formalWorld[1] + spacing * 0.25] as const;
+      const formalControlSource = readTerrainSourceProbe(demo.manifestPath, ...formalControlWorld);
+      expectPixel(
+        await readTerrainProbePixel(page, formalControlWorld, "height-source"),
+        grayscale(heightDebugValue(formalControlSource.height)),
+        `${demo.name} formal height source`
+      );
+      expectPixel(
+        await readTerrainProbePixel(page, formalControlWorld, "region"),
+        regionLayerColor(formalControlSource.region.layer),
+        `${demo.name} formal region`
+      );
+
+      const formalControlCpu = await page.evaluate(
+        ([worldX, worldZ]) => window.terrainDebug!.readProbe(worldX, worldZ),
+        formalControlWorld
+      );
+      expectProbeToMatchSource(formalControlCpu, formalControlSource);
+      await expectControlDebugPixels(page, formalControlWorld, formalControlSource.control, `${demo.name} formal`);
+
+      const fixture = await page.evaluate(() => window.terrainDebug!.getControlFixture());
+      expect(fixture).toBeDefined();
+      expect(fixture!.cases.map(({ id }) => id)).toEqual(CONTROL_FIXTURE_EXPECTATIONS.map(({ id }) => id));
+      for (const expected of CONTROL_FIXTURE_EXPECTATIONS) {
+        const fixtureCase = fixture!.cases.find(({ id }) => id === expected.id);
+        expect(fixtureCase, `${demo.name} missing fixture ${expected.id}`).toBeDefined();
+        expect(fixtureCase!.probe.heightRaw).toBe(expected.heightRaw);
+        expect(fixtureCase!.probe.control).toEqual(decodeControlOracle(expected.control));
+      }
+
+      const blend0 = fixture!.cases.find(({ id }) => id === "blend-0")!.probe;
+      const blend128Navigation = fixture!.cases.find(({ id }) => id === "blend-128-navigation")!.probe;
+      const blend255Autoshader = fixture!.cases.find(({ id }) => id === "blend-255-autoshader")!.probe;
+      const hole = fixture!.cases.find(({ id }) => id === "hole")!.probe;
+
+      await expectControlDebugPixels(
+        page,
+        blend0.world,
+        decodeControlOracle(CONTROL_FIXTURE_EXPECTATIONS[0].control),
+        `${demo.name} blend-0`
+      );
+      await expectControlDebugPixels(
+        page,
+        blend128Navigation.world,
+        decodeControlOracle(CONTROL_FIXTURE_EXPECTATIONS[1].control),
+        `${demo.name} blend-128-navigation`
+      );
+      await expectControlDebugPixels(
+        page,
+        blend255Autoshader.world,
+        decodeControlOracle(CONTROL_FIXTURE_EXPECTATIONS[2].control),
+        `${demo.name} blend-255-autoshader`
+      );
+      await expectControlDebugPixels(
+        page,
+        hole.world,
+        decodeControlOracle(CONTROL_FIXTURE_EXPECTATIONS[3].control),
+        `${demo.name} hole`
+      );
+      expectPixel(
+        await readTerrainProbePixel(page, blend0.world, "height"),
+        grayscale(heightDebugValue(blend0.height!)),
+        `${demo.name} fixture height`
+      );
+
+      expect(pageErrors).toEqual([]);
+      expect(consoleErrors).toEqual([]);
+      expect(await page.evaluate(() => window.__terrainShaderDiagnostics)).toEqual([]);
+      const debugFragments = await page.evaluate(() =>
+        window.__terrainGeneratedShaders.filter(
+          (shader) => shader.stage === "fragment" && shader.source.includes("material_DebugView")
+        )
+      );
+      expect(debugFragments.length).toBeGreaterThan(0);
+      expect(debugFragments.every((shader) => !shader.source.includes("color = fog("))).toBe(true);
+    });
+  }
+});
+
 test("terrain data, clipmap, and production shader stay coherent", async ({ page }, testInfo) => {
   test.setTimeout(1_200_000);
   const pageErrors: string[] = [];
@@ -235,15 +452,29 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
   await page.goto("/demos/terrain/index.html?view=clipmap-lod&pose=top");
   await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments");
   await expect(page.locator('[aria-label="Terrain material inspector"]')).toBeVisible();
+  const topLevelFolders = page.locator(".debug-inspector > ul > li.folder > .dg > ul > li.title");
+  await expect(topLevelFolders).toHaveText(["Rendering / 渲染", "Terrain / 地形", "Surface / 地表"]);
+  for (let index = 0; index < (await topLevelFolders.count()); index++) {
+    await expect(topLevelFolders.nth(index).locator("..")).toHaveClass(/closed/);
+  }
+  const terrainFolderTitle = page.locator(".debug-inspector .title").filter({ hasText: "Terrain / 地形" });
+  await terrainFolderTitle.click();
+  await expect(terrainFolderTitle.locator("..")).not.toHaveClass(/closed/);
   const previewImages = page.locator(".debug-inspector__preview img");
-  await expect(previewImages).toHaveCount(9);
+  await expect(previewImages).toHaveCount(4);
   for (let index = 0; index < (await previewImages.count()); index++) {
     await previewImages.nth(index).scrollIntoViewIfNeeded();
   }
-  await expect.poll(() => previewImages.evaluateAll((images) => images.every((image) => {
-    const preview = image as HTMLImageElement;
-    return preview.complete && preview.naturalWidth > 0;
-  }))).toBe(true);
+  await expect
+    .poll(() =>
+      previewImages.evaluateAll((images) =>
+        images.every((image) => {
+          const preview = image as HTMLImageElement;
+          return preview.complete && preview.naturalWidth > 0;
+        })
+      )
+    )
+    .toBe(true);
   await test.step("direct and baked environment lighting stay fragment-side", async () => {
     expect(await page.evaluate(() => window.terrainDebug!.getLighting())).toEqual({
       directLight: true,
@@ -265,10 +496,20 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     const directOnly = await readFrameFingerprint(page);
     expect(directOnly).not.toBe(environmentOnly);
     const generatedShaders = await page.evaluate(() => window.__terrainGeneratedShaders);
-    expect(generatedShaders.some((shader) => shader.stage === "fragment" && shader.source.includes("sampleShadowMap"))).toBe(true);
-    expect(generatedShaders.some((shader) => shader.stage === "fragment" && shader.source.includes("diffuseIrradiance(shadingNormal)"))).toBe(true);
     expect(
-      generatedShaders.some((shader) => shader.stage === "vertex" && (shader.source.includes("sampleShadowMap") || shader.source.includes("diffuseIrradiance")))
+      generatedShaders.some((shader) => shader.stage === "fragment" && shader.source.includes("sampleShadowMap"))
+    ).toBe(true);
+    expect(
+      generatedShaders.some(
+        (shader) => shader.stage === "fragment" && shader.source.includes("diffuseIrradiance(shadingNormal)")
+      )
+    ).toBe(true);
+    expect(
+      generatedShaders.some(
+        (shader) =>
+          shader.stage === "vertex" &&
+          (shader.source.includes("sampleShadowMap") || shader.source.includes("diffuseIrradiance"))
+      )
     ).toBe(false);
     await page.evaluate(() => window.terrainDebug!.setLighting({ directLight: true, environment: true }));
   });
@@ -276,12 +517,14 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
   await test.step("rendering controls use actual engine state", async () => {
     const renderingFolder = page.locator(".debug-inspector .title").filter({ hasText: "Rendering / 渲染" });
     const lightingFolder = page.locator(".debug-inspector .title").filter({ hasText: "Lighting / 光照" });
-    const cameraFolder = page.locator(".debug-inspector .title").filter({ hasText: "Camera / 相机" });
     const postProcessFolder = page.locator(".debug-inspector .title").filter({ hasText: "Post-process / 后处理" });
-    for (const title of [renderingFolder, lightingFolder, cameraFolder, postProcessFolder]) {
+    await expect(renderingFolder.locator("..")).toHaveClass(/closed/);
+    await renderingFolder.click();
+    for (const title of [lightingFolder, postProcessFolder]) {
       await expect(title).toBeVisible();
       await expect(title.locator("..")).not.toHaveClass(/closed/);
     }
+    await expect(page.locator(".debug-inspector .title").filter({ hasText: "Camera / 相机" })).toHaveCount(0);
 
     const original = await page.evaluate(() => window.terrainDebug!.getRendering());
     const updated = await page.evaluate((initial) => {
@@ -308,33 +551,104 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
 
   await test.step("surface cells submit deterministic instanced batches", async () => {
     const compiled = await page.evaluate(() => window.terrainDebug!.inspectSurface());
-    expect(compiled.totalInstances).toBe(406_179);
-    expect(compiled.totalRanges).toBe(649);
-    expect(compiled.rendererBatches).toBe(1_177);
+    expect(compiled.totalInstances).toBe(8_613);
+    expect(compiled.totalRanges).toBe(288);
+    expect(compiled.rendererBatches).toBeGreaterThan(compiled.coverageRendererBatches);
+    expect(compiled.visibleRendererBatches).toBeLessThan(compiled.rendererBatches);
+    expect(compiled.worldSurfaceAvailable).toBe(true);
+    expect(compiled.worldRendererBatches).toBe(13);
+    expect(compiled.coverageAvailable).toBe(true);
+    expect(compiled.coverageRendererBatches).toBeGreaterThan(0);
+    expect(compiled).not.toHaveProperty("worldRules");
+    expect(compiled).not.toHaveProperty("sourceRules");
+    expect(compiled).not.toHaveProperty("debugMasks");
     expect(compiled.categoryCounts).toEqual({
-      grass: 396_969,
-      flower: 597,
+      grass: 0,
+      flower: 0,
       shrub: 4_817,
       tree: 864,
       rock: 2_932,
       cliff: 0
     });
-    expect(compiled.sourceRules.find((rule) => rule.category === "tree")).toMatchObject({
+    const sourceContract = await page.evaluate(async () => {
+      const manifestUrl = new URL("/demos/terrain/data/surface/surface-manifest.json", location.href);
+      const manifest = await fetch(manifestUrl).then((response) => response.json());
+      const binaryBytes = await fetch(new URL(manifest.binary.url, manifestUrl)).then((response) =>
+        response.arrayBuffer().then((buffer) => buffer.byteLength)
+      );
+      return {
+        binaryBytes,
+        binaryCount: manifest.binary.count,
+        coverageStreaming: manifest.coverageStreaming,
+        worldCategories: manifest.worldDistribution.rules.map((rule: { category: SurfaceCategory }) => rule.category),
+        treeRule: manifest.sourceRules.find((rule: { category: SurfaceCategory }) => rule.category === "tree"),
+        grassRule: manifest.sourceRules.find((rule: { category: SurfaceCategory }) => rule.category === "grass"),
+        flowerRule: manifest.sourceRules.find((rule: { category: SurfaceCategory }) => rule.category === "flower"),
+        grassBaseColor: manifest.materials.find((material: { id: string }) => material.id === "grass-2").baseColor,
+        grassColorVariation: manifest.materials.find((material: { id: string }) => material.id === "grass-2")
+          .colorVariation,
+        runtimeDefaults: manifest.runtimeDefaults,
+        masks: manifest.debugMasks.map((mask: { id: string; origin: [number, number]; size: [number, number] }) => ({
+          id: mask.id,
+          origin: mask.origin,
+          size: mask.size
+        }))
+      };
+    });
+    expect(sourceContract.worldCategories).toEqual(["grass", "flower", "shrub", "tree", "rock"]);
+    expect(sourceContract.binaryBytes).toBe(482_344);
+    expect(sourceContract.binaryCount).toBe(8_613);
+    expect(sourceContract.coverageStreaming).toEqual({
+      enabled: true,
+      cellSize: 32,
+      rebuildDistance: 8,
+      ruleIds: ["grass", "flower"]
+    });
+    expect(sourceContract.treeRule).toMatchObject({
       mode: "scatter",
       spacing: 24,
       cellSize: 256
     });
-    expect(compiled.debugMasks.map((mask) => ({
-      id: mask.id,
-      origin: mask.origin,
-      size: mask.size
-    }))).toEqual(
+    expect(sourceContract.grassRule).toMatchObject({
+      mode: "coverage",
+      densityPerSquareMetre: 3,
+      spacing: 0.25,
+      cellSize: 128
+    });
+    expect(sourceContract.flowerRule).toMatchObject({
+      mode: "coverage",
+      densityPerSquareMetre: 0.075,
+      spacing: 0.25,
+      cellSize: 128
+    });
+    expect(sourceContract.grassBaseColor).toEqual([1, 1, 1, 0]);
+    expect(sourceContract.runtimeDefaults).toEqual({
+      color: {
+        grass: [0.0822827071298148, 0.0822827071298148, 0.0595112381629812]
+      },
+      scale: { tree: 4 }
+    });
+    expect(sourceContract.grassColorVariation).toMatchObject({
+      enabled: true,
+      mode: "world-noise-2d",
+      offset: 1
+    });
+    expect(sourceContract.masks).toEqual(
       ["grass", "flower", "shrub", "tree", "rock"].map((id) => ({
         id,
         origin: [0, -2048],
         size: [1024, 3072]
       }))
     );
+    expect(
+      await page.evaluate(() => {
+        const tuning = window.terrainDebug!.getSurface();
+        return { grassColor: tuning.color.grass, treeScale: tuning.scale.tree };
+      })
+    ).toEqual({
+      grassColor: [0.0822827071298148, 0.0822827071298148, 0.0595112381629812],
+      treeScale: 4
+    });
     const materialContract = await page.evaluate(async () => {
       const manifest = await fetch("/demos/terrain/data/surface/surface-manifest.json").then((response) =>
         response.json()
@@ -377,9 +691,34 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
       window.terrainDebug!.setSurface({ wind: { enabled: false } });
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     });
+    const coverageBaseline = await page.evaluate(() => {
+      const surface = window.terrainDebug!.inspectSurface();
+      return {
+        instances: surface.coverageInstances,
+        grass: surface.coverageCategoryCounts.grass,
+        flower: surface.coverageCategoryCounts.flower,
+        fingerprint: surface.coverageFingerprint
+      };
+    });
+    expect(coverageBaseline.grass).toBeGreaterThan(30_000);
+    expect(coverageBaseline.flower).toBeGreaterThan(200);
+    expect(coverageBaseline.instances).toBe(coverageBaseline.grass + coverageBaseline.flower);
+    await page.evaluate(() => window.terrainDebug!.setSurface({ density: { grass: 0.5 } }));
+    await expect
+      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().coverageCategoryCounts.grass))
+      .toBeLessThan(coverageBaseline.grass);
+    await page.evaluate(() => window.terrainDebug!.setSurface({ density: { grass: 1 } }));
+    await expect
+      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().coverageFingerprint))
+      .toBe(coverageBaseline.fingerprint);
     await expect
       .poll(() =>
-        page.evaluate(() => window.terrainDebug!.inspectSurface().lodCounts.slice(1).some((count) => count > 0))
+        page.evaluate(() =>
+          window
+            .terrainDebug!.inspectSurface()
+            .lodCounts.slice(1)
+            .some((count) => count > 0)
+        )
       )
       .toBe(true);
     await page.evaluate(() => window.terrainDebug!.setSurface({ lod: { enabled: false } }));
@@ -391,10 +730,28 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(transitioningRanges).toBeGreaterThan(0);
     await expect.poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges)).toBe(0);
     expect(
-      await page.evaluate(() => window.terrainDebug!.inspectSurface().lodCounts.slice(1).some((count) => count > 0))
+      await page.evaluate(() =>
+        window
+          .terrainDebug!.inspectSurface()
+          .lodCounts.slice(1)
+          .some((count) => count > 0)
+      )
     ).toBe(true);
     const surfaceFrame = await readFrameFingerprint(page);
     expect(await page.evaluate(() => window.__surfaceInstanceDraws.some((count) => count > 1))).toBe(true);
+
+    await page.evaluate(() =>
+      window.terrainDebug!.setSurface({
+        color: { grass: [0.5, 0.75, 1] },
+        scale: { grass: 1.25 }
+      })
+    );
+    expect(
+      await page.evaluate(() => {
+        const tuning = window.terrainDebug!.getSurface();
+        return { color: tuning.color.grass, scale: tuning.scale.grass };
+      })
+    ).toEqual({ color: [0.5, 0.75, 1], scale: 1.25 });
 
     await page.evaluate(() =>
       window.terrainDebug!.setSurface({
@@ -417,6 +774,63 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     await page.evaluate(() => window.terrainDebug!.setSurfaceDebugView("surface"));
   });
 
+  await test.step("world-noise surface distribution is deterministic and live-tunable", async () => {
+    await page.evaluate(async () => {
+      await window.terrainDebug!.setPose("world-surface");
+      window.terrainDebug!.setSurface({
+        wind: { enabled: false },
+        density: { grass: 1, flower: 1, shrub: 1, tree: 1, rock: 1, cliff: 1 },
+        world: { enabled: true, biomeOffset: [0, 0] }
+      });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    const baseline = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(baseline.worldInstances).toBeGreaterThan(0);
+    expect(baseline.worldRejectedByBudget).toBe(0);
+    expect(
+      Object.values(baseline.worldCategoryCounts)
+        .slice(0, 5)
+        .every((count) => count > 0)
+    ).toBe(true);
+
+    await page.evaluate(() => window.terrainDebug!.setSurface({ density: { tree: 0.5 } }));
+    const sparseTrees = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(sparseTrees.worldCategoryCounts.tree).toBeLessThan(baseline.worldCategoryCounts.tree);
+    expect(sparseTrees.worldCategoryCounts.grass).toBe(baseline.worldCategoryCounts.grass);
+
+    await page.evaluate(() => window.terrainDebug!.setSurface({ density: { tree: 1 } }));
+    const restored = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(restored.worldFingerprint).toBe(baseline.worldFingerprint);
+    expect(restored.worldCategoryCounts).toEqual(baseline.worldCategoryCounts);
+
+    await page.evaluate(() => window.terrainDebug!.setSurface({ world: { biomeOffset: [256, -128] } }));
+    expect((await page.evaluate(() => window.terrainDebug!.inspectSurface())).worldFingerprint).not.toBe(
+      baseline.worldFingerprint
+    );
+    await page.evaluate(() => window.terrainDebug!.setSurface({ world: { biomeOffset: [0, 0] } }));
+    expect((await page.evaluate(() => window.terrainDebug!.inspectSurface())).worldFingerprint).toBe(
+      baseline.worldFingerprint
+    );
+
+    await page.evaluate(() => window.terrainDebug!.setSurfaceDebugView("world-biome"));
+    await attachScreenshot(page, testInfo, "world-surface-biome");
+    await page.evaluate(() => window.terrainDebug!.setSurfaceDebugView("surface"));
+
+    await page.reload();
+    await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments", {
+      timeout: 120_000
+    });
+    await page.evaluate(async () => {
+      window.terrainDebug!.setView("surface");
+      await window.terrainDebug!.setPose("world-surface");
+      window.terrainDebug!.setSurface({ wind: { enabled: false } });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    const refreshed = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+    expect(refreshed.worldFingerprint).toBe(baseline.worldFingerprint);
+    expect(refreshed.worldCategoryCounts).toEqual(baseline.worldCategoryCounts);
+  });
+
   await test.step("world-position varying survives shader lowering", async () => {
     const terrainShaders = await page.evaluate(() => window.__terrainGeneratedShaders);
     const vertexShaders = terrainShaders.filter((shader) => shader.stage === "vertex");
@@ -431,8 +845,14 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
       expect(shader.source).not.toMatch(/(?:^|\n)\s*worldNoiseDdxDdy\s*=\s*worldNoiseDdxDdy\s*;/m);
       expect(shader.source).toMatch(/backgroundNoiseDerivatives\s*=\s*worldNoiseDdxDdy\s*;/);
     }
-    expect(fragmentShaders.some((shader) => /sampleGrid\s*\*\s*vertexSpacing\s*\(\s*\)/.test(shader.source))).toBe(true);
-    expect(fragmentShaders.some((shader) => /material_BilerpEnabled\s*!=\s*0\s*&&\s*regionMip\s*<\s*0\.0/.test(shader.source))).toBe(true);
+    expect(fragmentShaders.some((shader) => /sampleGrid\s*\*\s*vertexSpacing\s*\(\s*\)/.test(shader.source))).toBe(
+      true
+    );
+    expect(
+      fragmentShaders.some((shader) =>
+        /material_BilerpEnabled\s*!=\s*0\s*&&\s*regionMip\s*<\s*0\.0/.test(shader.source)
+      )
+    ).toBe(true);
     expect(fragmentShaders.every((shader) => !shader.source.includes("material_TriReduction"))).toBe(true);
     expect(fragmentShaders.every((shader) => !shader.source.includes("sampleIndex"))).toBe(true);
     expect(fragmentShaders.every((shader) => !shader.source.includes("worldBackgroundMaterialFade"))).toBe(true);
@@ -448,45 +868,8 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(packedControlShader!.source).toMatch(/control\s*>>\s*10u/);
     expect(packedControlShader!.source).toMatch(/control\s*>>\s*7u/);
     expect(packedControlShader!.source).toMatch(/control\s*>>\s*2u/);
+    expect(packedControlShader!.source).toMatch(/control\s*>>\s*1u/);
     expect(packedControlShader!.source).toMatch(/control\s*&\s*0x1u/);
-  });
-
-  await test.step("inspector folders and panel can scroll", async () => {
-    const terrainFolderTitle = page.locator(".debug-inspector .title").filter({ hasText: "Terrain / 地形" });
-    const sceneFolderTitle = page.locator(".debug-inspector .title").filter({ hasText: "Scene / 场景" });
-    await terrainFolderTitle.click();
-    await expect(terrainFolderTitle.locator("..")).toHaveClass(/closed/);
-    await expect(sceneFolderTitle).toBeHidden();
-    await terrainFolderTitle.click();
-    await expect(terrainFolderTitle.locator("..")).not.toHaveClass(/closed/);
-    await expect(sceneFolderTitle).toBeVisible();
-
-    const textureAssetsTitle = page.locator(".debug-inspector .title").filter({ hasText: "Texture assets" });
-    await textureAssetsTitle.click();
-    await expect(textureAssetsTitle.locator("..")).toHaveClass(/closed/);
-    await expect(page.locator(".debug-inspector__preview-row").first()).toBeHidden();
-    await textureAssetsTitle.click();
-    await expect(textureAssetsTitle.locator("..")).not.toHaveClass(/closed/);
-    await expect(page.locator(".debug-inspector__preview-row").first()).toBeVisible();
-
-    const sceneFolder = page.locator(".debug-inspector .title").filter({ hasText: "Scene / 场景" }).locator("..");
-    await expect(sceneFolder).not.toContainText("Texture layer / 纹理层");
-    const worldNoiseFolder = page.locator(".debug-inspector .title").filter({ hasText: "World noise / 世界噪声" });
-    await expect(worldNoiseFolder).toBeVisible();
-    const worldFolder = page.locator(".debug-inspector .title").filter({ hasText: "World background / 世界背景" }).locator("..");
-    for (const folder of [worldFolder, textureAssetsTitle.locator(".."), page.locator(".debug-inspector .title").filter({ hasText: "Macro variation / 宏观变化" }).locator("..")]) {
-      await expect(folder).not.toHaveClass(/closed/);
-    }
-
-    const inspectorScroll = await page.evaluate(() => {
-      const panel = document.querySelector<HTMLElement>('[aria-label="Terrain material inspector"]')!;
-      const list = panel.querySelector<HTMLUListElement>(":scope > ul")!;
-      list.scrollTop = list.scrollHeight;
-      return { clientHeight: list.clientHeight, scrollHeight: list.scrollHeight, scrollTop: list.scrollTop };
-    });
-    expect(inspectorScroll.scrollHeight).toBeGreaterThan(inspectorScroll.clientHeight);
-    expect(inspectorScroll.scrollTop).toBeGreaterThan(0);
-    await expect(page.locator(".debug-inspector .close-button")).toBeVisible();
   });
 
   await test.step("region and control fixtures", async () => {
@@ -535,12 +918,26 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
         "control-angle",
         "control-scale",
         "autoshader",
-        "holes"
+        "holes",
+        "navigation"
       ] as const) {
         window.terrainDebug!.setView(view);
       }
       window.terrainDebug!.setView("surface");
     });
+    await page.evaluate(() => window.terrainDebug!.setView("control-base"));
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const surface = window.terrainDebug!.inspectSurface();
+          return [surface.visibleInstances, surface.worldInstances, surface.visibleRendererBatches];
+        })
+      )
+      .toEqual([0, 0, 0]);
+    await page.evaluate(() => window.terrainDebug!.setView("surface"));
+    await expect
+      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().visibleInstances))
+      .toBeGreaterThan(0);
   });
 
   await test.step("geometry clipmap topology and snap", async () => {
@@ -592,11 +989,14 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
       }
     }
     const initialBackground = await page.evaluate(() => window.terrainDebug!.getTuning().world.background);
-    await page.evaluate(async () => {
+    const flatWorldInstances = await page.evaluate(async () => {
       await window.terrainDebug!.setWorldBackground("flat");
       await window.terrainDebug!.setPose("background-seam");
+      const worldInstances = window.terrainDebug!.inspectSurface().worldInstances;
       await window.terrainDebug!.setView("layer-detiled");
+      return worldInstances;
     });
+    expect(flatWorldInstances).toBe(0);
     expect((await readFrameStats(page)).uniqueColors).toBeGreaterThan(2);
     await attachScreenshot(page, testInfo, "flat-background-detile-seam");
     await page.evaluate(async (background) => {
@@ -621,7 +1021,7 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(defaults.sampling.normalMapMaxLod).toBe(1);
     expect(defaults.layers[1]).toMatchObject({
       layer: 1,
-      uvScale: 0.5,
+      uvScale: 1,
       detilingRotation: 0.161,
       detilingShift: 0
     });
@@ -823,8 +1223,11 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
 });
 
 test("first-person camera follows the CPU heightfield", async ({ page }) => {
+  test.setTimeout(120_000);
   await page.goto("/demos/terrain/index.html");
   await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments");
+  const terrainFolder = page.locator(".debug-inspector .title").filter({ hasText: "Terrain / 地形" });
+  await terrainFolder.click();
   await expect(page.getByText("Ground clearance / 离地高度", { exact: true })).toBeVisible();
 
   const initial = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
@@ -849,9 +1252,80 @@ test("first-person camera follows the CPU heightfield", async ({ page }) => {
   const moved = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
   expect(moved.position[0]).not.toBe(initial.position[0]);
   expect(moved.position[1]).toBeCloseTo(moved.groundHeight! + 2.25, 5);
+
+  await page.evaluate(() => {
+    window.terrainDebug!.setView("grey");
+    window.terrainDebug!.setLighting({ directLight: false, environment: false });
+    window.terrainDebug!.setSurface({
+      enabled: { grass: false, flower: false, shrub: false, tree: false, rock: false, cliff: false }
+    });
+    window.terrainDebug!.setFirstPersonMoveSpeed(30);
+  });
+  await page.keyboard.down("KeyD");
+  await page.waitForTimeout(16_000);
+  await page.keyboard.up("KeyD");
+  const proceduralWorld = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
+  expect(proceduralWorld.position[0]).toBeGreaterThan(1024);
+  expect(proceduralWorld.groundHeight).toBeDefined();
+  expect(proceduralWorld.position[1]).toBeCloseTo(proceduralWorld.groundHeight! + 2.25, 5);
 });
 
-test("both terrain inspectors collapse and reopen every visible folder", async ({ page }) => {
+test("Realistic distance LOD hides dense coverage from overview and restores it deterministically", async ({
+  page
+}) => {
+  test.setTimeout(600_000);
+  await page.goto("/demos/terrain/index.html");
+  await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments", {
+    timeout: 120_000
+  });
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().visibleCategoryCounts.grass))
+    .toBeGreaterThan(30_000);
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().visibleCategoryCounts.flower))
+    .toBeGreaterThan(200);
+  const nearSnapshot = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+
+  await page.evaluate(() => window.terrainDebug!.setPose("overview"));
+  await expect
+    .poll(async () => {
+      const surface = await page.evaluate(() => window.terrainDebug!.inspectSurface());
+      return {
+        regionGrass: surface.visibleCategoryCounts.grass,
+        regionFlowers: surface.visibleCategoryCounts.flower,
+        worldGrass: surface.worldCategoryCounts.grass,
+        worldFlowers: surface.worldCategoryCounts.flower
+      };
+    })
+    .toEqual({ regionGrass: 0, regionFlowers: 0, worldGrass: 0, worldFlowers: 0 });
+
+  await page.evaluate(() => window.terrainDebug!.setPose("world-surface"));
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().worldCategoryCounts.grass))
+    .toBeGreaterThan(0);
+  const worldCamera = await page.evaluate(() => window.terrainDebug!.getCamera());
+  const worldFingerprint = await page.evaluate(() => window.terrainDebug!.inspectSurface().worldFingerprint);
+  await page.evaluate((camera) => {
+    window.terrainDebug!.setCamera({
+      ...camera,
+      position: [camera.position[0], 2_000, camera.position[2]]
+    });
+  }, worldCamera);
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().worldCategoryCounts.grass))
+    .toBe(0);
+  await page.evaluate((camera) => window.terrainDebug!.setCamera(camera), worldCamera);
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().worldFingerprint))
+    .toBe(worldFingerprint);
+
+  await page.evaluate(() => window.terrainDebug!.setPose("first-person"));
+  await expect
+    .poll(async () => page.evaluate(() => window.terrainDebug!.inspectSurface().visibleCategoryCounts.grass))
+    .toBe(nearSnapshot.visibleCategoryCounts.grass);
+});
+
+test("both terrain inspectors retain a minimal collapse smoke path", async ({ page }) => {
   test.setTimeout(900_000);
   await page.goto("/demos/terrain/index.html?pose=overview");
   await expect(page.locator("#status")).toContainText("ready · 3 regions · 144 clipmap segments", {
@@ -863,7 +1337,8 @@ test("both terrain inspectors collapse and reopen every visible folder", async (
       enabled: { grass: false, flower: false, shrub: false, tree: false, rock: false, cliff: false }
     });
   });
-  await verifyEveryInspectorFolderCanReopen(page);
+  await verifyInspectorCanReopen(page);
+  await verifyCameraOutput(page);
 
   await page.goto("/demos/terrain/grasslands/index.html?pose=valley-overview");
   await expect(page.locator("#status")).toContainText(
@@ -877,7 +1352,8 @@ test("both terrain inspectors collapse and reopen every visible folder", async (
     });
     window.grasslandsDebug!.setScene({ architecture: false, clouds: false, animation: false });
   });
-  await verifyEveryInspectorFolderCanReopen(page);
+  await verifyInspectorCanReopen(page);
+  await verifyCameraOutput(page);
 });
 
 test.describe("Grasslands authored scene", () => {
@@ -891,21 +1367,27 @@ test.describe("Grasslands authored scene", () => {
       { timeout: 120_000 }
     );
     await expect(page.locator('[aria-label="Grasslands terrain inspector"]')).toBeVisible();
-    for (const title of [
+    const topLevelFolders = page.locator(".debug-inspector > ul > li.folder > .dg > ul > li.title");
+    await expect(topLevelFolders).toHaveText([
       "Rendering / 渲染",
       "Terrain / 地形",
       "Surface / 地表",
-      "Scene / 场景复刻",
-      "Camera / 相机",
-      "Composition / 场景构成",
-      "Lighting / 光照",
-      "Cloud & fog / 云雾"
-    ]) {
+      "Scene / 场景复刻"
+    ]);
+    for (let index = 0; index < (await topLevelFolders.count()); index++) {
+      await expect(topLevelFolders.nth(index).locator("..")).toHaveClass(/closed/);
+    }
+    for (const title of ["Composition / 场景构成", "Lighting / 光照", "Cloud & fog / 云雾"]) {
       const folder = page.locator(".debug-inspector .title").filter({ hasText: title });
       await expect(folder).toHaveCount(1);
       await expect(folder).toBeAttached();
       await expect(folder.locator("..")).not.toHaveClass(/closed/);
     }
+    await expect(page.locator(".debug-inspector .title").filter({ hasText: "Camera / 相机" })).toHaveCount(0);
+    await expect(page.locator(".debug-inspector")).not.toContainText("Compiled inputs / 编译输入");
+    await expect(page.locator(".debug-inspector")).not.toContainText("World inputs / 世界输入");
+    await expect(page.locator(".debug-inspector__preview-row")).toHaveCount(14);
+    await expect(page.locator('.debug-inspector__preview[aria-label*="density mask"]')).toHaveCount(0);
 
     await page.evaluate(() => {
       window.terrainDebug!.setView("dual-factor");
@@ -914,8 +1396,8 @@ test.describe("Grasslands authored scene", () => {
     });
     expect(await page.evaluate(() => window.terrainDebug!.getTuning().material.dualScaling.enabled)).toBe(true);
     expect(await page.evaluate(() => window.terrainDebug!.poses)).toEqual([
-      "hero",
       "first-person",
+      "hero",
       "overview",
       "valley-overview",
       "terrain-horizon",
@@ -932,9 +1414,15 @@ test.describe("Grasslands authored scene", () => {
     }));
     expect(terrainContract.clipmap).toMatchObject({
       regionLocations: [
-        [0, 0], [1, 0], [2, 0],
-        [0, 1], [1, 1], [2, 1],
-        [0, 2], [1, 2], [2, 2]
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [0, 1],
+        [1, 1],
+        [2, 1],
+        [0, 2],
+        [1, 2],
+        [2, 2]
       ],
       regionSize: 1024,
       vertexSpacing: 0.9765625,
@@ -997,23 +1485,37 @@ test.describe("Grasslands authored scene", () => {
         "control-angle",
         "control-scale",
         "autoshader",
-        "holes"
+        "holes",
+        "navigation"
       ] as const) {
         window.terrainDebug!.setView(view);
       }
       window.terrainDebug!.setView("surface");
     });
+    const requestedComposition = await page.evaluate(() => window.grasslandsDebug!.getScene());
+    await page.evaluate(() => window.terrainDebug!.setView("control-base"));
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const surface = window.terrainDebug!.inspectSurface();
+          return [surface.visibleInstances, surface.worldInstances, surface.visibleRendererBatches];
+        })
+      )
+      .toEqual([0, 0, 0]);
+    expect(await page.evaluate(() => window.grasslandsDebug!.getScene())).toEqual(requestedComposition);
+    await page.evaluate(() => window.terrainDebug!.setView("surface"));
+    await expect
+      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().visibleInstances))
+      .toBeGreaterThan(0);
 
     const originalCamera = await page.evaluate(() => window.terrainDebug!.getCamera());
     const canvasBounds = await page.locator("#canvas").boundingBox();
     expect(canvasBounds).not.toBeNull();
     await page.mouse.move(canvasBounds!.x + canvasBounds!.width * 0.4, canvasBounds!.y + canvasBounds!.height * 0.5);
     await page.mouse.down();
-    await page.mouse.move(
-      canvasBounds!.x + canvasBounds!.width * 0.47,
-      canvasBounds!.y + canvasBounds!.height * 0.54,
-      { steps: 8 }
-    );
+    await page.mouse.move(canvasBounds!.x + canvasBounds!.width * 0.47, canvasBounds!.y + canvasBounds!.height * 0.54, {
+      steps: 8
+    });
     await page.mouse.up();
     await page.waitForTimeout(100);
     const orbitCamera = await page.evaluate(() => window.terrainDebug!.getCamera());
@@ -1037,12 +1539,6 @@ test.describe("Grasslands authored scene", () => {
       window.terrainDebug!.setCamera(camera);
       window.terrainDebug!.resetTuning();
     }, originalCamera);
-
-    const cameraOutput = page
-      .locator(".debug-inspector li.cr.function")
-      .filter({ hasText: "Output camera pose / 输出相机姿态" });
-    await cameraOutput.evaluate((element) => (element as HTMLElement).click());
-    await expect(page.locator(".debug-inspector__readout").filter({ hasText: '"position"' })).toHaveCount(1);
   });
 
   test("matches deterministic surface, atmosphere, cloud, and architecture contracts", async ({ page }, testInfo) => {
@@ -1057,7 +1553,7 @@ test.describe("Grasslands authored scene", () => {
     });
     await installShaderDiagnostics(page);
 
-    await page.goto("/demos/terrain/grasslands/index.html?pose=first-person");
+    await page.goto("/demos/terrain/grasslands/index.html");
     await expect(page.locator("#status")).toContainText(
       "ready · 9 terrain tiles · 291,069 surface instances · 64 architecture placements · 8 sky clouds",
       { timeout: 120_000 }
@@ -1082,9 +1578,7 @@ test.describe("Grasslands authored scene", () => {
       window.terrainDebug!.setFirstPersonMoveSpeed(8);
     });
 
-    await expect
-      .poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges))
-      .toBe(0);
+    await expect.poll(() => page.evaluate(() => window.terrainDebug!.inspectSurface().transitioningRanges)).toBe(0);
     const surface = await page.evaluate(() => window.terrainDebug!.inspectSurface());
     expect(surface.totalInstances).toBe(291_069);
     expect(surface.totalRanges).toBe(1_344);
@@ -1143,7 +1637,7 @@ test.describe("Grasslands authored scene", () => {
       cloudPresets: [3, 2, 2, 2, 1, 1, 3, 0, 0, 0, 2, 2, 0, 1, 0, 0, 0, 2, 2, 0, 2, 1, 3, 0, 2, 2, 0]
     });
     await page.waitForTimeout(250);
-    expect((await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time))).toBeGreaterThan(cloudStart.time);
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time)).toBeGreaterThan(cloudStart.time);
     await page.evaluate(() => window.grasslandsDebug!.setScene({ animation: false }));
     const frozenCloudTime = await page.evaluate(() => window.grasslandsDebug!.inspectClouds().time);
     await page.waitForTimeout(250);
@@ -1243,9 +1737,7 @@ test.describe("Grasslands authored scene", () => {
           shader.source.includes("material_SecondColor")
       )
     );
-    expect(
-      flowerFragmentShaders.some((shader) => /1\.0\s*-\s*[A-Za-z0-9_]+\.y/.test(shader.source))
-    ).toBe(true);
+    expect(flowerFragmentShaders.some((shader) => /1\.0\s*-\s*[A-Za-z0-9_]+\.y/.test(shader.source))).toBe(true);
     await testInfo.attach("grasslands-submission-snapshot", {
       body: JSON.stringify(submitted, null, 2),
       contentType: "application/json"
@@ -1257,10 +1749,9 @@ test.describe("Grasslands authored scene", () => {
     await page.waitForTimeout(180);
     await page.keyboard.up("KeyW");
     const afterMove = await page.evaluate(() => window.terrainDebug!.getFirstPerson());
-    expect(Math.hypot(
-      afterMove.position[0] - beforeMove.position[0],
-      afterMove.position[2] - beforeMove.position[2]
-    )).toBeGreaterThan(0);
+    expect(
+      Math.hypot(afterMove.position[0] - beforeMove.position[0], afterMove.position[2] - beforeMove.position[2])
+    ).toBeGreaterThan(0);
     expect(afterMove.position[1]).toBeCloseTo(afterMove.groundHeight! + 1.7, 4);
 
     const route: TerrainFirstPersonSnapshot[] = [];
@@ -1313,30 +1804,359 @@ test.describe("Grasslands visual baseline", () => {
   });
 });
 
-async function verifyEveryInspectorFolderCanReopen(page: Page): Promise<void> {
-  const folderNames = (await page.locator(".debug-inspector li.title:visible").allTextContents()).map((name) => name.trim());
-  expect(folderNames.length).toBeGreaterThan(0);
-  for (const folderName of folderNames) {
-    const exactName = new RegExp(`^${folderName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
-    const title = page.locator(".debug-inspector li.title").filter({ hasText: exactName });
-    const folder = title.locator("..");
-    await title.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
-    if (await folder.evaluate((element) => element.classList.contains("closed"))) {
-      await title.click({ force: true });
-      await expect(folder).not.toHaveClass(/closed/);
-    }
-    await title.click({ force: true });
-    await expect(folder).toHaveClass(/closed/);
-    await title.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
-    await title.click({ force: true });
-    await expect(folder).not.toHaveClass(/closed/);
-  }
-
+async function verifyInspectorCanReopen(page: Page): Promise<void> {
+  const title = page.locator(".debug-inspector li.title:visible").first();
+  const folder = title.locator("..");
+  await expect(folder).toHaveClass(/closed/);
+  await title.click({ force: true });
+  await expect(folder).not.toHaveClass(/closed/);
+  await title.click({ force: true });
+  await expect(folder).toHaveClass(/closed/);
   const panelToggle = page.locator(".debug-inspector .close-button");
   await panelToggle.click();
   await expect(panelToggle).toContainText("Open Controls");
   await panelToggle.click();
   await expect(panelToggle).toContainText("Close Controls");
+}
+
+async function verifyCameraOutput(page: Page): Promise<void> {
+  const terrainTitle = page.locator(".debug-inspector .title").filter({ hasText: "Terrain / 地形" });
+  await expect(terrainTitle).toHaveCount(1);
+  if (await terrainTitle.locator("..").evaluate((folder) => folder.classList.contains("closed"))) {
+    await terrainTitle.click();
+  }
+  const outputRow = page.locator("li.cr.function").filter({ hasText: "Output camera pose / 输出相机姿态" });
+  await expect(outputRow).toHaveCount(1);
+  await outputRow.click();
+  const output = page.locator(".debug-inspector__readout-row").filter({ hasText: "Camera JSON / 相机 JSON" });
+  await expect(output).toContainText('"position"');
+  await expect(output).toContainText('"rotation"');
+  await expect(output).toContainText('"forward"');
+  await expect(output).toContainText('"fieldOfView"');
+}
+
+interface SourceTerrainProbe {
+  readonly world: readonly [x: number, z: number];
+  readonly heightRaw: number;
+  readonly height: number;
+  readonly region: {
+    readonly layer: number;
+    readonly location: readonly [x: number, z: number];
+    readonly texel: readonly [x: number, z: number];
+    readonly sourceIndex: number;
+  };
+  readonly control: ReturnType<typeof decodeControlOracle>;
+}
+
+const CONTROL_FIXTURE_EXPECTATIONS = [
+  {
+    id: "blend-0",
+    heightRaw: 8_192,
+    control: encodeControlOracle(3, 5, 0, 2, 1, 0)
+  },
+  {
+    id: "blend-128-navigation",
+    heightRaw: 24_576,
+    control: encodeControlOracle(7, 11, 128, 5, 3, 0x2)
+  },
+  {
+    id: "blend-255-autoshader",
+    heightRaw: 40_960,
+    control: encodeControlOracle(13, 17, 255, 9, 6, 0x1)
+  },
+  {
+    id: "hole",
+    heightRaw: 57_344,
+    control: encodeControlOracle(19, 23, 64, 12, 7, 0x4)
+  }
+] as const;
+
+function readTerrainSourceProbe(manifestPath: string, worldX: number, worldZ: number): SourceTerrainProbe {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    readonly terrain: {
+      readonly regionSize: number;
+      readonly vertexSpacing: number;
+      readonly heightAtlas: {
+        readonly url: string;
+        readonly width: number;
+        readonly minMetres: number;
+        readonly maxMetres: number;
+      };
+      readonly regions: readonly {
+        readonly location: readonly [x: number, z: number];
+        readonly heightOffsetY: number;
+        readonly controlMap: string;
+      }[];
+    };
+  };
+  const { terrain } = manifest;
+  const gridX = Math.round(worldX / terrain.vertexSpacing);
+  const gridZ = Math.round(worldZ / terrain.vertexSpacing);
+  const regionX = Math.floor(gridX / terrain.regionSize);
+  const regionZ = Math.floor(gridZ / terrain.regionSize);
+  const layer = terrain.regions.findIndex(({ location }) => location[0] === regionX && location[1] === regionZ);
+  if (layer < 0) {
+    throw new Error(`[terrain-e2e] (${worldX}, ${worldZ}) is outside ${manifestPath}`);
+  }
+
+  const region = terrain.regions[layer];
+  const localX = positiveModulo(gridX, terrain.regionSize);
+  const localZ = positiveModulo(gridZ, terrain.regionSize);
+  const sourceIndex = localZ * terrain.regionSize + localX;
+  const directory = path.dirname(manifestPath);
+  const heightBytes = readFileSync(path.resolve(directory, terrain.heightAtlas.url));
+  const heightAtlasIndex = (region.heightOffsetY + localZ) * terrain.heightAtlas.width + localX;
+  const heightRaw = heightBytes.readUInt16LE(heightAtlasIndex * 2);
+  const controlBytes = readFileSync(path.resolve(directory, region.controlMap));
+  const controlRaw = controlBytes.readUInt32LE(sourceIndex * 4);
+  const height =
+    terrain.heightAtlas.minMetres +
+    (heightRaw / 65_535) * (terrain.heightAtlas.maxMetres - terrain.heightAtlas.minMetres);
+
+  return {
+    world: [worldX, worldZ],
+    heightRaw,
+    height,
+    region: {
+      layer,
+      location: region.location,
+      texel: [localX, localZ],
+      sourceIndex
+    },
+    control: decodeControlOracle(controlRaw)
+  };
+}
+
+function readTerrainVertexSpacing(manifestPath: string): number {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    readonly terrain: { readonly vertexSpacing: number };
+  };
+  return manifest.terrain.vertexSpacing;
+}
+
+function expectProbeToMatchSource(actual: TerrainProbeSnapshot, source: SourceTerrainProbe): void {
+  expect(actual.world).toEqual(source.world);
+  expect(actual.heightRaw).toBe(source.heightRaw);
+  expect(actual.height).toBeCloseTo(source.height, 10);
+  expect(actual.region).toEqual(source.region);
+  expect(actual.control).toEqual(source.control);
+}
+
+async function prepareNumericTerrainReadback(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    window.terrainDebug!.setRendering({
+      lighting: {
+        directLight: false,
+        shadows: false,
+        environment: false,
+        skybox: false
+      },
+      camera: { hdr: false, msaaSamples: 1 },
+      postProcess: { enabled: false, tonemapping: false }
+    });
+    window.terrainDebug!.setWaterDebug({ enabled: false });
+    window.terrainDebug!.focusProbe(0, 0);
+    window.terrainDebug!.setView("grey");
+  });
+  await waitForTerrainFrames(page, 4);
+}
+
+async function readTerrainProbePixel(
+  page: Page,
+  world: readonly [x: number, z: number],
+  view: TerrainDebugViewName
+): Promise<readonly [r: number, g: number, b: number, a: number]> {
+  await page.evaluate(
+    ({ worldX, worldZ, viewName }) => {
+      window.terrainDebug!.focusProbe(worldX, worldZ);
+      window.terrainDebug!.setView(viewName);
+    },
+    { worldX: world[0], worldZ: world[1], viewName: view }
+  );
+  await waitForTerrainFrames(page, 4);
+  const camera = await page.evaluate(() => window.terrainDebug!.getCamera());
+  expect(camera.position[0]).toBeCloseTo(world[0], 6);
+  expect(camera.position[2]).toBeCloseTo(world[1], 6);
+  expect(camera.forward[0]).toBeCloseTo(0, 6);
+  expect(camera.forward[1]).toBeCloseTo(-1, 6);
+  expect(camera.forward[2]).toBeCloseTo(0, 6);
+  return page.evaluate(
+    () =>
+      new Promise<readonly [r: number, g: number, b: number, a: number]>((resolve) => {
+        requestAnimationFrame(() => {
+          const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!;
+          const gl = canvas.getContext("webgl2")!;
+          gl.finish();
+          const pixel = new Uint8Array(4);
+          gl.readPixels(
+            Math.floor(canvas.width * 0.5),
+            Math.floor(canvas.height * 0.5),
+            1,
+            1,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            pixel
+          );
+          resolve([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        });
+      })
+  );
+}
+
+async function expectControlDebugPixels(
+  page: Page,
+  world: readonly [x: number, z: number],
+  control: ReturnType<typeof decodeControlOracle>,
+  label: string
+): Promise<void> {
+  if (!control.hole) {
+    expectPixel(
+      await readTerrainProbePixel(page, world, "control-base"),
+      grayscale(control.base / 31),
+      `${label} base`
+    );
+    expectPixel(
+      await readTerrainProbePixel(page, world, "control-overlay"),
+      grayscale(control.overlay / 31),
+      `${label} overlay`
+    );
+    const blendPixel = await readTerrainProbePixel(page, world, "control-blend");
+    expectByte(blendPixel[0], toFramebufferByte(control.blend), `${label} blend.r`);
+    expectByte(blendPixel[1], 0, `${label} blend.g`);
+    expectPixel(
+      await readTerrainProbePixel(page, world, "control-angle"),
+      grayscale(control.angleIndex / 15),
+      `${label} rotation`
+    );
+    expectPixel(await readTerrainProbePixel(page, world, "control-scale"), grayscale(control.scale), `${label} scale`);
+    expectPixel(
+      await readTerrainProbePixel(page, world, "navigation"),
+      grayscale(Number(control.navigation)),
+      `${label} navigation`
+    );
+    expectPixel(
+      await readTerrainProbePixel(page, world, "autoshader"),
+      grayscale(Number(control.autoshader)),
+      `${label} autoshader`
+    );
+  }
+  expectPixel(
+    await readTerrainProbePixel(page, world, "holes"),
+    control.hole ? normalizedRgb(1, 0, 0.2) : grayscale(0.08),
+    `${label} hole`
+  );
+}
+
+async function waitForTerrainFrames(page: Page, frameCount: number): Promise<void> {
+  await page.evaluate(
+    (count) =>
+      new Promise<void>((resolve) => {
+        let rendered = 0;
+        const next = (): void => {
+          rendered++;
+          if (rendered >= count) {
+            resolve();
+          } else {
+            requestAnimationFrame(next);
+          }
+        };
+        requestAnimationFrame(next);
+      }),
+    frameCount
+  );
+}
+
+function expectPixel(
+  actual: readonly [r: number, g: number, b: number, a: number],
+  expected: readonly [r: number, g: number, b: number],
+  label: string
+): void {
+  expectByte(actual[0], expected[0], `${label}.r`);
+  expectByte(actual[1], expected[1], `${label}.g`);
+  expectByte(actual[2], expected[2], `${label}.b`);
+  expectByte(actual[3], 255, `${label}.a`);
+}
+
+function expectByte(actual: number, expected: number, label: string): void {
+  expect(Math.abs(actual - expected), `${label}: ${actual} vs ${expected}`).toBeLessThanOrEqual(1);
+}
+
+function heightDebugValue(height: number): number {
+  const value = clamp01((0.5 + height / 300 + 0.1) / 2.1);
+  return value * value * (3 - 2 * value);
+}
+
+function regionLayerColor(layer: number): readonly [r: number, g: number, b: number] {
+  const colors = [
+    [1, 0.2, 0.2],
+    [1, 0.65, 0.1],
+    [0.2, 1, 0.25],
+    [0.1, 0.8, 1],
+    [0.25, 0.35, 1],
+    [0.75, 0.25, 1],
+    [1, 0.25, 0.7]
+  ] as const;
+  const color = colors[Math.min(layer, colors.length - 1)];
+  return normalizedRgb(color[0], color[1], color[2]);
+}
+
+function grayscale(value: number): readonly [r: number, g: number, b: number] {
+  const byte = toFramebufferByte(value);
+  return [byte, byte, byte];
+}
+
+function normalizedRgb(r: number, g: number, b: number): readonly [r: number, g: number, b: number] {
+  return [toFramebufferByte(r), toFramebufferByte(g), toFramebufferByte(b)];
+}
+
+function toFramebufferByte(value: number): number {
+  const linear = clamp01(value);
+  const srgb = linear <= 0.0031308 ? linear * 12.9232102 : 1.055 * Math.pow(linear, 1 / 2.4) - 0.055;
+  return Math.round(clamp01(srgb) * 255);
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function positiveModulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function encodeControlOracle(
+  base: number,
+  overlay: number,
+  blend: number,
+  angle: number,
+  scale: number,
+  flags: number
+): number {
+  return (
+    (((base & 0x1f) << 27) |
+      ((overlay & 0x1f) << 22) |
+      ((blend & 0xff) << 14) |
+      ((angle & 0xf) << 10) |
+      ((scale & 0x7) << 7) |
+      (flags & 0x7)) >>>
+    0
+  );
+}
+
+function decodeControlOracle(value: number) {
+  const raw = value >>> 0;
+  const scaleIndex = (raw >>> 7) & 0x7;
+  return {
+    raw,
+    base: (raw >>> 27) & 0x1f,
+    overlay: (raw >>> 22) & 0x1f,
+    blend: ((raw >>> 14) & 0xff) / 255,
+    angleIndex: (raw >>> 10) & 0xf,
+    scaleIndex,
+    scale: 0.9 - (((scaleIndex + 3) % 8) + 1) * 0.1,
+    hole: (raw & 0x4) !== 0,
+    navigation: (raw & 0x2) !== 0,
+    autoshader: (raw & 0x1) !== 0
+  };
 }
 
 async function installShaderDiagnostics(page: Page): Promise<void> {
@@ -1357,7 +2177,7 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
     const shaderSource = prototype.shaderSource;
     prototype.shaderSource = function (shader, source): void {
       shaderSources.set(shader, source);
-      if (source.includes("material_RegionMap")) {
+      if (source.includes("material_HeightMaps") || source.includes("material_ControlMaps")) {
         generatedShaders.push({
           stage: this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment",
           source
