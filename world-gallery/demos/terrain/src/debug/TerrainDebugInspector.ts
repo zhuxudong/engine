@@ -202,6 +202,27 @@ export function mountTerrainInspector(
   ).onChange((value: number) =>
     updateRendering({ postProcess: { tonemappingMode: Number(value) as TonemappingMode } })
   );
+  const bloomState = renderingState.postProcess.bloom;
+  annotate(
+    postProcessFolder.add(bloomState, "enabled"),
+    "Bloom / 泛光",
+    "切换 BloomEffect；仅提取超过 Threshold 的 HDR 高亮并叠加柔光。"
+  ).onChange((enabled: boolean) => updateRendering({ postProcess: { bloom: { enabled } } }));
+  annotate(
+    postProcessFolder.add(bloomState, "threshold", 0, 5, 0.01),
+    "Bloom threshold / 泛光阈值",
+    "线性 HDR 亮度阈值；数值越低，越多像素参与泛光。"
+  ).onChange((threshold: number) => updateRendering({ postProcess: { bloom: { threshold } } }));
+  annotate(
+    postProcessFolder.add(bloomState, "intensity", 0, 5, 0.01),
+    "Bloom intensity / 泛光强度",
+    "控制提取结果叠加回场景的强度；0 表示没有可见泛光。"
+  ).onChange((intensity: number) => updateRendering({ postProcess: { bloom: { intensity } } }));
+  annotate(
+    postProcessFolder.add(bloomState, "scatter", 0, 1, 0.01),
+    "Bloom scatter / 泛光扩散",
+    "控制多级模糊的扩散半径；越大，高亮光晕越宽。"
+  ).onChange((scatter: number) => updateRendering({ postProcess: { bloom: { scatter } } }));
 
   const surfaceVisibilityFolder = inspector.subfolder(surfaceFolder, "Visibility & density / 可见性与密度", true);
   for (const category of Object.keys(SURFACE_CATEGORY_LABELS) as SurfaceCategory[]) {
@@ -721,7 +742,10 @@ function hexToRgb(value: string): [number, number, number] {
 function replaceRenderingState(target: TerrainRenderingSnapshot, source: TerrainRenderingSnapshot): void {
   Object.assign(target.lighting, source.lighting);
   Object.assign(target.camera, source.camera);
+  const targetBloom = target.postProcess.bloom;
   Object.assign(target.postProcess, source.postProcess);
+  target.postProcess.bloom = targetBloom;
+  Object.assign(targetBloom, source.postProcess.bloom);
 }
 
 function cloneSurfaceTuning(source: SurfaceRuntimeTuning): {

@@ -428,6 +428,18 @@ export interface TerrainCameraRenderingSnapshot {
   msaaSamples: MSAASamples;
 }
 
+/** Bloom state belonging to rendering diagnostics. */
+export interface TerrainBloomRenderingSnapshot {
+  /** Whether the bloom effect contributes to the post-process output. */
+  enabled: boolean;
+  /** Linear HDR brightness threshold used to extract bloom highlights. */
+  threshold: number;
+  /** Additive bloom strength. */
+  intensity: number;
+  /** Bloom radius interpolation in the range [0, 1]. */
+  scatter: number;
+}
+
 /** Post-process state belonging to rendering diagnostics. */
 export interface TerrainPostProcessRenderingSnapshot {
   /** Whether the active camera executes the scene post-process manager. */
@@ -436,6 +448,20 @@ export interface TerrainPostProcessRenderingSnapshot {
   tonemapping: boolean;
   /** Active engine tonemapping enum value. */
   tonemappingMode: TonemappingMode;
+  /** Bloom effect state. */
+  bloom: TerrainBloomRenderingSnapshot;
+}
+
+/** Partial post-process values accepted by rendering diagnostics. */
+export interface TerrainPostProcessRenderingTuning {
+  /** Camera-level post-process manager switch. */
+  enabled?: boolean;
+  /** Tonemapping effect switch. */
+  tonemapping?: boolean;
+  /** Tonemapping operator. */
+  tonemappingMode?: TonemappingMode;
+  /** Bloom values to replace. */
+  bloom?: Partial<TerrainBloomRenderingSnapshot>;
 }
 
 /** Complete rendering state exposed by the terrain diagnostics panel. */
@@ -455,7 +481,7 @@ export interface TerrainRenderingTuning {
   /** Camera values to replace. */
   camera?: Partial<TerrainCameraRenderingSnapshot>;
   /** Post-process values to replace. */
-  postProcess?: Partial<TerrainPostProcessRenderingSnapshot>;
+  postProcess?: TerrainPostProcessRenderingTuning;
 }
 
 /** Full mutable copy of the terrain inputs exposed by the inspector. */

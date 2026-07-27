@@ -572,16 +572,36 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
       await expect(title).toBeVisible();
       await expect(title.locator("..")).not.toHaveClass(/closed/);
     }
+    for (const label of [
+      "Bloom / 泛光",
+      "Bloom threshold / 泛光阈值",
+      "Bloom intensity / 泛光强度",
+      "Bloom scatter / 泛光扩散"
+    ]) {
+      await expect(postProcessFolder.locator("..")).toContainText(label);
+    }
     await expect(page.locator(".debug-inspector .title").filter({ hasText: "Camera / 相机" })).toHaveCount(0);
 
     const original = await page.evaluate(() => window.terrainDebug!.getRendering());
+    expect(original.postProcess.bloom).toEqual({
+      enabled: false,
+      threshold: 0.8,
+      intensity: 1,
+      scatter: 0.7
+    });
     const updated = await page.evaluate((initial) => {
       window.terrainDebug!.setRendering({
         camera: { hdr: !initial.camera.hdr, msaaSamples: initial.camera.msaaSamples },
         postProcess: {
           enabled: !initial.postProcess.enabled,
           tonemapping: !initial.postProcess.tonemapping,
-          tonemappingMode: initial.postProcess.tonemappingMode
+          tonemappingMode: initial.postProcess.tonemappingMode,
+          bloom: {
+            enabled: true,
+            threshold: 1.1,
+            intensity: 0.5,
+            scatter: 0.4
+          }
         }
       });
       return window.terrainDebug!.getRendering();
@@ -590,7 +610,13 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(updated.postProcess).toEqual({
       enabled: !original.postProcess.enabled,
       tonemapping: !original.postProcess.tonemapping,
-      tonemappingMode: original.postProcess.tonemappingMode
+      tonemappingMode: original.postProcess.tonemappingMode,
+      bloom: {
+        enabled: true,
+        threshold: 1.1,
+        intensity: 0.5,
+        scatter: 0.4
+      }
     });
     await attachScreenshot(page, testInfo, "rendering-controls");
     await page.evaluate((state) => window.terrainDebug!.setRendering(state), original);
@@ -1424,6 +1450,53 @@ test("both terrain entries expose live foldable performance metrics", async ({ p
     await page.goto(entry.url);
     await expect(page.locator("#status")).toContainText(entry.ready, { timeout: 120_000 });
     await verifyPerformancePanel(page);
+  }
+});
+
+test("both terrain entries expose disabled bloom controls", async ({ page }) => {
+  test.setTimeout(300_000);
+  const entries = [
+    {
+      url: "/demos/terrain/index.html",
+      ready: "ready · 3 regions · 144 clipmap segments",
+      bloom: { enabled: false, threshold: 0.8, intensity: 1, scatter: 0.7 }
+    },
+    {
+      url: "/demos/terrain/grasslands/index.html",
+      ready: "ready · 9 terrain tiles · 291,069 surface instances",
+      bloom: { enabled: false, threshold: 0.5, intensity: 0.35, scatter: 0.6 }
+    }
+  ] as const;
+
+  for (const entry of entries) {
+    await page.goto(entry.url);
+    await expect(page.locator("#status")).toContainText(entry.ready, { timeout: 120_000 });
+    const renderingFolder = page.locator(".debug-inspector .title").filter({ hasText: "Rendering / 渲染" });
+    await renderingFolder.click();
+    const postProcessFolder = page.locator(".debug-inspector .title").filter({ hasText: "Post-process / 后处理" });
+    for (const label of [
+      "Bloom / 泛光",
+      "Bloom threshold / 泛光阈值",
+      "Bloom intensity / 泛光强度",
+      "Bloom scatter / 泛光扩散"
+    ]) {
+      await expect(postProcessFolder.locator("..")).toContainText(label);
+    }
+    expect(await page.evaluate(() => window.terrainDebug!.getRendering().postProcess.bloom)).toEqual(entry.bloom);
+
+    const updated = {
+      enabled: true,
+      threshold: entry.bloom.threshold + 0.1,
+      intensity: entry.bloom.intensity + 0.1,
+      scatter: entry.bloom.scatter - 0.1
+    };
+    await page.evaluate((bloom) => {
+      window.terrainDebug!.setRendering({ postProcess: { bloom } });
+    }, updated);
+    expect(await page.evaluate(() => window.terrainDebug!.getRendering().postProcess.bloom)).toEqual(updated);
+    await page.evaluate((bloom) => {
+      window.terrainDebug!.setRendering({ postProcess: { bloom } });
+    }, entry.bloom);
   }
 });
 

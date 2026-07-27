@@ -1,4 +1,5 @@
 import {
+  BloomEffect,
   Camera,
   Entity,
   MSAASamples,
@@ -161,6 +162,11 @@ async function boot(): Promise<void> {
   const postProcess = root.createChild("terrain-tonemapping").addComponent(PostProcess);
   const tonemappingEffect = postProcess.addEffect(TonemappingEffect);
   tonemappingEffect.mode.value = TonemappingMode.Neutral;
+  const bloomEffect = postProcess.addEffect(BloomEffect);
+  bloomEffect.enabled = false;
+  bloomEffect.threshold.value = 0.8;
+  bloomEffect.intensity.value = 1;
+  bloomEffect.scatter.value = 0.7;
   const orbit = cameraEntity.addComponent(OrbitControl);
   orbit.minDistance = 20;
   orbit.maxDistance = 10000;
@@ -371,7 +377,13 @@ async function boot(): Promise<void> {
         postProcess: {
           enabled: camera.enablePostProcess,
           tonemapping: tonemappingEffect.enabled,
-          tonemappingMode: tonemappingEffect.mode.value
+          tonemappingMode: tonemappingEffect.mode.value,
+          bloom: {
+            enabled: bloomEffect.enabled,
+            threshold: bloomEffect.threshold.value,
+            intensity: bloomEffect.intensity.value,
+            scatter: bloomEffect.scatter.value
+          }
         }
       };
     },
@@ -383,6 +395,13 @@ async function boot(): Promise<void> {
       if (values.postProcess?.tonemapping !== undefined) tonemappingEffect.enabled = values.postProcess.tonemapping;
       if (values.postProcess?.tonemappingMode !== undefined) {
         tonemappingEffect.mode.value = values.postProcess.tonemappingMode;
+      }
+      const bloomValues = values.postProcess?.bloom;
+      if (bloomValues) {
+        if (bloomValues.enabled !== undefined) bloomEffect.enabled = bloomValues.enabled;
+        if (bloomValues.threshold !== undefined) bloomEffect.threshold.value = bloomValues.threshold;
+        if (bloomValues.intensity !== undefined) bloomEffect.intensity.value = bloomValues.intensity;
+        if (bloomValues.scatter !== undefined) bloomEffect.scatter.value = bloomValues.scatter;
       }
     },
     getSurface() {

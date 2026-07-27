@@ -216,6 +216,7 @@ async function boot(): Promise<void> {
   bloom.threshold.value = sceneLayout.environment.postProcess.bloom.threshold;
   bloom.intensity.value = sceneLayout.environment.postProcess.bloom.intensity;
   bloom.scatter.value = sceneLayout.environment.postProcess.bloom.scatter;
+  bloom.enabled = false;
 
   const terrainMaterial = new TerrainMaterial(engine);
   terrainMaterial.bindTerrain(terrainData, manifest.clipmap.meshSize);
@@ -470,7 +471,13 @@ async function boot(): Promise<void> {
         postProcess: {
           enabled: camera.enablePostProcess,
           tonemapping: tonemapping.enabled,
-          tonemappingMode: tonemapping.mode.value
+          tonemappingMode: tonemapping.mode.value,
+          bloom: {
+            enabled: bloom.enabled,
+            threshold: bloom.threshold.value,
+            intensity: bloom.intensity.value,
+            scatter: bloom.scatter.value
+          }
         }
       };
     },
@@ -494,6 +501,13 @@ async function boot(): Promise<void> {
       }
       if (values.postProcess?.tonemappingMode !== undefined) {
         tonemapping.mode.value = values.postProcess.tonemappingMode;
+      }
+      const bloomValues = values.postProcess?.bloom;
+      if (bloomValues) {
+        if (bloomValues.enabled !== undefined) bloom.enabled = bloomValues.enabled;
+        if (bloomValues.threshold !== undefined) bloom.threshold.value = bloomValues.threshold;
+        if (bloomValues.intensity !== undefined) bloom.intensity.value = bloomValues.intensity;
+        if (bloomValues.scatter !== undefined) bloom.scatter.value = bloomValues.scatter;
       }
     },
     getSurface: () => surfaceWorld.getTuning(),
