@@ -698,6 +698,70 @@ direct copy。验收必须对父提交交替测试 settled、相机连续旋转�
 survivor 降幅描述为性能提升。草地后续优化需要命中实际可见的 alpha overdraw、几何 LOD 或
 遮挡工作量；投影树木/岩石仍应先补 per-view indirect stream，不能复用本实验的主相机流。
 
+### Shadow cascade GPU stream 设计
+
+#### Grasslands 瓶颈事实
+
+关闭 cloud、cloud shadow、post-process、fog、wind 与场景动画后，同一 WebGPU 页面按
+`shadow on/off/off/on/on/off` 顺序各采样 4.5 秒。shadow on 的 FPS 中位数为 43.09，
+shadow off 为 49.78；关闭阴影为 +15.51%，三组 GPU/page diagnostic 均为 0。
+
+prototype 级 manifest 拦截实验显示，关闭 14,367 个 12-index 假树后 FPS 基本不变；
+关闭约 500 个真实树后从 42.4–43.2 FPS 提升到 45.0 FPS，关闭大部分真实岩石后提升到
+46.3 FPS。该数据只用于定位高几何稀疏层，不把不同页面的单轮差值当作最终收益。
+
+真实树、岩石与灌木共 4,132 个实例。按现有 `SurfaceWorld.selectLod` 与实际 glTF accessor
+索引数离线复算，当前 cell LOD 的单次 raster 索引工作为 3,858,981；改成逐实例 LOD 只降到
+3,698,970（-4.15%），且 4,132 个实例中只有 69 个改变 LOD。该方向在进入实现前淘汰，避免
+为有限几何降幅改写 temporal cross-fade 语义。
+
+当前 WebGPU static atlas 将每个 prototype LOD 的全部 range 合并成一个 renderer bounds。
+`CascadedShadowCasterPass` 对每级 cascade 调用 `ShadowUtils.shadowCullFrustum`，它只能测试
+这个全局 bounds；进入队列后，`MeshRenderer` 仍把 Forward 使用的同一 indirect buffer/count
+写进 `RenderElement`。因此 renderer 级 shadow culling 无法剔除 cascade 外实例，每级
+cascade 会重复消费主相机 stream 中的整批索引。
+
+#### 方案比较
+
+| 方案 | 结果 | 决策 |
+| --- | --- | --- |
+| 关闭树木/岩石阴影或降低 cascade 数 | 直接省时，但改变 world 资产与画质语义 | 不采用 |
+| 按 cell 恢复 shadow renderer | 引擎现有 bounds culling 可用，但重新引入上千 draw/renderer | 不采用 |
+| 复制 4 份长期驻留的完整 instance output | cascade 可独立 draw，但 Grasslands output atlas 从约 18 MiB 放大到约 90 MiB | 不采用 |
+| Forward stream 不变；shadow caster 使用一个可复用 output，在每级 cascade 队列构建时按真实 cull planes 重新 compaction | 只为投影稀疏层分配容量；cascade 按顺序 compute→draw，可复用同一输出 | 本阶段采用 |
+
+采用方案沿用 Unity Camera/Light 分离 visibility 与 PlayCanvas per-light visible-index/count 的
+源码结论，但只落地 Galacean 当前串行 directional cascade 所需的最小契约：
+
+1. `Renderer` 增加 internal camera-rendering gate 与 `_prepareShadow(context, planes, count)`
+   hook。默认 renderer 行为不变；该 hook 只让 GPU-driven renderer 在 shadow queue 构建时
+   得到引擎已经计算好的最多 10 个 `ShadowSliceData.cullPlanes`。不新增用户 API。
+2. WebGPU Surface Forward renderer 不再投影；同材质、同 ShaderLab、同 LOD 的 shadow-only
+   renderer 使用独立 shadow output/indirect buffer，并由 camera-rendering gate 排除在主相机
+   queue 外。WebGL2 保持原 renderer 路径。
+3. CPU 仍决定 category、density、主相机 max-distance、cell LOD 与 temporal cross-fade。
+   shadow command 只消费这些已选择 range 的 source prefix，因此首版不会扩大或缩小当前主
+   相机可见集合；它只在每级 cascade 内按实例保守球再裁剪。
+4. shadow sphere 使用 prototype-origin radius、instance scale、runtime category scale，
+   再加实时 `abs(materialBaseWindForce * liveWindStrength)`。本地 34 个树/岩石/灌木 glTF 的
+   90 个 `COLOR_0` accessor 均为 normalized `UNSIGNED_SHORT`，实际 red 最大值为 1；无
+   vertex color 时 shader wind weight 也为 1。
+5. 一个 ShaderLab compute 模块执行 counter reset、最多 10 平面 workgroup compaction 和
+   indirect finalize。LOD fade 与 cell hue 使用 Forward direct-copy 相同的 packed metadata；
+   不写原生 WGSL。
+6. shadow output 只按 cast-shadow prototype LOD 容量分配，并在四级 cascade 间串行复用。
+   任一 storage binding、workgroup 数或 batch 数超过实际 device limit 时显式失败，不退回
+   隐藏的 per-cell 路径。
+
+验收分三层：
+
+- Core/RHI：默认 renderer 的 camera/shadow 队列不变；shadow-only renderer 不进入 camera
+  queue；hook 收到每级实际 cull plane count。
+- 功能：四级 cascade 各自读回 survivor/indirect count，LOD transition 正负 fade 保留；
+  固定相机、移动相机和 wind 最大 inspector 值截图对父提交；GPU/page diagnostic 为 0。
+- 性能：父提交/候选按 settled 与连续相机移动交替采样；同时报告每级 survivor、实际索引工作、
+  dispatch、frame p50/p95。若整帧没有稳定收益，撤销实现并保留实验记录。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
