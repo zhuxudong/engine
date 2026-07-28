@@ -50,6 +50,25 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   expect(surface.indirectRendererBatches).toBeGreaterThan(1);
   expect(webglSurface.indirectRendererBatches).toBe(0);
 
+  await page.evaluate(() => window.grasslandsDebug!.setSurface({ lod: { enabled: false } }));
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+  const lod0Surface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
+  const transitioningSurface = await page.evaluate(() => {
+    window.grasslandsDebug!.setSurface({ lod: { enabled: true } });
+    return window.grasslandsDebug!.inspectSurface();
+  });
+  expect(transitioningSurface.transitioningRanges).toBeGreaterThan(0);
+  expect(transitioningSurface.indirectRendererBatches).toBeGreaterThan(lod0Surface.indirectRendererBatches);
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+  expect(
+    await page.evaluate(() =>
+      window
+        .grasslandsDebug!.inspectSurface()
+        .lodCounts.slice(1)
+        .some((count) => count > 0)
+    )
+  ).toBe(true);
+
   await page.waitForTimeout(1_000);
   const screenshot = await page.locator("#canvas").screenshot();
   await testInfo.attach("grasslands-webgpu.png", { body: screenshot, contentType: "image/png" });

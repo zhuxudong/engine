@@ -101,6 +101,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _vertexColorMacro = ShaderMacro.getByName("RENDERER_ENABLE_VERTEXCOLOR");
   private static readonly _billboardMacro = ShaderMacro.getByName("RENDERER_SURFACE_BILLBOARD");
   private static readonly _instancedMacro = ShaderMacro.getByName("RENDERER_SURFACE_INSTANCED");
+  private static readonly _packedMetadataMacro = ShaderMacro.getByName("RENDERER_SURFACE_PACKED_META");
   private static readonly _coverageMacro = ShaderMacro.getByName("MATERIAL_SURFACE_COVERAGE");
   private static readonly _worldNoiseMacro = ShaderMacro.getByName("RENDERER_SURFACE_WORLD_NOISE");
 
@@ -412,6 +413,19 @@ export class SurfaceMaterial extends BaseMaterial {
   static setRendererLodFade(enabled: boolean, factor: number, shaderData: ShaderData): void {
     shaderData.setInt(SurfaceMaterial._lodFadeEnabled, enabled ? 1 : 0);
     shaderData.setFloat(SurfaceMaterial._lodFade, factor);
+  }
+
+  /**
+   * Selects compacted cell and signed LOD metadata in the instance position metadata float.
+   * @param enabled Whether the renderer supplies compacted metadata.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererPackedMetadata(enabled: boolean, shaderData: ShaderData): void {
+    if (enabled) {
+      shaderData.enableMacro(SurfaceMaterial._packedMetadataMacro);
+    } else {
+      shaderData.disableMacro(SurfaceMaterial._packedMetadataMacro);
+    }
   }
 }
 

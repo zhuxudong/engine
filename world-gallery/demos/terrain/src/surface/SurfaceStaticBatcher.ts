@@ -19,9 +19,13 @@ import {
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SurfaceMaterial } from "./SurfaceMaterial";
-import { SURFACE_RUNTIME_SCALE_MAX, type SurfacePrototypeSpec } from "./SurfaceRuntimeContract";
+import {
+  SURFACE_RUNTIME_SCALE_MAX,
+  type SurfacePrototypeLodSpec,
+  type SurfacePrototypeSpec
+} from "./SurfaceRuntimeContract";
 
-/** One decoded cell range consumed by a compacted single-LOD renderer batch. */
+/** One decoded cell range consumed by a compacted prototype LOD batch. */
 export interface SurfaceStaticBatcherRange {
   /** Manifest range retaining the visibility and diagnostic cell boundary. */
   readonly range: SurfaceCellRange;
@@ -33,6 +37,7 @@ export interface SurfaceStaticBatcherRange {
 
 interface SurfaceStaticRangeState extends SurfaceStaticBatcherRange {
   visibleCount: number;
+  lodFade: number;
 }
 
 interface InternalIndirectDrawRenderer extends MeshRenderer {
@@ -42,20 +47,23 @@ interface InternalIndirectDrawRenderer extends MeshRenderer {
 const INDIRECT_ARGUMENT_WORD_STRIDE = 5;
 
 /**
- * Compacts visible single-LOD cell ranges into one instance stream per prototype.
+ * Compacts visible cell ranges into one instance stream for one prototype LOD.
  *
  * @internal
  */
 export class SurfaceStaticBatcher {
   /** Surface category shared by the compacted prototype. */
   readonly category: SurfaceCategory;
+  /** Prototype LOD rendered by this compacted stream. */
+  readonly lodIndex: number;
   /** Prototype-space radius used by cell culling. */
   readonly prototypeRadius: number;
-  /** LOD-0 prototype height used by projected-size selection. */
+  /** Prototype LOD height used by projected-size selection. */
   readonly lodHeight: number;
 
   private readonly _instanceBuffer: Buffer;
   private readonly _instanceOutput: Float32Array;
+  private readonly _packedMetadata: boolean;
   private readonly _indirectBuffer: Buffer;
   private readonly _indirectArguments: Uint32Array;
   private readonly _ranges: ReadonlyMap<number, SurfaceStaticRangeState>;
@@ -66,30 +74,35 @@ export class SurfaceStaticBatcher {
   private constructor(
     instanceBuffer: Buffer,
     instanceOutput: Float32Array,
+    packedMetadata: boolean,
     indirectBuffer: Buffer,
     indirectArguments: Uint32Array,
     ranges: ReadonlyMap<number, SurfaceStaticRangeState>,
     renderers: readonly MeshRenderer[],
     category: SurfaceCategory,
+    lodIndex: number,
     prototypeRadius: number,
     lodHeight: number
   ) {
     this._instanceBuffer = instanceBuffer;
     this._instanceOutput = instanceOutput;
+    this._packedMetadata = packedMetadata;
     this._indirectBuffer = indirectBuffer;
     this._indirectArguments = indirectArguments;
     this._ranges = ranges;
     this._renderers = renderers;
     this.category = category;
+    this.lodIndex = lodIndex;
     this.prototypeRadius = prototypeRadius;
     this.lodHeight = lodHeight;
   }
 
   /**
-   * Creates one renderer set and growable output stream for a single-LOD prototype.
+   * Creates one renderer set and growable output stream for a prototype LOD.
    * @param engine Engine owning the output buffers.
    * @param root Parent entity for the compacted renderer set.
-   * @param prototype Single-LOD prototype shared by every input range.
+   * @param prototype Prototype shared by every input range.
+   * @param lod Prototype LOD rendered by this compacted stream.
    * @param ranges Decoded source ranges retaining independent culling state.
    * @param models Loaded model resources keyed by absolute URL.
    * @param materials Shared surface materials keyed by manifest material id.
@@ -100,15 +113,14 @@ export class SurfaceStaticBatcher {
     engine: Engine,
     root: Entity,
     prototype: SurfacePrototypeSpec,
+    lod: SurfacePrototypeLodSpec,
     ranges: readonly SurfaceStaticBatcherRange[],
     models: ReadonlyMap<string, GLTFResource>,
     materials: ReadonlyMap<string, SurfaceMaterial>,
     manifestUrl: string
   ): SurfaceStaticBatcher {
-    if (prototype.lods.length !== 1 || prototype.lodCrossfade) {
-      throw new Error(`[SurfaceStaticBatcher] ${prototype.id} must be a single-LOD prototype without cross-fade`);
-    }
     const capacity = ranges.reduce((count, item) => count + item.range.count, 0);
+    const packedMetadata = prototype.lodCrossfade;
     const instanceBuffer = new Buffer(
       engine,
       BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
@@ -117,10 +129,8 @@ export class SurfaceStaticBatcher {
     );
     const states = new Map<number, SurfaceStaticRangeState>();
     for (const item of ranges) {
-      states.set(item.range.offset, { ...item, visibleCount: 0 });
+      states.set(item.range.offset, { ...item, visibleCount: 0, lodFade: 1 });
     }
-
-    const lod = prototype.lods[0];
     const renderSources = lod.renderers.flatMap((rendererSpec, rendererIndex) => {
       const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
       return findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName).map((sourceMesh, primitiveIndex) => ({
@@ -169,6 +179,7 @@ export class SurfaceStaticBatcher {
       renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
       SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
       SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
+      SurfaceMaterial.setRendererPackedMetadata(packedMetadata, renderer.shaderData);
       SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
       SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
       SurfaceMaterial.setRendererDebugInfo(prototype.category, [0, 0], renderer.shaderData);
@@ -196,11 +207,13 @@ export class SurfaceStaticBatcher {
     return new SurfaceStaticBatcher(
       instanceBuffer,
       new Float32Array(capacity * 16),
+      packedMetadata,
       indirectBuffer,
       indirectArguments,
       states,
       renderers,
       prototype.category,
+      lod.index,
       prototypeRadius,
       Math.max(lodHeight, 0.01)
     );
@@ -220,15 +233,20 @@ export class SurfaceStaticBatcher {
    * Updates one cell's retained density prefix.
    * @param rangeOffset Stable source offset identifying the manifest range.
    * @param visibleCount Number of sorted source records retained for rendering.
+   * @param lodFade Signed LOD cross-fade factor shared by the retained records.
    */
-  setRangeVisibleCount(rangeOffset: number, visibleCount: number): void {
+  setRangeVisibleCount(rangeOffset: number, visibleCount: number, lodFade: number = 1): void {
     const state = this._ranges.get(rangeOffset);
     if (!state) throw new Error(`[SurfaceStaticBatcher] unknown source range ${rangeOffset}`);
     if (!Number.isInteger(visibleCount) || visibleCount < 0 || visibleCount > state.range.count) {
       throw new RangeError(`[SurfaceStaticBatcher] invalid visible count ${visibleCount} for range ${rangeOffset}`);
     }
-    if (state.visibleCount === visibleCount) return;
+    if (!Number.isFinite(lodFade) || lodFade < -1 || lodFade > 1) {
+      throw new RangeError(`[SurfaceStaticBatcher] invalid LOD fade ${lodFade} for range ${rangeOffset}`);
+    }
+    if (state.visibleCount === visibleCount && state.lodFade === lodFade) return;
     state.visibleCount = visibleCount;
+    state.lodFade = lodFade;
     this._dirty = true;
   }
 
@@ -242,13 +260,23 @@ export class SurfaceStaticBatcher {
     for (const state of this._ranges.values()) {
       const count = state.visibleCount;
       if (count === 0) continue;
-      const instanceLength = count * 16;
-      this._instanceOutput.set(state.data.subarray(0, instanceLength), instanceOffset);
-      instanceOffset += instanceLength;
+      const targetFloatOffset = instanceOffset * 16;
+      const sourceFloatLength = count * 16;
+      this._instanceOutput.set(state.data.subarray(0, sourceFloatLength), targetFloatOffset);
+      if (this._packedMetadata) {
+        for (let sourceInstance = 0; sourceInstance < count; sourceInstance++) {
+          const sourceFloatOffset = sourceInstance * 16;
+          this._instanceOutput[targetFloatOffset + sourceFloatOffset + 3] = packInstanceMetadata(
+            state.data[sourceFloatOffset + 3],
+            state.lodFade
+          );
+        }
+      }
+      instanceOffset += count;
     }
-    this._instanceCount = instanceOffset / 16;
+    this._instanceCount = instanceOffset;
     if (instanceOffset > 0) {
-      this._instanceBuffer.setData(this._instanceOutput, 0, 0, instanceOffset);
+      this._instanceBuffer.setData(this._instanceOutput, 0, 0, instanceOffset * 16);
     }
     const indirectArguments = this._indirectArguments;
     for (let offset = 1; offset < indirectArguments.length; offset += INDIRECT_ARGUMENT_WORD_STRIDE) {
@@ -299,4 +327,11 @@ function boundsRadius(bounds: BoundingBox): number {
     Math.abs(bounds.max.y),
     Math.abs(bounds.max.z)
   );
+}
+
+function packInstanceMetadata(cellHue: number, lodFade: number): number {
+  // A 24-bit integer stays exact in f32, preserving the existing vec4 layout on 8-buffer mobile GPUs.
+  const encodedHue = Math.round(Math.min(Math.max(cellHue, 0), 1) * 255);
+  const encodedLodFade = Math.round((lodFade * 0.5 + 0.5) * 65535);
+  return encodedHue * 65536 + encodedLodFade;
 }

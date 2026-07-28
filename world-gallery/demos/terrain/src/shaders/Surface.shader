@@ -35,6 +35,9 @@ Shader "Terrain/Surface" {
         vec4 instanceColor;
         vec3 localPosition;
         float windDisplacementWeight;
+        #ifdef RENDERER_SURFACE_PACKED_META
+          float instanceLodFade;
+        #endif
         vec3 positionVS;
         vec4 positionCS;
         #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
@@ -415,8 +418,16 @@ Shader "Terrain/Surface" {
         output.worldTangent = surfaceTangent;
         #ifdef RENDERER_SURFACE_INSTANCED
           output.instanceColor = attributes.INSTANCE_COLOR;
+          #ifdef RENDERER_SURFACE_PACKED_META
+            float packedLodFade = mod(attributes.INSTANCE_POSITION_META.w, 65536.0);
+            output.instanceLodFade = packedLodFade * (1.0 / 32767.5) - 1.0;
+          #endif
           if (material_DebugView == 4) {
-            output.windDisplacementWeight = attributes.INSTANCE_POSITION_META.w;
+            #ifdef RENDERER_SURFACE_PACKED_META
+              output.windDisplacementWeight = floor(attributes.INSTANCE_POSITION_META.w * (1.0 / 65536.0)) * (1.0 / 255.0);
+            #else
+              output.windDisplacementWeight = attributes.INSTANCE_POSITION_META.w;
+            #endif
           } else {
             output.windDisplacementWeight = surfaceWindWeight;
           }
@@ -436,11 +447,17 @@ Shader "Terrain/Surface" {
       }
 
       void applyLodCrossfade() {
-        if (renderer_SurfaceLodFadeEnabled != 0) {
+        #ifdef RENDERER_SURFACE_PACKED_META
           float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
-          float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
-          if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
-        }
+          float signedThreshold = varyings.instanceLodFade >= 0.0 ? threshold : -threshold;
+          if (varyings.instanceLodFade - signedThreshold < 0.0) discard;
+        #else
+          if (renderer_SurfaceLodFadeEnabled != 0) {
+            float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
+            float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
+            if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
+          }
+        #endif
       }
 
       void surfaceBasis(Varyings varyings, out vec3 normal, out vec3 tangent, out vec3 bitangent) {
@@ -853,6 +870,9 @@ Shader "Terrain/Surface" {
 
       struct Varyings {
         vec2 uv;
+        #ifdef RENDERER_SURFACE_PACKED_META
+          float instanceLodFade;
+        #endif
       };
 
       #include "ShaderLibrary/Common/Common.glsl"
@@ -1086,6 +1106,10 @@ Shader "Terrain/Surface" {
         positionCS.z = max(positionCS.z, -1.0);
         gl_Position = positionCS;
         output.uv = attributes.TEXCOORD_0;
+        #ifdef RENDERER_SURFACE_PACKED_META
+          float packedLodFade = mod(attributes.INSTANCE_POSITION_META.w, 65536.0);
+          output.instanceLodFade = packedLodFade * (1.0 / 32767.5) - 1.0;
+        #endif
         return output;
       }
 
@@ -1099,11 +1123,17 @@ Shader "Terrain/Surface" {
       #endif
 
       void frag(Varyings varyings) {
-        if (renderer_SurfaceLodFadeEnabled != 0) {
+        #ifdef RENDERER_SURFACE_PACKED_META
           float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
-          float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
-          if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
-        }
+          float signedThreshold = varyings.instanceLodFade >= 0.0 ? threshold : -threshold;
+          if (varyings.instanceLodFade - signedThreshold < 0.0) discard;
+        #else
+          if (renderer_SurfaceLodFadeEnabled != 0) {
+            float threshold = texture2D(material_LodDither, gl_FragCoord.xy * (1.0 / 64.0)).r;
+            float signedThreshold = renderer_SurfaceLodFade >= 0.0 ? threshold : -threshold;
+            if (renderer_SurfaceLodFade - signedThreshold < 0.0) discard;
+          }
+        #endif
         if (texture2D(material_Albedo, varyings.uv).a < material_AlphaCutoff) discard;
         #ifdef ENGINE_NO_DEPTH_TEXTURE
           gl_FragColor = packDepth(gl_FragCoord.z);

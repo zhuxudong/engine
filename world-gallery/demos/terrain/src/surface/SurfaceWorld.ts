@@ -58,7 +58,7 @@ interface SurfaceBatch {
   readonly placementRadius: number;
   readonly prototypeRadius: number;
   readonly maxInstanceScale: number;
-  readonly staticBatcher: SurfaceStaticBatcher | null;
+  readonly staticBatchers: readonly SurfaceStaticBatcher[];
   activeLod: number;
   instanceCount: number;
   transition: SurfaceLodTransition | null;
@@ -78,8 +78,8 @@ interface SurfaceLodTransition {
 
 /**
  * Streams deterministic surface records into explicit instanced mesh batches.
- * Instances never allocate entities. WebGPU single-LOD impostor ranges retain cell culling state
- * while sharing prototype renderer batches; the WebGL reference path retains cell renderers.
+ * Instances never allocate entities. WebGPU finite ranges retain cell culling and LOD state while
+ * sharing prototype renderer batches; the WebGL reference path retains cell renderers.
  */
 export class SurfaceWorld {
   private readonly _manifest: SurfaceRuntimeManifest;
@@ -199,42 +199,48 @@ export class SurfaceWorld {
     const staticSources = new Map<string, SurfaceStaticBatcherRange[]>();
     if (engine.graphicsBackend === "webgpu") {
       for (const item of decodedRanges) {
-        const prototype = prototypes.get(item.range.prototype)!;
-        if (prototype.lods.length !== 1 || prototype.lodCrossfade) continue;
-        const sources = staticSources.get(prototype.id) ?? [];
+        const sources = staticSources.get(item.range.prototype) ?? [];
         sources.push({
           range: item.range,
           data: item.decoded.data,
           maxScale: item.decoded.maxScale
         });
-        staticSources.set(prototype.id, sources);
+        staticSources.set(item.range.prototype, sources);
       }
     }
-    const staticBatchersByPrototype = new Map<string, SurfaceStaticBatcher>();
+    const staticBatchersByPrototype = new Map<string, readonly SurfaceStaticBatcher[]>();
     for (const [prototypeId, sources] of staticSources) {
+      const prototype = prototypes.get(prototypeId)!;
+      const prototypeRoot = root.createChild(`${prototypeId}-compacted`);
       staticBatchersByPrototype.set(
         prototypeId,
-        SurfaceStaticBatcher.create(
-          engine,
-          root.createChild(`${prototypeId}-compacted`),
-          prototypes.get(prototypeId)!,
-          sources,
-          models,
-          materials,
-          manifestUrl
+        prototype.lods.map((lod) =>
+          SurfaceStaticBatcher.create(
+            engine,
+            prototypeRoot,
+            prototype,
+            lod,
+            sources,
+            models,
+            materials,
+            manifestUrl
+          )
         )
       );
     }
-    const staticBatchers = Array.from(staticBatchersByPrototype.values());
+    const staticBatchers = Array.from(staticBatchersByPrototype.values()).flat();
     const batches: SurfaceBatch[] = [];
 
     for (const { range, decoded: decodedInstances } of decodedRanges) {
       const prototype = prototypes.get(range.prototype)!;
-      const staticBatcher = staticBatchersByPrototype.get(range.prototype) ?? null;
+      const prototypeStaticBatchers = staticBatchersByPrototype.get(range.prototype) ?? [];
       const lods: SurfaceLodBatch[] = [];
-      let prototypeRadius = staticBatcher?.prototypeRadius ?? 0;
-      if (staticBatcher) {
-        lods.push({ index: prototype.lods[0].index, renderers: [], height: staticBatcher.lodHeight });
+      let prototypeRadius = 0;
+      if (prototypeStaticBatchers.length > 0) {
+        for (const batcher of prototypeStaticBatchers) {
+          lods.push({ index: batcher.lodIndex, renderers: [], height: batcher.lodHeight });
+          prototypeRadius = Math.max(prototypeRadius, batcher.prototypeRadius);
+        }
       } else {
         const instanceBuffer = new Buffer(
           engine,
@@ -310,7 +316,7 @@ export class SurfaceWorld {
         placementRadius: Math.hypot(bounds[3] - centre.x, bounds[4] - centre.y, bounds[5] - centre.z),
         prototypeRadius: scaledPrototypeRadius,
         maxInstanceScale: decodedInstances.maxScale,
-        staticBatcher,
+        staticBatchers: prototypeStaticBatchers,
         activeLod: 0,
         instanceCount: range.count,
         transition: null
@@ -617,12 +623,11 @@ export class SurfaceWorld {
         deltaTime,
         this._manifest.lodCrossfadeDuration
       );
-      batch.staticBatcher?.setRangeVisibleCount(
-        batch.range.offset,
+      const visibleInstanceCount =
         batch.activeLod >= 0 && (!this._camera.enableFrustumCulling || this._frustum.intersectsBox(batch.renderBounds))
           ? batch.instanceCount
-          : 0
-      );
+          : 0;
+      setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration);
     }
     for (const batcher of this._staticBatchers) batcher.flush();
     this._coverageStreamer?.update(this._tuning);
@@ -783,6 +788,29 @@ function updateBatchLod(
     batch.activeLod = batch.transition.to;
     batch.transition = null;
     setBatchLodState(batch, batch.activeLod, -1, 0, instanceCount);
+  }
+}
+
+function setStaticBatchLodState(batch: SurfaceBatch, visibleInstanceCount: number, duration: number): void {
+  const transition = batch.transition;
+  const remaining = transition && duration > 0 ? 1 - transition.elapsed / duration : 0;
+  for (const batcher of batch.staticBatchers) {
+    let instanceCount = 0;
+    let lodFade = 1;
+    if (visibleInstanceCount > 0) {
+      if (transition) {
+        if (batcher.lodIndex === transition.from) {
+          instanceCount = visibleInstanceCount;
+          lodFade = remaining;
+        } else if (batcher.lodIndex === transition.to) {
+          instanceCount = visibleInstanceCount;
+          lodFade = -remaining;
+        }
+      } else if (batcher.lodIndex === batch.activeLod) {
+        instanceCount = visibleInstanceCount;
+      }
+    }
+    batcher.setRangeVisibleCount(batch.range.offset, instanceCount, lodFade);
   }
 }
 
