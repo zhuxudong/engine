@@ -349,6 +349,39 @@ record 的第四个 float 中；24-bit 整数保持 f32 精确表示，不增加
 - 实例筛选、compaction、LOD 选择和 indirect argument 更新仍在 CPU。该检查点证明降低提交批次
   的收益，不代表 compute culling 或 GPU-generated indirect 已完成。
 
+### GPU compaction 第四检查点
+
+候选 `49d8f5b5e` 保留 CPU cell culling、density prefix 和 LOD 选择；ShaderLab compute pass
+读取静态实例与可见 range command，在 GPU 上生成 compacted instance stream、cross-fade metadata
+和所有 indirect instance count。WebGL2 路径不创建该 batcher，也不执行 compute。
+
+同机 A/B 使用候选父提交 `b5ced1e89` 作为 CPU compaction 基线。Chromium 147.0.7727.15
+（Playwright headless shell 1217）、Metal、1280×720 CSS、DPR 2、固定相机、关闭场景动画；
+每组交替运行三轮，预热 1.8 秒后采样 3 秒。
+
+| 场景 | compaction | 可见实例 | renderer batch | FPS 中位数 | p50 | p95 | GPU 诊断 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| settled | CPU | 169,199 | 76 | 48.20 | 21.6 ms | 27.9 ms | 0 |
+| settled | GPU | 169,199 | 76 | 48.25 | 21.7 ms | 27.0 ms | 0 |
+| LOD churn | CPU | 214,943 | 89 | 45.45 | 22.2 ms | 30.6 ms | 0 |
+| LOD churn | GPU | 214,943 | 89 | 44.52 | 22.9 ms | 30.9 ms | 0 |
+
+- settled FPS 变化 +0.10%，未超出波动；LOD distance scale 每 400 ms 在 0.5/1.5 间切换时
+  FPS -2.05%、p50 +3.15%、p95 +0.98%。当前数据不支持“GPU compaction 已提升总帧率”
+  的结论，持续更新场景还有可复现回退。
+- settled 的 1,208 个可见 range 全量变脏时，CPU instance upload 从 10,828,736 bytes
+  降到 109 个 batcher header 加 range command 的 21,072 bytes，减少 99.81%；indirect
+  instance count 不再由 CPU 上传。静态源实例另有一次性上传。
+- 按显式分配量计算，新增静态 source storage 及其 WebGPU shadow 各 18.08 MiB；移除旧的
+  per-LOD `_instanceOutput` 和 range data 引用后，host retained data 净减少约 17.77 MiB，
+  GPU buffer memory 增加约 18.08 MiB。该项是分配量分析，不是设备峰值内存实测。
+- 当前每个 `SurfaceStaticBatcher` 仍创建一个 compute pipeline，并独立 begin/end compute pass。
+  在把 fine culling 或每帧 LOD 迁入 GPU 前，应先共享 pipeline 并合并连续 dispatch，再复测
+  camera movement、host time 和 GPU timestamp。
+- `world-gallery/demos/terrain/e2e/gpu-compaction-benchmark.mjs` 固化上述 A/B 顺序和采样窗口；
+  `BASELINE_URL`、`CANDIDATE_URL` 可替换两台服务，`BENCHMARK_LOD_CHURN=1` 开启持续 LOD
+  变化，`BENCHMARK_BROWSER_EXECUTABLE` 固定浏览器二进制。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
