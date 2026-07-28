@@ -539,6 +539,66 @@ WebGPU compact/indirect 合批与本阶段 fine cull，不能把全部差值归�
 `maxComputeWorkgroupsPerDimension` 或任何 atlas binding 超过实际 device limit 时显式失败；
 本阶段不加入 paging、subgroup 或 prefix-sum fallback。
 
+### 投影树木与岩石的距离裁剪设计
+
+#### 本地源码事实
+
+下表只记录本地仓库在对应 commit 的实现，不据此推断未出现于源码的能力。
+
+| 引擎 | commit | 源码事实 | 对本阶段的约束 |
+| --- | --- | --- | --- |
+| Unity SRP Core | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `InstanceCuller.CullingJob` 接收 `BatchCullingViewType`，Camera 与 Light 分别执行 visibility/LOD；dither cross-fade 被量化后编码进 visible instance index | 逐 view 裁剪需要独立可见实例结果；cross-fade 属于实例流数据，不能在 compaction 时丢失 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `GSplatShadowRenderer` 为每盏方向光维护独立 visible-index、atomic count、compute 与 indirect args；`MeshInstance.setIndirect(camera, ...)` 支持按 camera 取 draw command | 未来的 shadow frustum/occlusion 不能复用主相机 count；renderer/RHI 需要 per-view indirect binding |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `IndirectStorageBufferAttribute` 提供间接参数；`WebGPUBackend` 在已有 render object 上执行 `drawIndexedIndirect` / `drawIndirect`；本次检索未发现通用实例 LOD/逐 light compaction | 可参考间接参数的 backend 封装，不能把它当作逐 view culling 参考 |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | WebGPU draw context 持有 indirect buffer，compute extension 支持 indirect dispatch；本次检索到的通用 LOD 仍由 `ObjectRenderer` 按 camera 在 CPU 选择 | 可参考 indirect/compute command 接入，不能据此宣称已有通用 GPU instance LOD |
+
+Grasslands finite surface 的资产构成是：岩石 3,129 个、真实树木 511 个、灌木 492 个；假树另有
+14,367 个。真实岩石、树木和灌木都有 2–3 级 LOD、启用 cross-fade 且投影。当前 authored
+camera 的 runtime 统计中，稀疏层主要已经落在 LOD1/2（约 3.2K / 915），因此单纯把现有
+range LOD 计算搬到 GPU 不代表会减少几何量。
+
+Galacean 当前 `MeshRenderer` 每个 submesh 只有一组 indirect buffer/offset，ShadowCaster 的
+四级 cascade 与 Forward 会消费同一组实例流。直接对这组流做主相机六平面 fine cull，会删除
+camera frustum 外但仍可能进入 shadow slice 的实例；该方案在补齐 per-view binding 前不成立。
+
+当前 Surface Forward 与 ShadowCaster vertex pass 都用 `camera_Position` 和同一
+`renderer_SurfaceFineCullDistance + instanceRadius` 判定 max distance。Shadow pass 只替换
+view/projection matrix，不改写 `camera_Position`，所以该距离谓词始终以主相机为中心；WebGPU
+compute 使用的也是同一个主相机位置、distance scale、prototype sphere 与实例 scale。与六平面
+裁剪不同，这个谓词可以在 Forward/Shadow 共用的实例流上提前执行，而不改变现有像素语义。
+
+#### 方案比较
+
+| 方案 | 收益 | 语义与代价 | 决策 |
+| --- | --- | --- | --- |
+| 关闭岩石/树木阴影或 LOD cross-fade 后复用第七阶段 | 改动小 | 改变资产语义与画面，只为 benchmark 绕过约束 | 不采用 |
+| 立即实现每 cascade/per-camera visible stream | 可继续做 frustum、occlusion、独立 shadow LOD | 需要扩展 RenderContext、renderer binding、compute 调度时机与 buffer 生命周期；不是一个可独立验收的小切片 | 后续 RHI 阶段 |
+| 保留 range LOD 与 shadow 语义，只把共同的 max-distance predicate 扩到全部 finite prototype | 可提前删除距离外的高顶点岩石/树木及其所有 raster pass 工作 | fine-cull command 必须携带 LOD fade；不能加入 camera frustum 条件 | 本阶段采用 |
+
+#### 第八阶段数据契约
+
+1. CPU 继续决定 category、density、range frustum、LOD 与 transition；同一 transition range 仍同时
+   写入 from/to 两个 LOD batch。
+2. fine-cull command 的低 16 bit 保存 batch index，高 16 bit 保存该 range 的量化 signed LOD
+   fade；batch metadata 标记该 prototype 是否使用 packed LOD metadata。batch 数超过 65,536
+   时显式失败，不能静默截断。
+3. compute survivor 写入 output 时，cross-fade prototype 按 direct-copy 路径相同的公式保留
+   8-bit cell hue 与 16-bit LOD fade；非 cross-fade prototype 保留源 metadata。
+4. only-boundary 策略不变：完全位于 max-distance 内的 range 直接复制，完全位于外部的 range
+   由 CPU 拒绝，只有跨边界 range 逐实例执行 compute。
+5. 相机移动只使当前含 boundary command 的 batch 失效；新进入或离开 boundary 的 batch 由
+   `setRangeVisibleCount` 状态变化触发，避免让全部 109 个 LOD batch 每帧重做 compaction。
+6. 本阶段不加入 camera/shadow frustum plane、occlusion、每实例 LOD 或新的资产阈值。
+
+验收必须同时覆盖：
+
+- settled 与 LOD transition 截图；WebGPU candidate 对修改前 WebGPU baseline 做像素比较。
+- ShadowCaster 保持启用，树木/岩石/灌木类别与 LOD 计数和 baseline 一致。
+- 至少一个 cross-fade boundary range 进入 fine-cull，生成的 output metadata 保留正负 fade。
+- WebGPU validation/page error 为 0；WebGL2 仍为默认后端且行为不变。
+- 修改前后 WebGPU 的 settled、LOD churn 与相机移动 A/B 分开报告；若帧率方向不稳定，只记录
+  workload/vertex 候选减少，不宣称整帧收益。
+
 验收分别报告：
 
 - ShaderLab 生成源码、`.wgslc`、原生 WebGPU validation，以及至少两个 workgroup 的完整
