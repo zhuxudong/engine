@@ -4,6 +4,7 @@ export type {
   IShaderReflection,
   IShaderReflectionCondition,
   IShaderResourceReflection,
+  IShaderStorageBufferReflection,
   IShaderStructReflection,
   IShaderUniformReflection,
   IShaderVertexInputReflection,

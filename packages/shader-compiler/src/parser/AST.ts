@@ -1348,7 +1348,15 @@ export namespace ASTNode {
       const type = children[0] as FullySpecifiedType;
       const ident = children[1] as BaseToken;
       this.type = type;
-      const sm = new VarSymbol(ident.lexeme, new SymbolType(type.type, type.typeSpecifier.lexeme), true, this);
+      const arraySpecifier =
+        type.typeSpecifier.arraySpecifier ??
+        (children.find((child) => child instanceof ArraySpecifier) as ArraySpecifier | undefined);
+      const sm = new VarSymbol(
+        ident.lexeme,
+        new SymbolType(type.type, type.typeSpecifier.lexeme, arraySpecifier),
+        true,
+        this
+      );
 
       sa.symbolTableStack.insert(sm);
 

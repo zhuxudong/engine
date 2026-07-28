@@ -43,6 +43,8 @@ export class Lexer extends BaseLexer {
     in: Keyword.IN,
     out: Keyword.OUT,
     inout: Keyword.INOUT,
+    buffer: Keyword.BUFFER,
+    readonly: Keyword.READONLY,
     sampler2D: Keyword.SAMPLER2D,
     samplerCube: Keyword.SAMPLER_CUBE,
     sampler3D: Keyword.SAMPLER3D,

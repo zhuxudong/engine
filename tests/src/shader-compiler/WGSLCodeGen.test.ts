@@ -45,6 +45,24 @@ Shader "WGSL/Basic" {
 }
 `;
 
+const computeShader = `
+Shader "WGSL/ComputeCopy" {
+  SubShader "Default" {
+    Pass "Copy" {
+      readonly buffer uvec4 inputValues[];
+      buffer uvec4 outputValues[];
+
+      void copyValues() {
+        uint index = gl_GlobalInvocationID.x;
+        outputValues[index] = inputValues[index];
+      }
+
+      ComputeShader = copyValues;
+    }
+  }
+}
+`;
+
 function generateWGSL(): { vertex: string; fragment: string } {
   return generateWGSLFromSource(basicShader);
 }
@@ -72,6 +90,31 @@ function generateWGSLFromSource(
   };
 }
 
+function generateWGSLCompute(
+  source: string = computeShader,
+  macros: ReadonlyMap<string, string> = new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "64"]])
+): { compute: string; reflection: IShaderReflection } {
+  const compiler = new ShaderCompiler();
+  const shader = compiler._parseShaderSource(source);
+  const pass = shader.subShaders[0].passes[0];
+  const program = compiler._parseShaderPass(
+    pass.contents,
+    pass.vertexEntry,
+    pass.fragmentEntry,
+    ShaderLanguage.WGSL,
+    "shaders://root/",
+    pass.computeEntry,
+    pass.computeWorkgroupSize
+  );
+
+  expect(program?.computeShaderInstructions).toBeDefined();
+  expect(program?.reflection).toBeDefined();
+  return {
+    compute: ShaderMacroProcessor.evaluate(program!.computeShaderInstructions!, new Map(macros)),
+    reflection: program!.reflection!
+  };
+}
+
 function formatCompilationErrors(stage: string, info: GPUCompilationInfo, source: string): string[] {
   const lines = source.split("\n");
   return info.messages
@@ -85,6 +128,124 @@ function formatCompilationErrors(stage: string, info: GPUCompilationInfo, source
 }
 
 describe("ShaderCompiler WGSL codegen", () => {
+  it("emits storage bindings and a compute wrapper from ShaderLab", () => {
+    const compiler = new ShaderCompiler();
+    const shader = compiler._parseShaderSource(computeShader);
+    const pass = shader.subShaders[0].passes[0];
+
+    expect(pass.computeEntry).toBe("copyValues");
+    expect(pass.computeWorkgroupSize).toBeUndefined();
+
+    const { compute, reflection } = generateWGSLCompute();
+    expect(compute).toContain("@compute @workgroup_size(64, 1, 1)");
+    expect(compute).toContain("@builtin(global_invocation_id)");
+    expect(compute).toContain("var<storage, read> inputValues: array<vec4<u32>>");
+    expect(compute).toContain("var<storage, read_write> outputValues: array<vec4<u32>>");
+    expect(compute).not.toContain("#");
+    expect(reflection.storageBuffers).toEqual([
+      {
+        name: "inputValues",
+        binding: 0,
+        access: "read",
+        elementType: "vec4<u32>",
+        arrayLength: undefined,
+        conditions: undefined
+      },
+      {
+        name: "outputValues",
+        binding: 1,
+        access: "read_write",
+        elementType: "vec4<u32>",
+        arrayLength: undefined,
+        conditions: undefined
+      }
+    ]);
+  });
+
+  it("passes native WebGPU compute shader-module validation when WebGPU is available", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const { compute } = generateWGSLCompute();
+    const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+    expect(errors.map((message) => message.message)).toEqual([]);
+  });
+
+  it("executes the generated compute artifact and copies storage-buffer data", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const { compute } = generateWGSLCompute();
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: device.createShaderModule({ code: compute }), entryPoint: "main" }
+    });
+    const values = Uint32Array.from({ length: 64 * 4 }, (_, index) => index * 3 + 7);
+    const input = device.createBuffer({
+      size: values.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    const output = device.createBuffer({
+      size: values.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+      size: values.byteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    device.queue.writeBuffer(input, 0, values);
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: input } },
+        { binding: 1, resource: { buffer: output } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(output, 0, readback, 0, values.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    expect(new Uint32Array(readback.getMappedRange().slice(0))).toEqual(values);
+    readback.unmap();
+  });
+
+  it("preserves compute instructions and reflection in a WGSL precompiled artifact", () => {
+    const compiler = new ShaderCompiler();
+    const artifact = compiler._precompile(computeShader, ShaderLanguage.WGSL, "shaders://root/");
+    const restored = JSON.parse(JSON.stringify(artifact)) as typeof artifact;
+    const pass = restored.subShaders[0].passes[0];
+
+    expect(pass.computeShaderInstructions?.length).toBeGreaterThan(0);
+    expect(pass.computeWorkgroupSize).toEqual(["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1", "1"]);
+    expect(pass.reflection?.storageBuffers?.map(({ name, access }) => ({ name, access }))).toEqual([
+      { name: "inputValues", access: "read" },
+      { name: "outputValues", access: "read_write" }
+    ]);
+
+    const compute = ShaderMacroProcessor.evaluate(
+      pass.computeShaderInstructions!,
+      new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "32"]])
+    );
+    expect(compute).toContain("@workgroup_size(32, 1, 1)");
+  });
+
   it("emits backend-neutral ShaderLab as WGSL with structured reflection", () => {
     const compiler = new ShaderCompiler();
     const shader = compiler._parseShaderSource(basicShader);

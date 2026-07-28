@@ -2,6 +2,7 @@ import type {
   IShaderInfo,
   IShaderReflection,
   IShaderResourceReflection,
+  IShaderStorageBufferReflection,
   IShaderStructReflection,
   IShaderUniformReflection,
   IShaderVertexInputReflection
@@ -17,7 +18,7 @@ import { ParserUtils } from "../ParserUtils";
 import { GLESVisitor } from "./GLESVisitor";
 import { VisitorContext } from "./VisitorContext";
 
-type Stage = "vertex" | "fragment";
+type Stage = "vertex" | "fragment" | "compute";
 
 type IOField = {
   name: string;
@@ -37,6 +38,11 @@ type Uniform = IShaderUniformReflection & {
   branch: BranchSignature;
 };
 
+type StorageBuffer = IShaderStorageBufferReflection & {
+  sourceIndex: number;
+  branch: BranchSignature;
+};
+
 /**
  * Direct ShaderLab AST to WGSL code generator.
  * @internal
@@ -46,6 +52,7 @@ export class WGSLVisitor extends GLESVisitor {
 
   private readonly _uniforms = new Map<string, Uniform>();
   private readonly _resources = new Map<string, Resource>();
+  private readonly _storageBuffers = new Map<string, StorageBuffer>();
   private readonly _structs = new Map<string, StructSymbol>();
   private readonly _vertexInputs = new Map<string, IOField>();
   private readonly _vertexOutputs = new Map<string, IOField>();
@@ -54,7 +61,8 @@ export class WGSLVisitor extends GLESVisitor {
   private readonly _functionSymbols = new Map<string, FnSymbol[]>();
   private readonly _builtins: Record<Stage, Set<string>> = {
     vertex: new Set(),
-    fragment: new Set()
+    fragment: new Set(),
+    compute: new Set()
   };
   private readonly _pointerParameterStack: Set<string>[] = [];
   private readonly _samplerParameterStack: Map<string, string>[] = [];
@@ -94,6 +102,36 @@ export class WGSLVisitor extends GLESVisitor {
     return {
       vertex: `${declarations}\n${generated.vertex}\n${this._createVertexWrapper()}`,
       fragment: `${declarations}\n${generated.fragment}\n${this._createFragmentWrapper()}`,
+      reflection
+    };
+  }
+
+  /**
+   * Generate a WebGPU compute shader from the same ShaderLab AST used by render passes.
+   * @param node - Parsed ShaderLab program.
+   * @param computeEntry - Compute entry-point name.
+   * @param workgroupSize - Compile-time workgroup dimensions.
+   * @returns Generated compute source and structured reflection.
+   * @internal
+   */
+  visitComputeProgram(
+    node: ASTNode.GLShaderProgram,
+    computeEntry: string,
+    workgroupSize: readonly [string, string, string]
+  ): IShaderInfo {
+    this._resetProgram();
+    VisitorContext.reset();
+    this._collectGlobalResources(node, "", "", computeEntry);
+
+    const generated = this._visitComputeProgramBody(node, computeEntry);
+    const reflection = this._createReflection();
+    const declarations = this._createResourceDeclarations();
+
+    return {
+      vertex: "",
+      fragment: "",
+      compute: `${declarations}\n${generated}\n${this._createComputeWrapper(workgroupSize)}`,
+      computeWorkgroupSize: workgroupSize,
       reflection
     };
   }
@@ -579,6 +617,7 @@ export class WGSLVisitor extends GLESVisitor {
   private _resetProgram(): void {
     this._uniforms.clear();
     this._resources.clear();
+    this._storageBuffers.clear();
     this._structs.clear();
     this._vertexInputs.clear();
     this._vertexOutputs.clear();
@@ -587,13 +626,19 @@ export class WGSLVisitor extends GLESVisitor {
     this._functionSymbols.clear();
     this._builtins.vertex.clear();
     this._builtins.fragment.clear();
+    this._builtins.compute.clear();
     this._pointerParameterStack.length = 0;
     this._samplerParameterStack.length = 0;
     this._swizzleTempIndex = 0;
     this._requiresNanHelper = false;
   }
 
-  private _collectGlobalResources(node: ASTNode.GLShaderProgram, vertexEntry: string, fragmentEntry: string): void {
+  private _collectGlobalResources(
+    node: ASTNode.GLShaderProgram,
+    vertexEntry: string,
+    fragmentEntry: string,
+    computeEntry = ""
+  ): void {
     const ioTypes = new Set<string>();
     node.shaderData.symbolTable.forEach((symbol) => {
       if (symbol instanceof FnSymbol) {
@@ -604,7 +649,10 @@ export class WGSLVisitor extends GLESVisitor {
         }
         this._functionSymbols.set(symbol.ident, symbols);
       }
-      if (symbol instanceof FnSymbol && (symbol.ident === vertexEntry || symbol.ident === fragmentEntry)) {
+      if (
+        symbol instanceof FnSymbol &&
+        (symbol.ident === vertexEntry || symbol.ident === fragmentEntry || symbol.ident === computeEntry)
+      ) {
         for (const param of symbol.astNode.protoType.parameterList ?? []) {
           if (param.typeInfo && typeof param.typeInfo.type === "string") {
             ioTypes.add(param.typeInfo.typeLexeme);
@@ -639,6 +687,24 @@ export class WGSLVisitor extends GLESVisitor {
     for (const symbol of globals) {
       const name = symbol.ident;
       const branch = (symbol.astNode.children[1] as BaseToken).branch;
+      const isStorageBuffer = this._containsQualifier(symbol.astNode.children, Keyword.BUFFER);
+      if (isStorageBuffer) {
+        if (!symbol.dataType.arraySpecifier) {
+          throw new Error(`ShaderLab storage buffer "${name}" must be declared as an array.`);
+        }
+        if (!this._storageBuffers.has(name)) {
+          this._storageBuffers.set(name, {
+            name,
+            binding: 0,
+            access: this._containsQualifier(symbol.astNode.children, Keyword.READONLY) ? "read" : "read_write",
+            elementType: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
+            arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
+            sourceIndex: symbol.astNode.location.start.index,
+            branch
+          });
+        }
+        continue;
+      }
       const sampler = this._samplerType(symbol.dataType.typeLexeme);
       if (sampler) {
         if (!this._resources.has(name)) {
@@ -667,12 +733,17 @@ export class WGSLVisitor extends GLESVisitor {
       }
     }
 
-    let binding = 1;
+    let binding = computeEntry && this._uniforms.size === 0 ? 0 : 1;
     for (const resource of Array.from(this._resources.values()).sort(
       (left, right) => left.sourceIndex - right.sourceIndex
     )) {
       resource.textureBinding = binding++;
       resource.samplerBinding = binding++;
+    }
+    for (const storageBuffer of Array.from(this._storageBuffers.values()).sort(
+      (left, right) => left.sourceIndex - right.sourceIndex
+    )) {
+      storageBuffer.binding = binding++;
     }
   }
 
@@ -728,7 +799,17 @@ export class WGSLVisitor extends GLESVisitor {
       ({ name, type, location }) => ({ name, type, location })
     );
     const fragmentOutputs = Array.from(this._fragmentOutputs.values()).map(({ location }) => location);
-    return { uniforms, structs, resources, vertexInputs, fragmentOutputs };
+    const storageBuffers = Array.from(this._storageBuffers.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map(({ sourceIndex: _sourceIndex, branch, ...storageBuffer }) => ({
+        ...storageBuffer,
+        conditions: this._reflectionConditions(branch)
+      }));
+    const reflection: IShaderReflection = { uniforms, structs, resources, vertexInputs, fragmentOutputs };
+    if (storageBuffers.length > 0) {
+      reflection.storageBuffers = storageBuffers;
+    }
+    return reflection;
   }
 
   private _createResourceDeclarations(): string {
@@ -779,10 +860,22 @@ export class WGSLVisitor extends GLESVisitor {
         )
       )
       .join("\n");
+    const storageBuffers = Array.from(this._storageBuffers.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map((storageBuffer) => {
+        const arrayType = storageBuffer.arrayLength
+          ? `array<${storageBuffer.elementType}, ${storageBuffer.arrayLength}>`
+          : `array<${storageBuffer.elementType}>`;
+        return this._guardBranch(
+          storageBuffer.branch,
+          `@group(0) @binding(${storageBuffer.binding}) var<storage, ${storageBuffer.access}> ${storageBuffer.name}: ${arrayType};`
+        );
+      })
+      .join("\n");
     const nanHelper = this._requiresNanHelper
       ? "fn gs_nan() -> f32 { var bits: u32 = 0x7fc00000u; return bitcast<f32>(bits); }"
       : "";
-    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${resources}\n${nanHelper}`;
+    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${resources}\n${storageBuffers}\n${nanHelper}`;
   }
 
   private _createVertexWrapper(): string {
@@ -923,6 +1016,34 @@ ${inputs.join("\n")}
   var output: GSFragmentOutput;
 ${outputs.join("\n")}
   return output;
+}`;
+  }
+
+  private _createComputeWrapper(workgroupSize: readonly [string, string, string]): string {
+    const builtins = this._builtins.compute;
+    const inputs: string[] = [];
+    const privateFields: string[] = [];
+    const assignments: string[] = [];
+    const addBuiltin = (sourceName: string, wgslName: string, type: string, privateName: string): void => {
+      if (!builtins.has(sourceName)) {
+        return;
+      }
+      inputs.push(`@builtin(${wgslName}) ${privateName.substring(3)}: ${type}`);
+      privateFields.push(`var<private> ${privateName}: ${type};`);
+      assignments.push(`  ${privateName} = ${privateName.substring(3)};`);
+    };
+
+    addBuiltin("gl_GlobalInvocationID", "global_invocation_id", "vec3<u32>", "_gsGlobalInvocationID");
+    addBuiltin("gl_LocalInvocationID", "local_invocation_id", "vec3<u32>", "_gsLocalInvocationID");
+    addBuiltin("gl_WorkGroupID", "workgroup_id", "vec3<u32>", "_gsWorkGroupID");
+    addBuiltin("gl_LocalInvocationIndex", "local_invocation_index", "u32", "_gsLocalInvocationIndex");
+    addBuiltin("gl_NumWorkGroups", "num_workgroups", "vec3<u32>", "_gsNumWorkGroups");
+
+    return `${privateFields.join("\n")}
+@compute @workgroup_size(${workgroupSize.join(", ")})
+fn main(${inputs.join(", ")}) {
+${assignments.join("\n")}
+  gs_computeEntry();
 }`;
   }
 
@@ -1312,14 +1433,21 @@ ${outputs.join("\n")}
   }
 
   private _arrayLength(array?: ASTNode.ArraySpecifier): string | undefined {
-    if (!array) {
+    if (!array || array.children.length < 3) {
       return undefined;
     }
     return this._code(array.children[1]);
   }
 
   private _stage(): Stage {
-    return VisitorContext.context.stage === EShaderStage.VERTEX ? "vertex" : "fragment";
+    switch (VisitorContext.context.stage) {
+      case EShaderStage.VERTEX:
+        return "vertex";
+      case EShaderStage.FRAGMENT:
+        return "fragment";
+      default:
+        return "compute";
+    }
   }
 
   private _builtinName(name: string, stage: Stage): string | undefined {
@@ -1329,6 +1457,17 @@ ${outputs.join("\n")}
           gl_Position: "_gsPosition",
           gl_VertexID: "_gsVertexIndex",
           gl_InstanceID: "_gsInstanceIndex"
+        } as Record<string, string>
+      )[name];
+    }
+    if (stage === "compute") {
+      return (
+        {
+          gl_GlobalInvocationID: "_gsGlobalInvocationID",
+          gl_LocalInvocationID: "_gsLocalInvocationID",
+          gl_WorkGroupID: "_gsWorkGroupID",
+          gl_LocalInvocationIndex: "_gsLocalInvocationIndex",
+          gl_NumWorkGroups: "_gsNumWorkGroups"
         } as Record<string, string>
       )[name];
     }

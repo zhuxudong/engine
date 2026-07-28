@@ -488,10 +488,17 @@ export class ShaderSourceParser {
       switch (token.type) {
         case Keyword.GSVertexShader:
         case Keyword.GSFragmentShader:
+        case Keyword.GSComputeShader:
           this._addPendingContents(start, token.lexeme.length, passSource.pendingContents);
           lexer.scanLexeme("=");
           const entry = lexer.scanToken();
-          if (passSource[token.lexeme]) {
+          const key =
+            token.type === Keyword.GSVertexShader
+              ? "vertexEntry"
+              : token.type === Keyword.GSFragmentShader
+                ? "fragmentEntry"
+                : "computeEntry";
+          if (passSource[key]) {
             const error = ShaderCompilerUtils.createGSError(
               "Reassign main entry",
               GSErrorName.CompilationError,
@@ -503,9 +510,16 @@ export class ShaderSourceParser {
             throw error;
             // #endif
           }
-          const key = token.type === Keyword.GSVertexShader ? "vertexEntry" : "fragmentEntry";
           passSource[key] = entry.lexeme;
           lexer.scanLexeme(";");
+          start = lexer.getShaderPosition(0);
+          break;
+        case Keyword.GSWorkgroupSize:
+          this._addPendingContents(start, token.lexeme.length, passSource.pendingContents);
+          lexer.scanLexeme("=");
+          const workgroupSize = lexer.scanToken().lexeme;
+          lexer.scanLexeme(";");
+          passSource.computeWorkgroupSize = [workgroupSize, "1", "1"];
           start = lexer.getShaderPosition(0);
           break;
         case Keyword.LeftBrace:

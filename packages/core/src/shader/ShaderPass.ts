@@ -46,6 +46,10 @@ export class ShaderPass extends ShaderPart {
   /** @internal */
   _fragmentShaderInstructions: ShaderInstruction[];
   /** @internal */
+  _computeShaderInstructions?: ShaderInstruction[];
+  /** @internal */
+  _computeWorkgroupSize?: readonly [string, string, string];
+  /** @internal */
   _shaderTargets: Partial<Record<ShaderLanguage, IShaderProgramSource>> = {};
 
   /** @internal */
@@ -71,6 +75,8 @@ export class ShaderPass extends ShaderPart {
    * @param platformTarget - Target shader language
    * @param tags - Tags
    * @param reflection - Backend resource and stage-input reflection.
+   * @param computeShaderInstructions - Precompiled compute instruction array.
+   * @param computeWorkgroupSize - Compile-time compute workgroup dimensions.
    */
   constructor(
     name: string,
@@ -78,7 +84,9 @@ export class ShaderPass extends ShaderPart {
     fragmentShaderInstructions: ShaderInstruction[],
     platformTarget: ShaderLanguage,
     tags?: Record<string, number | string | boolean>,
-    reflection?: IShaderReflection
+    reflection?: IShaderReflection,
+    computeShaderInstructions?: ShaderInstruction[],
+    computeWorkgroupSize?: readonly [string, string, string]
   ) {
     super();
     this._shaderPassId = ShaderPass._shaderPassCounter++;
@@ -86,13 +94,17 @@ export class ShaderPass extends ShaderPart {
     this._name = name;
     this._vertexShaderInstructions = vertexShaderInstructions;
     this._fragmentShaderInstructions = fragmentShaderInstructions;
+    this._computeShaderInstructions = computeShaderInstructions;
+    this._computeWorkgroupSize = computeWorkgroupSize;
     this._platformTarget = platformTarget;
     this._shaderTargets[platformTarget] = {
       vertex: "",
       fragment: "",
       vertexShaderInstructions,
       fragmentShaderInstructions,
-      reflection
+      reflection,
+      computeShaderInstructions,
+      computeWorkgroupSize
     };
 
     const mergedTags = { pipelineStage: PipelineStage.Forward, ...tags };

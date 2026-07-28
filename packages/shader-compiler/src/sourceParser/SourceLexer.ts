@@ -22,6 +22,8 @@ export default class SourceLexer extends BaseLexer {
     Tags: Keyword.GSTags,
     VertexShader: Keyword.GSVertexShader,
     FragmentShader: Keyword.GSFragmentShader,
+    ComputeShader: Keyword.GSComputeShader,
+    WorkgroupSize: Keyword.GSWorkgroupSize,
     SubShader: Keyword.GSSubShader,
     Pass: Keyword.GSPass,
     BlendFactor: Keyword.GSBlendFactor,

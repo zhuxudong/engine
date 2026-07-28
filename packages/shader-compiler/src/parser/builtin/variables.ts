@@ -37,6 +37,12 @@ BuiltinVariable.createVariable("gl_PointCoord", Keyword.VEC2, EShaderStage.FRAGM
 BuiltinVariable.createVariable("gl_FragColor", Keyword.VEC4, EShaderStage.FRAGMENT);
 BuiltinVariable.createVariable("gl_FragData", Keyword.VEC4_ARRAY, EShaderStage.FRAGMENT);
 
+BuiltinVariable.createVariable("gl_GlobalInvocationID", Keyword.UVEC3, EShaderStage.COMPUTE);
+BuiltinVariable.createVariable("gl_LocalInvocationID", Keyword.UVEC3, EShaderStage.COMPUTE);
+BuiltinVariable.createVariable("gl_WorkGroupID", Keyword.UVEC3, EShaderStage.COMPUTE);
+BuiltinVariable.createVariable("gl_LocalInvocationIndex", Keyword.UINT, EShaderStage.COMPUTE);
+BuiltinVariable.createVariable("gl_NumWorkGroups", Keyword.UVEC3, EShaderStage.COMPUTE);
+
 BuiltinVariable.createVariable("gl_MaxVertexAttribs", Keyword.INT);
 BuiltinVariable.createVariable("gl_MaxVertexUniformVectors", Keyword.INT);
 BuiltinVariable.createVariable("gl_MaxVertexOutputVectors", Keyword.INT);

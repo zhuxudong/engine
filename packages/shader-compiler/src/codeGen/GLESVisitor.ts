@@ -52,6 +52,55 @@ export abstract class GLESVisitor extends CodeGenVisitor {
     };
   }
 
+  /**
+   * Generate the shared function body for a compute entry.
+   * @param node - Parsed ShaderLab program.
+   * @param computeEntry - Compute entry-point name.
+   * @returns Backend-stage source without its platform wrapper.
+   * @internal
+   */
+  protected _visitComputeProgramBody(node: ASTNode.GLShaderProgram, computeEntry: string): string {
+    // #if _VERBOSE
+    this.errors.length = 0;
+    // #endif
+    VisitorContext.reset();
+    this.reset();
+
+    const shaderData = node.shaderData;
+    const context = VisitorContext.context;
+    context._passSymbolTable = shaderData.symbolTable;
+    context.stage = EShaderStage.COMPUTE;
+    context.stageEntry = computeEntry;
+
+    const lookupSymbol = GLESVisitor._lookupSymbol;
+    lookupSymbol.set(computeEntry, ESymbolType.FN);
+    const fnSymbols = <FnSymbol[]>shaderData.symbolTable.getSymbols(lookupSymbol, true, []);
+    if (!fnSymbols.length) {
+      throw `no entry function found: ${computeEntry}`;
+    }
+    for (const fnSymbol of fnSymbols) {
+      const prototype = fnSymbol.astNode.protoType;
+      if (prototype.returnType.type !== Keyword.VOID || prototype.parameterList?.length) {
+        throw `compute entry "${computeEntry}" must return void and declare no parameters`;
+      }
+    }
+
+    context.referenceGlobal(computeEntry, ESymbolType.FN);
+    const globalCodeArray = this._globalCodeArray;
+    this._getGlobalSymbol(globalCodeArray);
+    this._getGlobalMacroDeclarations(shaderData.getOuterGlobalMacroDeclarations(), globalCodeArray);
+    this.getOtherGlobal(shaderData, globalCodeArray);
+
+    const source = globalCodeArray
+      .sort((left, right) => left.index - right.index)
+      .map((item) => item.text)
+      .join("\n");
+
+    context.reset();
+    this.reset();
+    return source;
+  }
+
   /** Populate `_structVarMap` for varying/attribute/mrt-typed variables across both stages before codegen. */
   private _collectAllStructVars(vertexEntry: string, fragmentEntry: string): void {
     const context = VisitorContext.context;
@@ -375,7 +424,7 @@ export abstract class GLESVisitor extends CodeGenVisitor {
       const child = macro.children[0];
 
       if (child instanceof ASTNode.GlobalMacroIfStatement) {
-        let result: ICodeSegment[] = [];
+        const result: ICodeSegment[] = [];
         result.push(
           ...macro.macroExpressions.map((item) => ({
             text: item instanceof BaseToken ? item.lexeme : item.codeGen(this),

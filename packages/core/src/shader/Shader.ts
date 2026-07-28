@@ -109,7 +109,9 @@ export class Shader implements IReferable {
             passSource.vertexEntry,
             passSource.fragmentEntry,
             shaderPassesOrSubShadersOrPlatformTarget,
-            basePathForIncludeKey
+            basePathForIncludeKey,
+            passSource.computeEntry,
+            passSource.computeWorkgroupSize
           );
 
           if (!shaderPassSource) {
@@ -122,7 +124,9 @@ export class Shader implements IReferable {
             shaderPassSource.fragmentShaderInstructions,
             shaderPassesOrSubShadersOrPlatformTarget,
             passSource.tags,
-            shaderPassSource.reflection
+            shaderPassSource.reflection,
+            shaderPassSource.computeShaderInstructions,
+            shaderPassSource.computeWorkgroupSize
           );
 
           Shader._applyRenderStates(
@@ -192,7 +196,10 @@ export class Shader implements IReferable {
           passData.vertexShaderInstructions,
           passData.fragmentShaderInstructions,
           data.platformTarget as ShaderLanguage,
-          passData.tags
+          passData.tags,
+          passData.reflection,
+          passData.computeShaderInstructions,
+          passData.computeWorkgroupSize
         );
 
         Shader._applyRenderStates(
