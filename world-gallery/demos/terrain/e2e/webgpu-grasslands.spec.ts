@@ -47,7 +47,7 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   expect(surface.categoryCounts.tree).toBeGreaterThan(0);
   expect(surface.categoryCounts.rock).toBeGreaterThan(0);
   expect(surface.visibleRendererBatches).toBeLessThan(webglSurface.visibleRendererBatches);
-  expect(surface.indirectRendererBatches).toBeGreaterThan(0);
+  expect(surface.indirectRendererBatches).toBeGreaterThan(1);
   expect(webglSurface.indirectRendererBatches).toBe(0);
 
   await page.waitForTimeout(1_000);

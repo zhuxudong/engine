@@ -200,7 +200,7 @@ export class SurfaceWorld {
     if (engine.graphicsBackend === "webgpu") {
       for (const item of decodedRanges) {
         const prototype = prototypes.get(item.range.prototype)!;
-        if (!prototype.impostor || prototype.lods.length !== 1 || prototype.lodCrossfade) continue;
+        if (prototype.lods.length !== 1 || prototype.lodCrossfade) continue;
         const sources = staticSources.get(prototype.id) ?? [];
         sources.push({
           range: item.range,
