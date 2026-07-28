@@ -2,8 +2,64 @@ import { expect, test } from "@playwright/test";
 
 const webgpuEnabled = process.env.TERRAIN_E2E_WEBGPU === "1";
 
+interface WebGPUComputeCounts {
+  createComputePipeline: number;
+  beginComputePass: number;
+  dispatchWorkgroups: number;
+}
+
+interface ComputePassPrototype {
+  dispatchWorkgroups(workgroupCountX: number, workgroupCountY?: number, workgroupCountZ?: number): void;
+}
+
+interface ComputeDevicePrototype {
+  createComputePipeline(descriptor: unknown): unknown;
+}
+
+interface ComputeCommandEncoderPrototype {
+  beginComputePass(descriptor?: unknown): ComputePassPrototype;
+}
+
+declare global {
+  interface Window {
+    __webgpuComputeCounts: WebGPUComputeCounts;
+  }
+}
+
 test("Grasslands reloads into WebGPU and renders terrain surface categories", async ({ page }, testInfo) => {
   test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to launch Chromium with WebGPU.");
+
+  await page.addInitScript(() => {
+    const counts: WebGPUComputeCounts = {
+      createComputePipeline: 0,
+      beginComputePass: 0,
+      dispatchWorkgroups: 0
+    };
+    window.__webgpuComputeCounts = counts;
+    const constructors = globalThis as unknown as {
+      GPUDevice?: { prototype: ComputeDevicePrototype };
+      GPUCommandEncoder?: { prototype: ComputeCommandEncoderPrototype };
+    };
+    if (!constructors.GPUDevice || !constructors.GPUCommandEncoder) return;
+    const devicePrototype = constructors.GPUDevice.prototype;
+    const createComputePipeline = devicePrototype.createComputePipeline;
+    devicePrototype.createComputePipeline = function (descriptor) {
+      counts.createComputePipeline++;
+      return createComputePipeline.call(this, descriptor);
+    };
+    const commandEncoderPrototype = constructors.GPUCommandEncoder.prototype;
+    const beginComputePass = commandEncoderPrototype.beginComputePass;
+    commandEncoderPrototype.beginComputePass = function (descriptor) {
+      counts.beginComputePass++;
+      const pass = beginComputePass.call(this, descriptor);
+      const dispatchWorkgroups = pass.dispatchWorkgroups.bind(pass);
+      pass.dispatchWorkgroups = (workgroupCountX, workgroupCountY, workgroupCountZ) => {
+        counts.dispatchWorkgroups++;
+        dispatchWorkgroups(workgroupCountX, workgroupCountY, workgroupCountZ);
+      };
+      return pass;
+    };
+  });
 
   const diagnostics: string[] = [];
   page.on("console", (message) => {
@@ -68,6 +124,16 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
         .some((count) => count > 0)
     )
   ).toBe(true);
+
+  const computeCounts = await page.evaluate(() => window.__webgpuComputeCounts);
+  await testInfo.attach("webgpu-compute-counts.json", {
+    body: Buffer.from(JSON.stringify(computeCounts, null, 2)),
+    contentType: "application/json"
+  });
+  expect(computeCounts.createComputePipeline).toBe(1);
+  expect(computeCounts.dispatchWorkgroups).toBeGreaterThan(0);
+  expect(computeCounts.beginComputePass).toBeLessThanOrEqual(computeCounts.dispatchWorkgroups);
+  expect(computeCounts.dispatchWorkgroups).toBeLessThan(surface.rendererBatches);
 
   await page.waitForTimeout(1_000);
   const screenshot = await page.locator("#canvas").screenshot();
