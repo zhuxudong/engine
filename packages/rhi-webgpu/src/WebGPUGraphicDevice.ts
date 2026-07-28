@@ -116,6 +116,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     customStates?: Record<number, any>;
   };
   private readonly _mipmapGenerator: WebGPUMipmapGenerator;
+  private readonly _defaultVertexBuffer: GPUBuffer;
   private readonly _usedPrograms = new Set<WebGPUShaderProgram>();
   private readonly _constantBuffers = new Map<number, WebGPUBuffer>();
   private _retiredBuffers: GPUBuffer[] = [];
@@ -145,6 +146,16 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this.canvasFormat = format;
     this.capability = new WebGPUCapability(device);
     this._mipmapGenerator = new WebGPUMipmapGenerator(device);
+    const defaultVertexData = new ArrayBuffer(48);
+    new Float32Array(defaultVertexData, 0, 4)[3] = 1;
+    new Int32Array(defaultVertexData, 16, 4)[3] = 1;
+    new Uint32Array(defaultVertexData, 32, 4)[3] = 1;
+    this._defaultVertexBuffer = device.createBuffer({
+      label: "Galacean default vertex attributes",
+      size: defaultVertexData.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(this._defaultVertexBuffer, 0, defaultVertexData);
     this._options = {
       _forceFlush: true,
       depth: options.depth ?? true,
@@ -441,6 +452,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._destroyed = true;
       this._endRenderPass();
       this._mainDepthTexture?.destroy();
+      this._defaultVertexBuffer.destroy();
       for (const buffer of this._retiredBuffers) {
         buffer.destroy();
       }
@@ -453,6 +465,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   _setRenderTarget(target: WebGPURenderTarget): void {
     this._endRenderPass();
     this._currentRenderTarget = target;
+  }
+
+  /** @internal */
+  _getDefaultVertexBuffer(): GPUBuffer {
+    return this._defaultVertexBuffer;
   }
 
   /** @internal */

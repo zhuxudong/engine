@@ -28,9 +28,11 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   /** @internal */
   _getVertexState(inputs: readonly IShaderVertexInputReflection[]): {
     buffers: Array<GPUVertexBufferLayout | null>;
+    defaultBufferSlot?: number;
     key: string;
   } {
     const locations = new Map(inputs.map((input) => [input.name, input.location]));
+    const boundLocations = new Set<number>();
     const primitive = this.primitive;
     const bufferCount = primitive.vertexBufferBindings.length;
     const buffers = new Array<GPUVertexBufferLayout | null>(bufferCount).fill(null);
@@ -65,6 +67,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
           offset: element.offset,
           format: WebGPUPrimitive._vertexFormat(element.format)
         });
+        boundLocations.add(shaderLocation);
       }
 
       if (attributes.length > 0) {
@@ -77,7 +80,27 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       }
     }
 
-    return { buffers, key: JSON.stringify(buffers) };
+    const missingInputs = inputs.filter((input) => !boundLocations.has(input.location));
+    let defaultBufferSlot: number | undefined;
+    if (missingInputs.length > 0) {
+      defaultBufferSlot = buffers.findIndex((buffer) => buffer === null);
+      if (defaultBufferSlot < 0) {
+        defaultBufferSlot = buffers.length;
+        buffers.push(null);
+      }
+      if (defaultBufferSlot >= this._device.device.limits.maxVertexBuffers) {
+        throw new Error(
+          `WebGPU primitive needs a fallback vertex buffer at slot ${defaultBufferSlot}, exceeding maxVertexBuffers ${this._device.device.limits.maxVertexBuffers}.`
+        );
+      }
+      buffers[defaultBufferSlot] = {
+        arrayStride: 0,
+        stepMode: "vertex",
+        attributes: missingInputs.map(WebGPUPrimitive._defaultVertexAttribute)
+      };
+    }
+
+    return { buffers, defaultBufferSlot, key: JSON.stringify(buffers) };
   }
 
   /** @internal */
@@ -95,13 +118,16 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   /** @internal */
-  _encodeDraw(pass: GPURenderPassEncoder, subPrimitive: SubPrimitive): void {
+  _encodeDraw(pass: GPURenderPassEncoder, subPrimitive: SubPrimitive, defaultBufferSlot?: number): void {
     const primitive = this.primitive;
     for (let index = 0; index < primitive.vertexBufferBindings.length; index++) {
       const binding = primitive.vertexBufferBindings[index];
       if (binding) {
         pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer);
       }
+    }
+    if (defaultBufferSlot !== undefined) {
+      pass.setVertexBuffer(defaultBufferSlot, this._device._getDefaultVertexBuffer());
     }
 
     const instanceCount = primitive.instanceCount || 1;
@@ -179,6 +205,38 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
         return "snorm16x4";
       case VertexElementFormat.NormalizedUShort4:
         return "unorm16x4";
+    }
+  }
+
+  private static _defaultVertexAttribute(input: IShaderVertexInputReflection): GPUVertexAttribute {
+    const { location: shaderLocation, type } = input;
+    switch (type) {
+      case "f32":
+        return { shaderLocation, offset: 0, format: "float32" };
+      case "vec2<f32>":
+        return { shaderLocation, offset: 0, format: "float32x2" };
+      case "vec3<f32>":
+        return { shaderLocation, offset: 0, format: "float32x3" };
+      case "vec4<f32>":
+        return { shaderLocation, offset: 0, format: "float32x4" };
+      case "i32":
+        return { shaderLocation, offset: 16, format: "sint32" };
+      case "vec2<i32>":
+        return { shaderLocation, offset: 16, format: "sint32x2" };
+      case "vec3<i32>":
+        return { shaderLocation, offset: 16, format: "sint32x3" };
+      case "vec4<i32>":
+        return { shaderLocation, offset: 16, format: "sint32x4" };
+      case "u32":
+        return { shaderLocation, offset: 32, format: "uint32" };
+      case "vec2<u32>":
+        return { shaderLocation, offset: 32, format: "uint32x2" };
+      case "vec3<u32>":
+        return { shaderLocation, offset: 32, format: "uint32x3" };
+      case "vec4<u32>":
+        return { shaderLocation, offset: 32, format: "uint32x4" };
+      default:
+        throw new Error(`WebGPU cannot synthesize missing vertex attribute "${input.name}" of type "${type}".`);
     }
   }
 }

@@ -93,8 +93,8 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       label: `ShaderProgram ${this.id} fragment`,
       code: fragmentSource
     });
-    this._reportCompilationErrors("vertex", this._vertexModule);
-    this._reportCompilationErrors("fragment", this._fragmentModule);
+    this._reportCompilationErrors("vertex", this._vertexModule, vertexSource);
+    this._reportCompilationErrors("fragment", this._fragmentModule, fragmentSource);
 
     const entries: GPUBindGroupLayoutEntry[] = [];
     if (this._uniformLayout.byteLength > 0) {
@@ -127,7 +127,11 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         binding: resource.samplerBinding,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         sampler: {
-          type: resource.comparison ? "comparison" : "filtering"
+          type: resource.comparison
+            ? "comparison"
+            : resource.textureType.includes("depth")
+              ? "non-filtering"
+              : "filtering"
         }
       });
     }
@@ -204,7 +208,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       pass.setBindGroup(1, instanceBinding.bindGroup, [instanceBinding.dynamicOffset]);
     }
     graphicDevice._applyDynamicState(pass);
-    primitive._encodeDraw(pass, subPrimitive);
+    primitive._encodeDraw(pass, subPrimitive, vertexState.defaultBufferSlot);
     graphicDevice._useProgram(this);
   }
 
@@ -566,13 +570,17 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     });
   }
 
-  private _reportCompilationErrors(stage: string, module: GPUShaderModule): void {
+  private _reportCompilationErrors(stage: string, module: GPUShaderModule, source: string): void {
     module.getCompilationInfo().then((info) => {
       const errors = info.messages.filter((message) => message.type === "error");
       if (errors.length > 0 && !this._destroyed) {
+        const lines = source.split("\n");
         console.error(
           `WebGPU ${stage} shader ${this.id} failed:\n${errors
-            .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`)
+            .map((message) => {
+              const sourceLine = lines[message.lineNum - 1]?.trim();
+              return `${message.lineNum}:${message.linePos} ${message.message}${sourceLine ? `\n> ${sourceLine}` : ""}`;
+            })
             .join("\n")}`
         );
       }

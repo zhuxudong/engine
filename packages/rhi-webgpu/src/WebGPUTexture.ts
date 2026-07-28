@@ -91,14 +91,16 @@ export abstract class WebGPUTexture implements IPlatformTexture {
   /** @internal */
   get sampler(): GPUSampler {
     if (!this._sampler) {
-      const point = this._filterMode === TextureFilterMode.Point;
+      const point =
+        this._filterMode === TextureFilterMode.Point ||
+        (this._format.startsWith("depth") && !this._useDepthCompareMode);
       this._sampler = this._device.device.createSampler({
         addressModeU: WebGPUTexture._getAddressMode(this._wrapModeU),
         addressModeV: WebGPUTexture._getAddressMode(this._wrapModeV),
         magFilter: point ? "nearest" : "linear",
         minFilter: point ? "nearest" : "linear",
-        mipmapFilter: this._filterMode === TextureFilterMode.Trilinear ? "linear" : "nearest",
-        maxAnisotropy: this._anisoLevel,
+        mipmapFilter: point ? "nearest" : this._filterMode === TextureFilterMode.Trilinear ? "linear" : "nearest",
+        maxAnisotropy: point ? 1 : this._anisoLevel,
         compare: this._useDepthCompareMode ? WebGPUTexture._getCompareFunction(this._depthCompareFunction) : undefined
       });
     }
