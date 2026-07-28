@@ -6,6 +6,8 @@ interface WebGPUComputeCounts {
   createComputePipeline: number;
   beginComputePass: number;
   dispatchWorkgroups: number;
+  dispatchedWorkgroups: number;
+  maxWorkgroupCountX: number;
 }
 
 interface ComputePassPrototype {
@@ -33,7 +35,9 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     const counts: WebGPUComputeCounts = {
       createComputePipeline: 0,
       beginComputePass: 0,
-      dispatchWorkgroups: 0
+      dispatchWorkgroups: 0,
+      dispatchedWorkgroups: 0,
+      maxWorkgroupCountX: 0
     };
     window.__webgpuComputeCounts = counts;
     const constructors = globalThis as unknown as {
@@ -55,6 +59,8 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
       const dispatchWorkgroups = pass.dispatchWorkgroups.bind(pass);
       pass.dispatchWorkgroups = (workgroupCountX, workgroupCountY, workgroupCountZ) => {
         counts.dispatchWorkgroups++;
+        counts.dispatchedWorkgroups += workgroupCountX * (workgroupCountY ?? 1) * (workgroupCountZ ?? 1);
+        counts.maxWorkgroupCountX = Math.max(counts.maxWorkgroupCountX, workgroupCountX);
         dispatchWorkgroups(workgroupCountX, workgroupCountY, workgroupCountZ);
       };
       return pass;
@@ -130,8 +136,9 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     body: Buffer.from(JSON.stringify(computeCounts, null, 2)),
     contentType: "application/json"
   });
-  expect(computeCounts.createComputePipeline).toBe(1);
+  expect(computeCounts.createComputePipeline).toBe(4);
   expect(computeCounts.dispatchWorkgroups).toBeGreaterThan(0);
+  expect(computeCounts.dispatchedWorkgroups).toBeGreaterThan(computeCounts.dispatchWorkgroups);
   expect(computeCounts.beginComputePass).toBeLessThanOrEqual(computeCounts.dispatchWorkgroups);
   expect(computeCounts.dispatchWorkgroups).toBeLessThan(surface.rendererBatches);
 

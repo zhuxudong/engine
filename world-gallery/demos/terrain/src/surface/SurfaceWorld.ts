@@ -30,7 +30,12 @@ import {
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SURFACE_RUNTIME_SCALE_MAX, SURFACE_RUNTIME_SCALE_MIN } from "./SurfaceRuntimeContract";
-import { SurfaceStaticBatcher, SurfaceStaticBatchGroup, type SurfaceStaticBatcherRange } from "./SurfaceStaticBatcher";
+import {
+  isSurfaceFineCullingEligible,
+  SurfaceStaticBatcher,
+  SurfaceStaticBatchGroup,
+  type SurfaceStaticBatcherRange
+} from "./SurfaceStaticBatcher";
 import type {
   SurfacePrototypeRendererSpec,
   SurfacePrototypeSpec,
@@ -57,6 +62,7 @@ interface SurfaceBatch {
   readonly renderBounds: BoundingBox;
   readonly placementRadius: number;
   readonly prototypeRadius: number;
+  readonly fineCullRadius: number;
   readonly maxInstanceScale: number;
   readonly staticBatchers: readonly SurfaceStaticBatcher[];
   activeLod: number;
@@ -230,10 +236,12 @@ export class SurfaceWorld {
       const prototypeStaticBatchers = staticBatchersByPrototype.get(range.prototype) ?? [];
       const lods: SurfaceLodBatch[] = [];
       let prototypeRadius = 0;
+      let fineCullRadius = 0;
       if (prototypeStaticBatchers.length > 0) {
         for (const batcher of prototypeStaticBatchers) {
           lods.push({ index: batcher.lodIndex, renderers: [], height: batcher.lodHeight });
           prototypeRadius = Math.max(prototypeRadius, batcher.prototypeRadius);
+          fineCullRadius = Math.max(fineCullRadius, batcher.fineCullRadius);
         }
       } else {
         const instanceBuffer = new Buffer(
@@ -254,6 +262,7 @@ export class SurfaceWorld {
               const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
               lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
               prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
+              fineCullRadius = Math.max(fineCullRadius, boundsSphereRadius(prototypeBounds));
               const entity = root.createChild(
                 `${range.prototype}-${range.cell[0]}-${range.cell[1]}-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
               );
@@ -294,6 +303,17 @@ export class SurfaceWorld {
           lods.push({ index: lod.index, renderers, height: lodHeight });
         }
       }
+      const fineCulling = isSurfaceFineCullingEligible(prototype);
+      for (const lod of lods) {
+        for (const renderer of lod.renderers) {
+          SurfaceMaterial.setRendererFineCulling(
+            fineCulling,
+            fineCulling ? prototype.maxDistance : 0,
+            fineCulling ? fineCullRadius : 0,
+            renderer.shaderData
+          );
+        }
+      }
       const bounds = range.bounds;
       const centre = new Vector3(
         (bounds[0] + bounds[3]) * 0.5,
@@ -309,6 +329,7 @@ export class SurfaceWorld {
         renderBounds: createConservativeRangeBounds(bounds, scaledPrototypeRadius * SURFACE_RUNTIME_SCALE_MAX),
         placementRadius: Math.hypot(bounds[3] - centre.x, bounds[4] - centre.y, bounds[5] - centre.z),
         prototypeRadius: scaledPrototypeRadius,
+        fineCullRadius,
         maxInstanceScale: decodedInstances.maxScale,
         staticBatchers: prototypeStaticBatchers,
         activeLod: 0,
@@ -454,6 +475,13 @@ export class SurfaceWorld {
             this._tuning.scale[batch.range.category],
             renderer.shaderData
           );
+          const fineCulling = isSurfaceFineCullingEligible(batch.prototype);
+          SurfaceMaterial.setRendererFineCulling(
+            fineCulling,
+            fineCulling ? batch.prototype.maxDistance * this._tuning.lod.distanceScale : 0,
+            fineCulling ? batch.fineCullRadius : 0,
+            renderer.shaderData
+          );
         }
       }
     }
@@ -593,6 +621,7 @@ export class SurfaceWorld {
       Matrix.multiply(this._camera.projectionMatrix, this._camera.viewMatrix, this._viewProjection);
       this._frustum.calculateFromMatrix(this._viewProjection);
     }
+    this._staticBatchGroup?.setCullingState(cameraPosition, this._tuning.lod.distanceScale);
     for (const batch of this._batches) {
       const categoryEnabled = this._tuning.enabled[batch.range.category];
       const density = this._tuning.density[batch.range.category];
@@ -621,7 +650,11 @@ export class SurfaceWorld {
         batch.activeLod >= 0 && (!this._camera.enableFrustumCulling || this._frustum.intersectsBox(batch.renderBounds))
           ? batch.instanceCount
           : 0;
-      setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration);
+      const fineCulling =
+        visibleInstanceCount > 0 &&
+        centreDistance + batch.placementRadius + batch.fineCullRadius * batch.maxInstanceScale * runtimeScale >
+          batch.prototype.maxDistance * this._tuning.lod.distanceScale;
+      setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration, fineCulling);
     }
     this._staticBatchGroup?.flush();
     this._coverageStreamer?.update(this._tuning);
@@ -725,6 +758,14 @@ function boundsRadius(bounds: { readonly min: Vector3; readonly max: Vector3 }):
   );
 }
 
+function boundsSphereRadius(bounds: { readonly min: Vector3; readonly max: Vector3 }): number {
+  return Math.hypot(
+    Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x)),
+    Math.max(Math.abs(bounds.min.y), Math.abs(bounds.max.y)),
+    Math.max(Math.abs(bounds.min.z), Math.abs(bounds.max.z))
+  );
+}
+
 function updateBatchLod(
   batch: SurfaceBatch,
   targetLod: number,
@@ -785,7 +826,12 @@ function updateBatchLod(
   }
 }
 
-function setStaticBatchLodState(batch: SurfaceBatch, visibleInstanceCount: number, duration: number): void {
+function setStaticBatchLodState(
+  batch: SurfaceBatch,
+  visibleInstanceCount: number,
+  duration: number,
+  fineCulling: boolean
+): void {
   const transition = batch.transition;
   const remaining = transition && duration > 0 ? 1 - transition.elapsed / duration : 0;
   for (const batcher of batch.staticBatchers) {
@@ -804,7 +850,7 @@ function setStaticBatchLodState(batch: SurfaceBatch, visibleInstanceCount: numbe
         instanceCount = visibleInstanceCount;
       }
     }
-    batcher.setRangeVisibleCount(batch.range.offset, instanceCount, lodFade);
+    batcher.setRangeVisibleCount(batch.range.offset, instanceCount, lodFade, fineCulling);
   }
 }
 

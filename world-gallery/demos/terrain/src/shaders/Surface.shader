@@ -120,6 +120,10 @@ Shader "Terrain/Surface" {
       vec3 renderer_SurfaceCellDebugColor;
       vec3 renderer_SurfaceTint;
       float renderer_SurfaceScale;
+      #ifdef RENDERER_SURFACE_FINE_CULL
+        float renderer_SurfaceFineCullDistance;
+        float renderer_SurfaceFineCullRadius;
+      #endif
       float renderer_SurfaceWorldCellSize;
       int material_DebugView;
       #ifdef RENDERER_SURFACE_WORLD_NOISE
@@ -443,6 +447,20 @@ Shader "Terrain/Surface" {
           output.probeWeight = 0.0;
         #endif
         gl_Position = output.positionCS;
+        #ifdef RENDERER_SURFACE_FINE_CULL
+          float instanceRadius =
+            renderer_SurfaceFineCullRadius *
+            max(
+              abs(attributes.INSTANCE_SCALE_WIND.x),
+              max(abs(attributes.INSTANCE_SCALE_WIND.y), abs(attributes.INSTANCE_SCALE_WIND.z))
+            ) *
+            renderer_SurfaceScale;
+          float distanceLimit = renderer_SurfaceFineCullDistance + instanceRadius;
+          vec3 cameraDelta = attributes.INSTANCE_POSITION_META.xyz - camera_Position;
+          if (dot(cameraDelta, cameraDelta) > distanceLimit * distanceLimit) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+          }
+        #endif
         return output;
       }
 
@@ -903,6 +921,10 @@ Shader "Terrain/Surface" {
       vec2 scene_ShadowBias;
       vec3 scene_LightDirection;
       float renderer_SurfaceScale;
+      #ifdef RENDERER_SURFACE_FINE_CULL
+        float renderer_SurfaceFineCullDistance;
+        float renderer_SurfaceFineCullRadius;
+      #endif
       #ifdef RENDERER_SURFACE_WORLD_NOISE
         highp usampler2D material_RegionMap;
         vec4 material_TerrainParams;
@@ -1105,6 +1127,20 @@ Shader "Terrain/Surface" {
         vec4 positionCS = camera_VPMat * vec4(worldPosition, 1.0);
         positionCS.z = max(positionCS.z, -1.0);
         gl_Position = positionCS;
+        #ifdef RENDERER_SURFACE_FINE_CULL
+          float instanceRadius =
+            renderer_SurfaceFineCullRadius *
+            max(
+              abs(attributes.INSTANCE_SCALE_WIND.x),
+              max(abs(attributes.INSTANCE_SCALE_WIND.y), abs(attributes.INSTANCE_SCALE_WIND.z))
+            ) *
+            renderer_SurfaceScale;
+          float distanceLimit = renderer_SurfaceFineCullDistance + instanceRadius;
+          vec3 cameraDelta = attributes.INSTANCE_POSITION_META.xyz - camera_Position;
+          if (dot(cameraDelta, cameraDelta) > distanceLimit * distanceLimit) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+          }
+        #endif
         output.uv = attributes.TEXCOORD_0;
         #ifdef RENDERER_SURFACE_PACKED_META
           float packedLodFade = mod(attributes.INSTANCE_POSITION_META.w, 65536.0);

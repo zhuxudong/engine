@@ -87,6 +87,8 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _cellDebugColor = ShaderProperty.getByName("renderer_SurfaceCellDebugColor");
   private static readonly _rendererTint = ShaderProperty.getByName("renderer_SurfaceTint");
   private static readonly _rendererScale = ShaderProperty.getByName("renderer_SurfaceScale");
+  private static readonly _fineCullDistance = ShaderProperty.getByName("renderer_SurfaceFineCullDistance");
+  private static readonly _fineCullRadius = ShaderProperty.getByName("renderer_SurfaceFineCullRadius");
   private static readonly _worldCellSize = ShaderProperty.getByName("renderer_SurfaceWorldCellSize");
   private static readonly _regionMap = ShaderProperty.getByName("material_RegionMap");
   private static readonly _terrainParams = ShaderProperty.getByName("material_TerrainParams");
@@ -102,6 +104,7 @@ export class SurfaceMaterial extends BaseMaterial {
   private static readonly _billboardMacro = ShaderMacro.getByName("RENDERER_SURFACE_BILLBOARD");
   private static readonly _instancedMacro = ShaderMacro.getByName("RENDERER_SURFACE_INSTANCED");
   private static readonly _packedMetadataMacro = ShaderMacro.getByName("RENDERER_SURFACE_PACKED_META");
+  private static readonly _fineCullingMacro = ShaderMacro.getByName("RENDERER_SURFACE_FINE_CULL");
   private static readonly _coverageMacro = ShaderMacro.getByName("MATERIAL_SURFACE_COVERAGE");
   private static readonly _worldNoiseMacro = ShaderMacro.getByName("RENDERER_SURFACE_WORLD_NOISE");
 
@@ -367,6 +370,23 @@ export class SurfaceMaterial extends BaseMaterial {
   ): void {
     shaderData.setVector3(SurfaceMaterial._rendererTint, new Vector3(...tint));
     shaderData.setFloat(SurfaceMaterial._rendererScale, scale);
+  }
+
+  /**
+   * Selects conservative instance-distance culling shared by raster and compute paths.
+   * @param enabled Whether this renderer satisfies the camera-only fine-culling predicate.
+   * @param distance Scaled maximum camera distance in world units.
+   * @param radius Prototype-space sphere radius before instance and runtime scale.
+   * @param shaderData Renderer-local shader data.
+   */
+  static setRendererFineCulling(enabled: boolean, distance: number, radius: number, shaderData: ShaderData): void {
+    if (enabled) {
+      shaderData.enableMacro(SurfaceMaterial._fineCullingMacro);
+      shaderData.setFloat(SurfaceMaterial._fineCullDistance, distance);
+      shaderData.setFloat(SurfaceMaterial._fineCullRadius, radius);
+    } else {
+      shaderData.disableMacro(SurfaceMaterial._fineCullingMacro);
+    }
   }
 
   /**
