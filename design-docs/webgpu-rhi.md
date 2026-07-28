@@ -727,18 +727,18 @@ cascade 会重复消费主相机 stream 中的整批索引。
 | --- | --- | --- |
 | 关闭树木/岩石阴影或降低 cascade 数 | 直接省时，但改变 world 资产与画质语义 | 不采用 |
 | 按 cell 恢复 shadow renderer | 引擎现有 bounds culling 可用，但重新引入上千 draw/renderer | 不采用 |
-| 复制 4 份长期驻留的完整 instance output | cascade 可独立 draw，但 Grasslands output atlas 从约 18 MiB 放大到约 90 MiB | 不采用 |
-| Forward stream 不变；shadow caster 使用一个可复用 output，在每级 cascade 队列构建时按真实 cull planes 重新 compaction | 只为投影稀疏层分配容量；cascade 按顺序 compute→draw，可复用同一输出 | 本阶段采用 |
+| Forward stream 不变；四级 cascade 共用一个 shadow output，每级 compute 后立即 draw | shadow-only output 实测只有 595,456 B | 实测淘汰，见下方检查点 |
+| Forward stream 不变；四级 cascade 使用四个长期驻留的 shadow-only slot | 4 份 output 共约 2.27 MiB；每级有独立参数、counter 与 indirect 区域，可缓存静止视图 | 本阶段采用 |
 
 采用方案沿用 Unity Camera/Light 分离 visibility 与 PlayCanvas per-light visible-index/count 的
-源码结论，但只落地 Galacean 当前串行 directional cascade 所需的最小契约：
+源码结论，但只落地 Galacean directional cascade 所需的最小契约：
 
-1. `Renderer` 增加 internal camera-rendering gate 与 `_prepareShadow(context, planes, count)`
-   hook。默认 renderer 行为不变；该 hook 只让 GPU-driven renderer 在 shadow queue 构建时
-   得到引擎已经计算好的最多 10 个 `ShadowSliceData.cullPlanes`。不新增用户 API。
+1. `Renderer` 增加 protected camera-view gate 与 shadow-view hook。默认 renderer 行为不变；
+   GPU-driven renderer 在 shadow queue 构建时得到 cascade index，以及引擎已经计算好的最多
+   10 个 `ShadowSliceData.cullPlanes`。Engine 创建方式、材质、ShaderLab 和用户渲染 API 不变。
 2. WebGPU Surface Forward renderer 不再投影；同材质、同 ShaderLab、同 LOD 的 shadow-only
-   renderer 使用独立 shadow output/indirect buffer，并由 camera-rendering gate 排除在主相机
-   queue 外。WebGL2 保持原 renderer 路径。
+   renderer 使用独立 shadow output/indirect slot，并由 camera-view gate 排除在主相机 queue
+   外。WebGL2 保持原 renderer 路径。
 3. CPU 仍决定 category、density、主相机 max-distance、cell LOD 与 temporal cross-fade。
    shadow command 只消费这些已选择 range 的 source prefix，因此首版不会扩大或缩小当前主
    相机可见集合；它只在每级 cascade 内按实例保守球再裁剪。
@@ -749,9 +749,39 @@ cascade 会重复消费主相机 stream 中的整批索引。
 5. 一个 ShaderLab compute 模块执行 counter reset、最多 10 平面 workgroup compaction 和
    indirect finalize。LOD fade 与 cell hue 使用 Forward direct-copy 相同的 packed metadata；
    不写原生 WGSL。
-6. shadow output 只按 cast-shadow prototype LOD 容量分配，并在四级 cascade 间串行复用。
-   任一 storage binding、workgroup 数或 batch 数超过实际 device limit 时显式失败，不退回
+6. shadow output 只按 cast-shadow prototype LOD 容量分配。四级 cascade 在一个大 output
+   buffer 和一个 indirect buffer 中各占固定区域，每级另有独立参数与 atomic counter buffer。
+   同一 cascade 的 planes、CPU range generation、wind 与 renderer tuning 都未改变时，复用
+   该 slot，不重复 dispatch。
+7. 参数不能靠同一 frame 内连续 `GPUQueue.writeBuffer` 覆盖同一 buffer：这些写入发生在
+   command buffer 执行前，四级 dispatch 会读到最终值。每级独立参数 buffer 是正确性约束，
+   不是性能特例。
+8. 任一 storage binding、workgroup 数或 batch 数超过实际 device limit 时显式失败，不退回
    隐藏的 per-cell 路径。
+
+#### 单 output 检查点
+
+第一版单 output 原型在实际产物中完成 ShaderLab runtime compile、四级
+`reset → cull → finalize → indirect draw`，GPU/page diagnostic 为 0。修复 indirect
+renderer 被 CPU instancing 吞掉的问题后，core 层 200 ms 内观察到 2,118 次
+`drawPrimitiveIndirect`；相邻 indirect element 均不再合批。
+
+`hero` 固定相机关闭云、雾、后处理、建筑、动画和风，只保留方向光、阴影、地形与地表。
+shadow command 的 3,078 个候选最初被切成 344 个 workgroup；合并源地址连续且 fade 相同的
+range 后降为 146 个（-57.56%）。最后一级 cascade survivor 为 1,523，剔除 50.52%，29 个
+prototype/LOD batch 非零。shadow-only 资源实测如下：
+
+| 资源 | 单 output 实测 | 四 slot 预算 |
+| --- | ---: | ---: |
+| instance output | 595,456 B | 2,381,824 B |
+| indexed indirect | 2,960 B | 11,840 B |
+| atomic counter | 412 B | 1,648 B |
+| 参数 | 176 B | 704 B |
+
+单 output 与父实现的 ABBA 稳定段约为 31.5 FPS 对 31 FPS，未形成稳定收益；Frame P95 约
+50 ms 对 42.7 ms，compute/render pass 交替增加了尾延迟。更重要的是，同一参数 buffer 在
+四级 cascade 间连续 `writeBuffer` 不提供逐 dispatch 参数快照，因此该原型不满足正确性门。
+实现不以单 output 形态提交，后续代码改为四个长期驻留 slot。
 
 验收分三层：
 
