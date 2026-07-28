@@ -674,6 +674,30 @@ direct copy。验收必须对父提交交替测试 settled、相机连续旋转�
 - FPS、frame p50/p95；方向不稳定时不保留实现，只保留本检查点；
 - WebGL2 默认路径的截图、可见计数和 E2E，证明 backend 切换仍通过刷新完成。
 
+#### 六平面实验检查点
+
+该设计已完成未提交实现并在 Chromium 147 / Metal 实际运行，随后从工作区撤销。固定 hero
+相机下，6 个 prototype 的 indirect survivor 从 64,472 降到 35,611（-44.76%）；其中前
+5 个草/花 batch 从 `5037/3469/44431/3193/4444` 降到
+`3436/1756/23304/2176/2201`，假树从 3,898 降到 2,738。runtime ShaderLab compute
+编译、dispatch、counter readback 和 indirect draw 均执行，GPU/page diagnostic 为 0。
+
+关闭 wind、cloud、cloud shadow、post-process 与 fog 后，候选对父提交的 canvas 截图中，
+通道差大于 2 的像素为 0.0032%，RGB 平均绝对通道差为 0.00044，最大通道差为 58。CPU
+可见实例、category、LOD 与 renderer/indirect batch 计数逐项相同。
+
+整帧 A/B 没有形成收益：
+
+| 场景 | 基线 FPS 中位数 | 候选 FPS 中位数 | 差值 | 采样 |
+| --- | ---: | ---: | ---: | --- |
+| Grasslands settled | 24.13 | 23.66 | -1.96% | 三轮交替，每轮 3 秒 |
+| 关闭非地表动画特效 | 24.96 | 24.00 | -3.85% | ABBA 顺序，四轮每项 3 秒 |
+
+六平面只删除主相机外、原本不会进入 fragment 的实例；在本场景中，增加 boundary compaction
+范围和重排实例流的成本高于被省去的 clip-stage vertex 工作。因此不提交该实现，也不把
+survivor 降幅描述为性能提升。草地后续优化需要命中实际可见的 alpha overdraw、几何 LOD 或
+遮挡工作量；投影树木/岩石仍应先补 per-view indirect stream，不能复用本实验的主相机流。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
