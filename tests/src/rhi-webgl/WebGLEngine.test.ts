@@ -8,6 +8,7 @@ describe("webgl engine test", () => {
     const canvas = document.createElement("canvas");
     const engine = await WebGLEngine.create({ canvas });
     expect(engine).not.be.null;
+    expect(engine.graphicsBackend).toBe("webgl");
   });
 
   it("engine destroy", async () => {

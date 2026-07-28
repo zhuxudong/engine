@@ -1,4 +1,5 @@
 import {
+  type GraphicsBackend,
   IHardwareRenderer,
   IInputOptions,
   IPhysics,
@@ -250,6 +251,14 @@ export class Engine extends EventDispatcher {
    */
   get destroyed(): boolean {
     return this._destroyed;
+  }
+
+  /**
+   * Graphics backend selected when this engine was created.
+   * @returns Stable backend identity for capability-specific internal paths and diagnostics.
+   */
+  get graphicsBackend(): GraphicsBackend {
+    return this._hardwareRenderer.backend;
   }
 
   protected constructor(canvas: Canvas, hardwareRenderer: IHardwareRenderer, configuration: EngineConfiguration) {
