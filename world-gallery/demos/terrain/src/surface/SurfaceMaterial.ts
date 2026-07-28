@@ -20,6 +20,7 @@ import type { SurfaceMaterialSpec, SurfacePrototypeRendererSpec } from "./Surfac
 import type { TerrainData } from "../data/TerrainData";
 import type { TerrainWorldNoiseTuning } from "../TerrainMaterial";
 import type { TerrainWorldNoiseSpec } from "../loader/ManifestLoader";
+import { surfaceCellDebugColor } from "./SurfaceDebugColor";
 
 const WHITE_PIXEL = new Uint8Array([255, 255, 255, 255]);
 const FLAT_NORMAL_PIXEL = new Uint8Array([128, 128, 255, 255]);
@@ -399,7 +400,7 @@ export class SurfaceMaterial extends BaseMaterial {
     shaderData: ShaderData
   ): void {
     shaderData.setVector3(SurfaceMaterial._categoryDebugColor, new Vector3(...categoryDebugColor(category)));
-    shaderData.setVector3(SurfaceMaterial._cellDebugColor, new Vector3(...hashColor(cell[0], cell[1])));
+    shaderData.setVector3(SurfaceMaterial._cellDebugColor, new Vector3(...surfaceCellDebugColor(cell[0], cell[1])));
   }
 
   /**
@@ -429,16 +430,6 @@ function categoryDebugColor(category: SurfaceCategory): [number, number, number]
     case "cliff":
       return [0.85, 0.08, 0.04];
   }
-}
-
-function hashColor(x: number, z: number): [number, number, number] {
-  let value = Math.imul(x, 0x9e3779b1) ^ Math.imul(z, 0x85ebca77);
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x7feb352d);
-  value ^= value >>> 15;
-  const hue = (value >>> 0) / 0x100000000;
-  const rainbow = [Math.abs(hue * 6 - 3) - 1, 2 - Math.abs(hue * 6 - 2), 2 - Math.abs(hue * 6 - 4)];
-  return rainbow.map((component) => 0.35 + Math.min(1, Math.max(0, component)) * 0.65) as [number, number, number];
 }
 
 async function loadCoverageTextures(

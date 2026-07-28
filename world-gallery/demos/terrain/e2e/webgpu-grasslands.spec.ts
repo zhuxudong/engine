@@ -10,7 +10,8 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     const text = message.text();
     if (
       message.type() === "error" ||
-      (message.type() === "warning" && /webgpu.*(?:failed|invalid|validation|error)/i.test(text))
+      (message.type() === "warning" &&
+        /webgpu|gpu|renderpipeline|commandbuffer|vertex buffer|validation|invalid|exceeds/i.test(text))
     ) {
       diagnostics.push(`${message.type()}: ${text}`);
     }
@@ -19,6 +20,12 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
 
   await page.goto("/demos/terrain/grasslands/?backend=webgl2", { waitUntil: "networkidle" });
   await page.waitForFunction(() => window.terrainDebug?.ready === true);
+  await expect(page.locator("#status")).toContainText("webgl2");
+  await page.evaluate(() => {
+    window.grasslandsDebug!.setScene({ animation: false });
+  });
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+  const webglSurface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
   const webglTimeOrigin = await page.evaluate(() => performance.timeOrigin);
 
   await Promise.all([page.waitForURL(/backend=webgpu/), page.locator("#backend").selectOption("webgpu")]);
@@ -26,13 +33,20 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   await expect(page.locator("#status")).toContainText("webgpu");
   expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(webglTimeOrigin);
 
-  const surface = await page.evaluate(() => {
+  await page.evaluate(() => {
     window.grasslandsDebug!.setScene({ animation: false });
-    return window.grasslandsDebug!.inspectSurface();
   });
+  await expect
+    .poll(async () => {
+      const surface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
+      return surface.visibleRendererBatches < surface.visibleRanges;
+    })
+    .toBe(true);
+  const surface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
   expect(surface.categoryCounts.grass).toBeGreaterThan(0);
   expect(surface.categoryCounts.tree).toBeGreaterThan(0);
   expect(surface.categoryCounts.rock).toBeGreaterThan(0);
+  expect(surface.visibleRendererBatches).toBeLessThan(webglSurface.visibleRendererBatches);
 
   await page.waitForTimeout(1_000);
   const screenshot = await page.locator("#canvas").screenshot();

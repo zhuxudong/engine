@@ -20,7 +20,7 @@ Shader "Terrain/Surface" {
         vec2 TEXCOORD_0;
         vec4 COLOR_0;
         #ifdef RENDERER_SURFACE_INSTANCED
-          vec4 INSTANCE_POSITION_HASH;
+          vec4 INSTANCE_POSITION_META;
           vec4 INSTANCE_ROTATION;
           vec4 INSTANCE_SCALE_WIND;
           vec4 INSTANCE_COLOR;
@@ -297,7 +297,7 @@ Shader "Terrain/Surface" {
             vec3 localNormal = normalize(
               attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
             );
-            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            worldPosition = attributes.INSTANCE_POSITION_META.xyz +
               billboardRight * scaledPosition.x +
               billboardUp * scaledPosition.y +
               billboardForward * scaledPosition.z;
@@ -329,7 +329,7 @@ Shader "Terrain/Surface" {
               ) / max(abs(attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
             );
             localNormal = normalize(mix(localNormal, vec3(0.0, 1.0, 0.0), material_LightingFlatness));
-            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            worldPosition = attributes.INSTANCE_POSITION_META.xyz +
               rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
             worldNormal = normalize(rotateByQuaternion(localNormal, attributes.INSTANCE_ROTATION));
             #ifdef RENDERER_HAS_TANGENT
@@ -347,7 +347,7 @@ Shader "Terrain/Surface" {
               worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
             #endif
           #endif
-          fadeAnchor = attributes.INSTANCE_POSITION_HASH.xyz;
+          fadeAnchor = attributes.INSTANCE_POSITION_META.xyz;
           windPhase = attributes.INSTANCE_SCALE_WIND.w;
         #else
           worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;
@@ -415,11 +415,16 @@ Shader "Terrain/Surface" {
         output.worldTangent = surfaceTangent;
         #ifdef RENDERER_SURFACE_INSTANCED
           output.instanceColor = attributes.INSTANCE_COLOR;
+          if (material_DebugView == 4) {
+            output.windDisplacementWeight = attributes.INSTANCE_POSITION_META.w;
+          } else {
+            output.windDisplacementWeight = surfaceWindWeight;
+          }
         #else
           output.instanceColor = vec4(1.0);
+          output.windDisplacementWeight = surfaceWindWeight;
         #endif
         output.localPosition = attributes.POSITION;
-        output.windDisplacementWeight = surfaceWindWeight;
         output.positionVS = (camera_ViewMat * vec4(surfacePosition, 1.0)).xyz;
         output.positionCS = camera_VPMat * vec4(surfacePosition, 1.0);
         #if defined(SCENE_USE_PROBE_VOLUME) && defined(SCENE_PROBE_VOLUME_PER_VERTEX)
@@ -800,7 +805,17 @@ Shader "Terrain/Surface" {
               1.0
             );
           } else {
-            outputColor = vec4(renderer_SurfaceCellDebugColor, 1.0);
+            #ifdef RENDERER_SURFACE_INSTANCED
+              float hue = varyings.windDisplacementWeight;
+              outputColor = vec4(
+                0.35 + clamp(abs(hue * 6.0 - 3.0) - 1.0, 0.0, 1.0) * 0.65,
+                0.35 + clamp(2.0 - abs(hue * 6.0 - 2.0), 0.0, 1.0) * 0.65,
+                0.35 + clamp(2.0 - abs(hue * 6.0 - 4.0), 0.0, 1.0) * 0.65,
+                1.0
+              );
+            #else
+              outputColor = vec4(renderer_SurfaceCellDebugColor, 1.0);
+            #endif
           }
         } else if (material_DebugView == 5) {
           outputColor = vec4(vec3(varyings.instanceColor.a), 1.0);
@@ -830,7 +845,7 @@ Shader "Terrain/Surface" {
         vec2 TEXCOORD_0;
         vec4 COLOR_0;
         #ifdef RENDERER_SURFACE_INSTANCED
-          vec4 INSTANCE_POSITION_HASH;
+          vec4 INSTANCE_POSITION_META;
           vec4 INSTANCE_ROTATION;
           vec4 INSTANCE_SCALE_WIND;
         #endif
@@ -999,7 +1014,7 @@ Shader "Terrain/Surface" {
             vec3 localNormal = normalize(
               attributes.NORMAL / max(abs(renderer_SurfaceLocalScale * attributes.INSTANCE_SCALE_WIND.xyz), vec3(0.0001))
             );
-            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            worldPosition = attributes.INSTANCE_POSITION_META.xyz +
               billboardRight * scaledPosition.x +
               billboardUp * scaledPosition.y +
               billboardForward * scaledPosition.z;
@@ -1009,7 +1024,7 @@ Shader "Terrain/Surface" {
               billboardForward * localNormal.z
             );
           #else
-            worldPosition = attributes.INSTANCE_POSITION_HASH.xyz +
+            worldPosition = attributes.INSTANCE_POSITION_META.xyz +
               rotateByQuaternion(scaledPosition, attributes.INSTANCE_ROTATION);
             worldNormal = normalize(
               rotateByQuaternion(
@@ -1021,7 +1036,7 @@ Shader "Terrain/Surface" {
               )
             );
           #endif
-          fadeAnchor = attributes.INSTANCE_POSITION_HASH.xyz;
+          fadeAnchor = attributes.INSTANCE_POSITION_META.xyz;
           windPhase = attributes.INSTANCE_SCALE_WIND.w;
         #else
           worldPosition = (renderer_ModelMat * vec4(attributes.POSITION, 1.0)).xyz;

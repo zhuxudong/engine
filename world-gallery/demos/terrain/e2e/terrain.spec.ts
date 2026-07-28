@@ -2287,7 +2287,7 @@ async function installShaderDiagnostics(page: Page): Promise<void> {
           source
         });
       }
-      if (source.includes("INSTANCE_POSITION_HASH") || source.includes("material_DebugView")) {
+      if (source.includes("INSTANCE_POSITION_META") || source.includes("material_DebugView")) {
         generatedSurfaceShaders.push({
           stage: this.getShaderParameter(shader, this.SHADER_TYPE) === this.VERTEX_SHADER ? "vertex" : "fragment",
           source

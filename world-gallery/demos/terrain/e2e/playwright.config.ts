@@ -7,6 +7,7 @@ const configuredUrl = process.env.TERRAIN_E2E_URL;
 const baseUrl = new URL(configuredUrl ?? "http://127.0.0.1:5175");
 const port = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
 const browserChannel = process.env.TERRAIN_E2E_CHANNEL;
+const browserExecutablePath = process.env.TERRAIN_E2E_EXECUTABLE_PATH;
 const webgpu = process.env.TERRAIN_E2E_WEBGPU === "1";
 
 export default defineConfig({
@@ -25,9 +26,12 @@ export default defineConfig({
     channel: browserChannel,
     launchOptions: webgpu
       ? {
+          executablePath: browserExecutablePath,
           args: ["--enable-unsafe-webgpu", "--use-angle=metal"]
         }
-      : undefined,
+      : browserExecutablePath
+        ? { executablePath: browserExecutablePath }
+        : undefined,
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },

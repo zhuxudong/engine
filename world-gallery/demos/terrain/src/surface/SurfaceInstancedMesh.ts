@@ -43,7 +43,7 @@ export function createSurfaceInstancedMesh(
   mesh.setVertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, bindingIndex);
   mesh.setVertexElements([
     ...source.vertexElements,
-    new VertexElement("INSTANCE_POSITION_HASH", 0, VertexElementFormat.Vector4, bindingIndex, 1),
+    new VertexElement("INSTANCE_POSITION_META", 0, VertexElementFormat.Vector4, bindingIndex, 1),
     new VertexElement("INSTANCE_ROTATION", 16, VertexElementFormat.Vector4, bindingIndex, 1),
     new VertexElement("INSTANCE_SCALE_WIND", 32, VertexElementFormat.Vector4, bindingIndex, 1),
     new VertexElement("INSTANCE_COLOR", 48, VertexElementFormat.Vector4, bindingIndex, 1)
