@@ -29,6 +29,12 @@ const precisionStr = `
     #endif
     `;
 
+interface ComputeShaderSource {
+  readonly source: string;
+  readonly reflection: IShaderReflection;
+  readonly workgroupSize: readonly [number, number, number];
+}
+
 /**
  * Shader pass containing vertex and fragment source.
  */
@@ -66,6 +72,7 @@ export class ShaderPass extends ShaderPart {
 
   private static _shaderMacroList: ShaderMacro[] = [];
   private static _macroMap: Map<string, string> = new Map();
+  private _computeShaderSources = new WeakMap<Engine, ComputeShaderSource>();
 
   /**
    * Create a shader pass from precompiled instructions.
@@ -150,6 +157,7 @@ export class ShaderPass extends ShaderPart {
       delete map.engine._shaderProgramMaps[this._shaderPassId];
     }
     shaderProgramMaps.length = 0;
+    this._computeShaderSources = new WeakMap();
   }
 
   /**
@@ -181,14 +189,14 @@ export class ShaderPass extends ShaderPart {
    * @returns Resolved WGSL source, reflection, and workgroup dimensions.
    * @internal
    */
-  _compileComputeShaderSource(engine: Engine): {
-    source: string;
-    reflection: IShaderReflection;
-    workgroupSize: readonly [number, number, number];
-  } {
+  _compileComputeShaderSource(engine: Engine): ComputeShaderSource {
     const renderer = engine._hardwareRenderer;
     if (!renderer.computeCapabilities.supported) {
       throw new Error(`Compute passes are not supported by the ${renderer.backend} backend.`);
+    }
+    const cached = this._computeShaderSources.get(engine);
+    if (cached) {
+      return cached;
     }
 
     const target = this._shaderTargets[ShaderLanguage.WGSL];
@@ -225,7 +233,9 @@ export class ShaderPass extends ShaderPart {
       throw new RangeError(`Compute workgroup ${workgroupSize.join("x")} exceeds ${renderer.backend} device limits.`);
     }
 
-    return { source, reflection, workgroupSize };
+    const compiled = { source, reflection, workgroupSize };
+    this._computeShaderSources.set(engine, compiled);
+    return compiled;
   }
 
   private _compileShaderSource(

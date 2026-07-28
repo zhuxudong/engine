@@ -7,6 +7,17 @@ import { WebGPUBuffer } from "./WebGPUBuffer";
 import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
 
 /**
+ * Immutable native compute state shared by programs with identical generated WGSL.
+ * @internal
+ */
+export interface WebGPUComputePipelineState {
+  /** Native compute pipeline. */
+  readonly pipeline: GPUComputePipeline;
+  /** Bind-group layout reflected from the ShaderLab storage declarations. */
+  readonly bindGroupLayout: GPUBindGroupLayout;
+}
+
+/**
  * WebGPU compute pipeline and storage bindings.
  * @internal
  */
@@ -15,7 +26,6 @@ export class WebGPUComputeProgram implements IPlatformComputeProgram {
 
   private readonly _id = WebGPUComputeProgram._counter++;
   private readonly _graphicDevice: WebGPUGraphicDevice;
-  private readonly _source: string;
   private readonly _storageBuffers: readonly IShaderStorageBufferReflection[];
   private readonly _pipeline: GPUComputePipeline;
   private readonly _bindGroupLayout: GPUBindGroupLayout;
@@ -43,35 +53,10 @@ export class WebGPUComputeProgram implements IPlatformComputeProgram {
     }
 
     this._graphicDevice = graphicDevice;
-    this._source = source;
     this._storageBuffers = storageBuffers;
-    const device = graphicDevice.device;
-    const module = device.createShaderModule({
-      label: `ComputeProgram ${this._id}`,
-      code: source
-    });
-    this._reportCompilationErrors(module);
-    this._bindGroupLayout = device.createBindGroupLayout({
-      label: `ComputeProgram ${this._id} storage`,
-      entries: storageBuffers.map((storageBuffer) => ({
-        binding: storageBuffer.binding,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: {
-          type: storageBuffer.access === "read" ? "read-only-storage" : "storage"
-        }
-      }))
-    });
-    this._pipeline = device.createComputePipeline({
-      label: `ComputeProgram ${this._id} pipeline`,
-      layout: device.createPipelineLayout({
-        label: `ComputeProgram ${this._id} pipeline layout`,
-        bindGroupLayouts: [this._bindGroupLayout]
-      }),
-      compute: {
-        module,
-        entryPoint: "main"
-      }
-    });
+    const pipelineState = graphicDevice._getComputePipeline(source, storageBuffers);
+    this._pipeline = pipelineState.pipeline;
+    this._bindGroupLayout = pipelineState.bindGroupLayout;
   }
 
   /** @inheritdoc */
@@ -117,7 +102,6 @@ export class WebGPUComputeProgram implements IPlatformComputeProgram {
       pass.setBindGroup(0, bindGroup);
     }
     pass.dispatchWorkgroups(workgroupCountX, workgroupCountY, workgroupCountZ);
-    pass.end();
   }
 
   /** @inheritdoc */
@@ -149,22 +133,5 @@ export class WebGPUComputeProgram implements IPlatformComputeProgram {
       layout: this._bindGroupLayout,
       entries
     }));
-  }
-
-  private _reportCompilationErrors(module: GPUShaderModule): void {
-    module.getCompilationInfo().then((info) => {
-      const errors = info.messages.filter((message) => message.type === "error");
-      if (errors.length > 0 && !this._destroyed) {
-        const lines = this._source.split("\n");
-        console.error(
-          `WebGPU compute shader ${this._id} failed:\n${errors
-            .map((message) => {
-              const sourceLine = lines[message.lineNum - 1]?.trim();
-              return `${message.lineNum}:${message.linePos} ${message.message}${sourceLine ? `\n> ${sourceLine}` : ""}`;
-            })
-            .join("\n")}`
-        );
-      }
-    });
   }
 }
