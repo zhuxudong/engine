@@ -2,6 +2,7 @@ export { BlendFactor } from "./enums/BlendFactor";
 export { BlendOperation } from "./enums/BlendOperation";
 export { ColorWriteMask } from "./enums/ColorWriteMask";
 export { CompareFunction } from "./enums/CompareFunction";
+export { ComputePass } from "./ComputePass";
 export { CullMode } from "./enums/CullMode";
 export { RenderQueueType } from "./enums/RenderQueueType";
 export { RenderStateElementKey } from "./enums/RenderStateElementKey";

@@ -24,7 +24,13 @@ import {
   TextureCubeFace,
   TextureFormat
 } from "@galacean/engine-core";
-import type { IHardwareRenderer, IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
+import type {
+  ComputeCapabilities,
+  IHardwareRenderer,
+  IPlatformComputeProgram,
+  IPlatformPrimitive,
+  IPlatformShaderProgram
+} from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { GLBuffer } from "./GLBuffer";
 import { GLCapability } from "./GLCapability";
@@ -93,6 +99,18 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   readonly backend = "webgl" as const;
   /** Origin used when sampling WebGL render-target textures. */
   readonly renderTargetOrigin = "lower-left" as const;
+  /** Compute is unavailable in WebGL and remains an explicit capability boundary. */
+  readonly computeCapabilities: ComputeCapabilities = {
+    supported: false,
+    maxWorkgroupsPerDimension: 0,
+    maxWorkgroupSizeX: 0,
+    maxWorkgroupSizeY: 0,
+    maxWorkgroupSizeZ: 0,
+    maxInvocationsPerWorkgroup: 0,
+    maxStorageBufferBindingSize: 0,
+    maxStorageBuffersPerStage: 0,
+    recommendedWorkgroupSizeX: 1
+  };
 
   maxUniformBlockSize: number;
 
@@ -252,6 +270,16 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   createPlatformPrimitive(primitive: Mesh): IPlatformPrimitive {
     return new GLPrimitive(this, primitive);
+  }
+
+  /**
+   * Reject compute-program creation on WebGL.
+   * @returns Never returns.
+   * @throws Always because WebGL has no compute pipeline.
+   * @internal
+   */
+  createPlatformComputeProgram(): IPlatformComputeProgram {
+    throw new Error("Compute passes are not supported by the WebGL backend.");
   }
 
   createPlatformTexture2D(texture2D: Texture2D): IPlatformTexture2D {

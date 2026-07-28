@@ -21,7 +21,9 @@ import {
   TextureCube
 } from "@galacean/engine-core";
 import type {
+  ComputeCapabilities,
   IHardwareRenderer,
+  IPlatformComputeProgram,
   IPlatformPrimitive,
   IPlatformShaderProgram,
   IShaderReflection
@@ -30,6 +32,7 @@ import { Color, Vector4 } from "@galacean/engine-math";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import { WebGPUCanvas } from "./WebGPUCanvas";
 import { WebGPUCapability } from "./WebGPUCapability";
+import { WebGPUComputeProgram } from "./WebGPUComputeProgram";
 import { WebGPUMipmapGenerator } from "./WebGPUMipmapGenerator";
 import { WebGPUPrimitive } from "./WebGPUPrimitive";
 import { WebGPURenderTarget } from "./WebGPURenderTarget";
@@ -90,6 +93,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly capability: WebGPUCapability;
   /** Maximum uniform-buffer binding size in bytes. */
   readonly maxUniformBlockSize: number;
+  /** Compute support and native device limits. */
+  readonly computeCapabilities: ComputeCapabilities;
   /** Adapter description exposed for diagnostics. */
   readonly renderer: string;
 
@@ -162,6 +167,20 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       stencil: options.stencil ?? true
     };
     this.maxUniformBlockSize = device.limits.maxUniformBufferBindingSize;
+    this.computeCapabilities = {
+      supported: true,
+      maxWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension,
+      maxWorkgroupSizeX: device.limits.maxComputeWorkgroupSizeX,
+      maxWorkgroupSizeY: device.limits.maxComputeWorkgroupSizeY,
+      maxWorkgroupSizeZ: device.limits.maxComputeWorkgroupSizeZ,
+      maxInvocationsPerWorkgroup: device.limits.maxComputeInvocationsPerWorkgroup,
+      maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+      maxStorageBuffersPerStage: device.limits.maxStorageBuffersPerShaderStage,
+      recommendedWorkgroupSizeX: Math.max(
+        1,
+        Math.min(64, device.limits.maxComputeWorkgroupSizeX, device.limits.maxComputeInvocationsPerWorkgroup)
+      )
+    };
     this.renderer = adapter.info?.description || adapter.info?.device || "WebGPU";
     context.configure({
       device,
@@ -261,6 +280,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     instanceLayout?: InstanceBufferLayout | null
   ): IPlatformShaderProgram {
     return new WebGPUShaderProgram(this, engine, vertexSource, fragmentSource, reflection, instanceLayout);
+  }
+
+  /**
+   * Create a WebGPU compute pipeline and storage-binding owner.
+   * @param computeSource - Generated WGSL compute source.
+   * @param reflection - Resolved ShaderLab resource reflection.
+   * @returns Platform compute program.
+   * @internal
+   */
+  createPlatformComputeProgram(computeSource: string, reflection: IShaderReflection): IPlatformComputeProgram {
+    return new WebGPUComputeProgram(this, computeSource, reflection);
   }
 
   createPlatformTexture2D(texture: Texture2D): IPlatformTexture2D {
@@ -564,6 +594,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
+  }
+
+  /** @internal */
+  _beginComputePass(): GPUComputePassEncoder {
+    this._endRenderPass();
+    this._commandEncoder ??= this.device.createCommandEncoder({
+      label: "Galacean WebGPU frame"
+    });
+    return this._commandEncoder.beginComputePass({
+      label: "Galacean compute pass"
+    });
   }
 
   /** @internal */

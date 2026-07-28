@@ -175,6 +175,59 @@ export class ShaderPass extends ShaderPart {
     return program;
   }
 
+  /**
+   * Compile the compute target selected by the engine backend.
+   * @param engine - Engine that owns the target device.
+   * @returns Resolved WGSL source, reflection, and workgroup dimensions.
+   * @internal
+   */
+  _compileComputeShaderSource(engine: Engine): {
+    source: string;
+    reflection: IShaderReflection;
+    workgroupSize: readonly [number, number, number];
+  } {
+    const renderer = engine._hardwareRenderer;
+    if (!renderer.computeCapabilities.supported) {
+      throw new Error(`Compute passes are not supported by the ${renderer.backend} backend.`);
+    }
+
+    const target = this._shaderTargets[ShaderLanguage.WGSL];
+    if (!target?.computeShaderInstructions || !target.reflection) {
+      throw new Error(`Shader pass "${this.name}" has no WGSL compute target.`);
+    }
+
+    const macros = new Map<string, string>([
+      ["GRAPHICS_API_WEBGPU", ""],
+      ["GRAPHICS_API_WEBGL2", ""],
+      ["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", renderer.computeCapabilities.recommendedWorkgroupSizeX.toString()]
+    ]);
+    const discoveredMacros = new Map<string, string>();
+    ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macros, discoveredMacros);
+    const macroSeed = ShaderPass._createWGSLMacroSeed(macros, discoveredMacros, target.reflection);
+    const evaluatedMacros = new Map<string, string>();
+    const source = ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macroSeed, evaluatedMacros);
+    const reflection = ShaderPass._resolveReflection(target.reflection, evaluatedMacros);
+    if (!reflection) {
+      throw new Error(`Shader pass "${this.name}" has no compute reflection.`);
+    }
+
+    const workgroupExpressions = target.computeWorkgroupSize ?? ["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1", "1"];
+    const workgroupSize = workgroupExpressions.map((expression) =>
+      ShaderMacroProcessor._evaluateIntegerExpression(expression, evaluatedMacros)
+    ) as [number, number, number];
+    const capabilities = renderer.computeCapabilities;
+    if (
+      workgroupSize[0] > capabilities.maxWorkgroupSizeX ||
+      workgroupSize[1] > capabilities.maxWorkgroupSizeY ||
+      workgroupSize[2] > capabilities.maxWorkgroupSizeZ ||
+      workgroupSize[0] * workgroupSize[1] * workgroupSize[2] > capabilities.maxInvocationsPerWorkgroup
+    ) {
+      throw new RangeError(`Compute workgroup ${workgroupSize.join("x")} exceeds ${renderer.backend} device limits.`);
+    }
+
+    return { source, reflection, workgroupSize };
+  }
+
   private _compileShaderSource(
     engine: Engine,
     macroCollection: ShaderMacroCollection,
@@ -382,7 +435,18 @@ export class ShaderPass extends ShaderPart {
           ...input,
           location: ShaderPass._extractWGSLLocation(vertexInputBody, input.name) ?? input.location
         })),
-      fragmentOutputs: reflection.fragmentOutputs
+      fragmentOutputs: reflection.fragmentOutputs,
+      ...(reflection.storageBuffers
+        ? {
+            storageBuffers: reflection.storageBuffers.filter(activeByMacros).map((storageBuffer) => ({
+              ...storageBuffer,
+              conditions: undefined,
+              arrayLength: storageBuffer.arrayLength
+                ? ShaderMacroProcessor._evaluateIntegerExpression(storageBuffer.arrayLength, macros).toString()
+                : undefined
+            }))
+          }
+        : {})
     };
   }
 
@@ -412,6 +476,9 @@ export class ShaderPass extends ShaderPart {
     }
     for (const resource of reflection.resources) {
       addConditions(resource);
+    }
+    for (const storageBuffer of reflection.storageBuffers ?? []) {
+      addConditions(storageBuffer);
     }
     return seed;
   }
