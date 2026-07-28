@@ -1,6 +1,6 @@
 # Galacean WebGPU 多后端设计
 
-状态：实现契约 v0.2
+状态：实现契约 v0.3
 首批范围：`world-gallery/demos/terrain` 的地形、树木、天空、阴影、HDR 与后处理
 默认后端：WebGL2
 
@@ -281,6 +281,24 @@ flowchart LR
 - DPR 2 下批次数减少 40.3%，FPS 与 frame-time 分位没有形成可区分的提升。
 - DPR 1 下能观察到 CPU command 压力下降；DPR 2 结果表明默认画面已由像素、几何或阴影成本主导。
 - WebGL2 保留相同 cell batch 路径，三轮波动只作为无明显回退检查，不记作性能收益。
+
+### Indirect draw 检查点
+
+本地 Chromium headless shell 1217、Metal、1280×720 CSS、DPR 2、固定相机、关闭动画；direct
+基线 `1380ea58f` 与 indirect 候选 `403c395d1` 交替运行三轮，每轮预热 1.8 秒后采样 3 秒。
+两组都使用已经压缩的 WebGPU 树木实例流，唯一变量是普通 instanced draw 与
+`drawIndexedIndirect`。
+
+| 提交方式 | 活动 renderer batch | indirect renderer batch | FPS 中位数 | p50 | p95 | GPU 诊断 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| direct | 842 | 0 | 30.45 | 33.2 ms | 41.6 ms | 0 |
+| indirect | 842 | 1 | 29.42 | 33.5 ms | 41.8 ms | 0 |
+
+- 当前 indirect argument 由 CPU 更新 instance count；实例压缩、cell culling 和 density 选择仍在 CPU。
+- 两组总活动 batch 相同，只有 1 个树木 renderer batch 改为 indirect；三轮数据没有显示性能收益。
+- 该检查点只证明 storage/indirect buffer、renderer binding 和原生 WebGPU command encoding
+  能在 Grasslands 真实材质、阴影和后处理路径中正确运行。
+- compute 生成 instance stream 与 indirect argument 之前，不把 indirect draw 单独记作性能提升。
 
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
