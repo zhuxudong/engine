@@ -1,6 +1,6 @@
 # Galacean WebGPU 多后端设计
 
-状态：实现契约 v0.1
+状态：实现契约 v0.2
 首批范围：`world-gallery/demos/terrain` 的地形、树木、天空、阴影、HDR 与后处理
 默认后端：WebGL2
 
@@ -192,6 +192,90 @@ WGSL visitor 必须覆盖 terrain 闭包中的真实语义：
 | Camera | 4x MSAA、HDR render target、resolve、post-process fullscreen blit、sRGB final output |
 
 验收不能用 hello triangle 替代上述闭包；runtime raw Terrain ShaderLab 与 built-in precompiled PBR 两条路径必须同时通过。
+
+## GPU-driven 地表阶段
+
+### 本地上游代码事实
+
+以下表格只记录固定本地快照中的代码结构，不据此宣称 Galacean 已获得同等性能。
+
+| 引擎 | 本地源码 | 可复用的客观实现 |
+| --- | --- | --- |
+| Three.js | `/Users/shensi/Git/three.js/src/renderers/webgpu/WebGPUBackend.js` | 可写实例流使用 `STORAGE \| VERTEX`；间接参数使用 `STORAGE \| INDIRECT`；render object 可在同一 draw 分支选择 direct 或 indirect |
+| Three.js | `/Users/shensi/Git/three.js/src/renderers/webgpu/utils/WebGPUPipelineUtils.js` | compute pipeline 由 shader module 与已有 bind-group layout 构造，pipeline 归 backend 缓存 |
+| Babylon.js | `/Users/shensi/Git/Babylon.js/packages/dev/core/src/Engines/WebGPU/Extensions/engine.computeShader.ts` | render pass 在 dispatch 前结束；compute pass 统一绑定 pipeline/bind groups，并支持 direct/indirect dispatch |
+| Babylon.js | `/Users/shensi/Git/Babylon.js/packages/dev/core/src/Engines/Extensions/engine.computeShader.ts` | 不支持 compute 的 ThinEngine 在调用边界抛出明确错误 |
+| PlayCanvas | `/Users/shensi/Git/galacean/webgpu-upstream-research/playcanvas-current/src/platform/graphics/webgpu/webgpu-compute.js` | compute、bind group 更新与 dispatch 都封装在 graphics device 内；上层不持有原生 WebGPU 对象 |
+| PlayCanvas | `/Users/shensi/Git/galacean/webgpu-upstream-research/playcanvas-current/src/platform/graphics/webgpu/webgpu-graphics-device.js` | indirect commands 是 graphics-device draw 的一种中立输入；当前 WebGPU 仍逐条编码，源码明确等待未来 multi-draw indirect |
+
+### Grasslands 已测瓶颈
+
+固定 1280×720 CSS、DPR 2、默认相机与默认画质的基线记录如下；FPS 仅用于定位，正式结论仍以重复采样和移动真机为准。
+
+| 对象 | 可见实例增量 | draw 增量 | triangle 增量 | 阶段优先级 |
+| --- | ---: | ---: | ---: | --- |
+| 树木 | 14,878 | 1,180 | 607,116 | 第一批 |
+| 岩石 | 3,129 | 675 | 717,140 | 第一批 |
+| 灌木 | 492 | 109 | 30,234 | 第二批 |
+| 草 | 136,466 | 47 | 2,016 | 第二批，重点验证实例筛选和 overdraw |
+| 花 | 14,234 | 29 | 1,040 | 第二批 |
+
+当前 `SurfaceWorld` 以 `cell × prototype × LOD × renderer × primitive` 创建实体、实例 buffer 和 draw。空间 cell 同时成为 draw 边界，Grasslands 默认画面因此有 1,411 个活动 renderer batch 和 2,141 次 draw。GPU-driven 阶段先解除这个结构耦合，再把 CPU compaction 替换为 WebGPU compute；不能直接在 demo 中调用 `GPUDevice` 绕过 Engine/RHI。
+
+### 中立数据流
+
+```mermaid
+flowchart LR
+  Manifest["immutable instance records"] --> Cells["cell metadata and source ranges"]
+  Cells --> Select["visibility, density and LOD selection"]
+  Select --> Compact["compact by prototype + LOD + renderer + primitive"]
+  Compact --> Instances["visible instance buffer"]
+  Compact --> Arguments["indirect draw arguments"]
+  Instances --> Draw["normal RenderQueue material draw"]
+  Arguments --> Draw
+  Draw --> GL["WebGL2: CPU compact + direct instanced draw"]
+  Draw --> GPU["WebGPU: compute compact + indirect instanced draw"]
+```
+
+- cell 继续是 streaming、可见性、LOD 和诊断单位，不再强制成为 draw 单位。
+- render batch key 固定为 `prototype + LOD + renderer + primitive + material + render state`。
+- 默认 WebGL2 使用同一批次契约的 CPU compaction 和 direct instanced draw。
+- WebGPU 使用 storage source、storage/vertex output 和 storage/indirect argument buffer。
+- `SurfaceWorld`、shader/material 和 example 不读取 `GPUDevice`，也不提交手写 WGSL。
+- compute shader 仍由 ShaderLab 语义树生成 WGSL；编译器未覆盖前，WebGPU GPU-driven capability 必须报告 unsupported，不能退化成隐藏的 raw WGSL demo。
+
+### 分阶段接口
+
+1. **中立批次边界**
+   - 将有限地表从每 cell 一个 renderer 改为每 render batch 一个 renderer。
+   - CPU compaction 保留 cell culling、density、LOD、cross-fade 和诊断结果。
+   - 两个后端截图、实例计数与功能 E2E 一致后才进入 compute。
+   - 第一个性能检查点只合并 WebGPU 的单 LOD 树木 impostor；WebGL2 保留原 cell renderer 作为对照。相机级
+     compaction 不能替代 shadow cascade 的逐 pass 剔除，统一 WebGL2 路径前必须先补齐逐 pass
+     compaction，不能用关闭阴影规避。
+2. **RHI compute/storage/indirect**
+   - 中立 buffer usage 覆盖 storage、vertex/storage 和 indirect/storage 组合。
+   - 中立 compute pass 只接收 shader artifact、binding 和 dispatch；原生对象留在 `rhi-webgpu`。
+   - WebGL backend 对 compute/indirect 调用显式抛出 unsupported；SurfaceWorld 的 WebGL 路径不调用它。
+3. **ShaderLab compute target**
+   - source parser、semantic/type check、WGSL codegen、reflection 和 `.wgslc` 构建产物共同支持 compute entry。
+   - compute 与 render stage 共用 binding 分配、宏和 artifact target 校验。
+4. **树木/岩石 GPU compaction**
+   - 先清空各 batch counter/indirect instance count，再按 source range 执行 cull、density 和 LOD，写入 compacted instance stream。
+   - indirect argument 的 index/vertex count 与 first index 来自普通 mesh/submesh，不在 shader 中复制模型常量。
+5. **草地高实例数**
+   - 在树木/岩石正确性闭包通过后复用相同能力；单独衡量 compute、vertex 与 fragment/overdraw 的占比。
+
+第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
+
+### 移动端约束与验收
+
+- workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
+- 第一版允许每 render batch 一个 atomic append counter，但要记录 counter 竞争和 clear 成本；只有数据证明它成为瓶颈时才引入 prefix-sum 多 pass。
+- camera、manifest、画质、可见 category、分辨率和采样窗口必须相同；切换 backend 仍通过 query 刷新页面。
+- 功能门：实例/category/LOD 计数、cell/debug view、阴影、截图和零 validation error。
+- 性能门：draw calls、CPU frame median/p95、FPS median/p5；设备支持 timestamp 时增加等价边界的 GPU time。
+- 性能表同时报告 WebGL2 原始 cell batch、WebGL2 中立 compact batch、WebGPU 中立 compact batch、WebGPU compute/indirect，避免把通用合批收益错误归因于 WebGPU。
 
 ## Example 与测试契约
 
