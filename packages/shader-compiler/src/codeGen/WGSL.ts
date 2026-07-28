@@ -50,12 +50,22 @@ type WorkgroupVariable = {
   arrayLength?: string;
   sourceIndex: number;
   branch: BranchSignature;
+  atomic: boolean;
 };
 
 type StorageElementReference = {
+  kind: "storage";
   storageBuffer: StorageBuffer;
   expression: ASTNode.PostfixExpression;
 };
+
+type WorkgroupAtomicReference = {
+  kind: "workgroup";
+  workgroupVariable: WorkgroupVariable;
+  expression: ASTNode.PostfixExpression | ASTNode.VariableIdentifier;
+};
+
+type AtomicReference = StorageElementReference | WorkgroupAtomicReference;
 
 /**
  * Direct ShaderLab AST to WGSL code generator.
@@ -108,7 +118,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._vertexEntry = vertexEntry;
     this._fragmentEntry = fragmentEntry;
     this._collectGlobalResources(node, vertexEntry, fragmentEntry);
-    this._prepareStorageAtomics(node, false);
+    this._prepareAtomics(node, false);
 
     const generated = super.visitShaderProgram(node, vertexEntry, fragmentEntry);
     this._collectFragmentOutputs(node, fragmentEntry);
@@ -138,7 +148,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._resetProgram();
     VisitorContext.reset();
     this._collectGlobalResources(node, "", "", computeEntry);
-    this._prepareStorageAtomics(node, true);
+    this._prepareAtomics(node, true);
 
     const generated = this._visitComputeProgramBody(node, computeEntry);
     const reflection = this._createReflection();
@@ -274,14 +284,20 @@ export class WGSLVisitor extends GLESVisitor {
     if (name === "barrier" && this._stage() !== "compute") {
       throw new Error("ShaderLab barrier is only supported in compute passes.");
     }
-    if (name === "atomicAdd") {
-      const target = params[0] ? this._storageElementReference(params[0]) : undefined;
-      if (!target || params.length !== 2) {
-        throw new Error("ShaderLab atomicAdd requires a direct element of a writable int[] or uint[] storage buffer.");
+    if (name === "atomicAdd" || name === "atomicLoad" || name === "atomicStore") {
+      const expectedParameterCount = name === "atomicLoad" ? 1 : 2;
+      const target = params[0] ? this._atomicReference(params[0]) : undefined;
+      if (!target || params.length !== expectedParameterCount) {
+        throw new Error(
+          `ShaderLab ${name} requires a shared int/uint variable or direct shared/storage int/uint array element.`
+        );
       }
       const targetCode = params[0].codeGen(this);
+      if (name === "atomicLoad") {
+        return `atomicLoad(&${targetCode})`;
+      }
       const valueCode = params[1].codeGen(this);
-      return `atomicAdd(&${targetCode}, ${valueCode})`;
+      return `${name}(&${targetCode}, ${valueCode})`;
     }
 
     const args = params.map((param) => param.codeGen(this));
@@ -729,7 +745,8 @@ export class WGSLVisitor extends GLESVisitor {
             type: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
             arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
             sourceIndex: symbol.astNode.location.start.index,
-            branch
+            branch,
+            atomic: false
           });
         }
         continue;
@@ -901,7 +918,8 @@ export class WGSLVisitor extends GLESVisitor {
     const workgroupVariables = Array.from(this._workgroupVariables.values())
       .sort((left, right) => left.sourceIndex - right.sourceIndex)
       .map((variable) => {
-        const type = variable.arrayLength ? `array<${variable.type}, ${variable.arrayLength}>` : variable.type;
+        const elementType = variable.atomic ? `atomic<${variable.type}>` : variable.type;
+        const type = variable.arrayLength ? `array<${elementType}, ${variable.arrayLength}>` : elementType;
         return this._guardBranch(variable.branch, `var<workgroup> ${variable.name}: ${type};`);
       })
       .join("\n");
@@ -934,8 +952,8 @@ export class WGSLVisitor extends GLESVisitor {
     return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${workgroupVariables}\n${resources}\n${storageBuffers}\n${nanHelper}`;
   }
 
-  private _prepareStorageAtomics(node: TreeNode, isComputeProgram: boolean): void {
-    const atomicTargets = new Set<ASTNode.PostfixExpression>();
+  private _prepareAtomics(node: TreeNode, isComputeProgram: boolean): void {
+    const atomicTargets = new Set<TreeNode>();
     const visitAtomicCalls = (current: TreeNode): void => {
       if (current instanceof ASTNode.FunctionCall) {
         const call = current.children[0] as ASTNode.FunctionCallGeneric;
@@ -943,28 +961,37 @@ export class WGSLVisitor extends GLESVisitor {
         const paramsNode = call.children[2];
         if (
           !(call.fnSymbol instanceof FnSymbol) &&
-          identifier.lexeme === "atomicAdd" &&
+          (identifier.lexeme === "atomicAdd" ||
+            identifier.lexeme === "atomicLoad" ||
+            identifier.lexeme === "atomicStore") &&
           paramsNode instanceof ASTNode.FunctionCallParameterList
         ) {
+          const name = identifier.lexeme;
           if (!isComputeProgram) {
-            throw new Error("ShaderLab atomicAdd is only supported in compute passes.");
+            throw new Error(`ShaderLab ${name} is only supported in compute passes.`);
           }
           const params = paramsNode.paramNodes;
-          const target = params[0] ? this._storageElementReference(params[0]) : undefined;
-          if (!target || params.length !== 2) {
+          const expectedParameterCount = name === "atomicLoad" ? 1 : 2;
+          const target = params[0] ? this._atomicReference(params[0]) : undefined;
+          if (!target || params.length !== expectedParameterCount) {
             throw new Error(
-              "ShaderLab atomicAdd requires a direct element of a writable int[] or uint[] storage buffer."
+              `ShaderLab ${name} requires a shared int/uint variable or direct shared/storage int/uint array element.`
             );
           }
-          if (target.storageBuffer.access !== "read_write") {
-            throw new Error(`ShaderLab atomicAdd target "${target.storageBuffer.name}" must be writable.`);
+          if (target.kind === "storage" && target.storageBuffer.access !== "read_write") {
+            throw new Error(`ShaderLab ${name} target "${target.storageBuffer.name}" must be writable.`);
           }
-          if (target.storageBuffer.elementType !== "i32" && target.storageBuffer.elementType !== "u32") {
-            throw new Error(
-              `ShaderLab atomicAdd target "${target.storageBuffer.name}" must contain scalar int or uint elements.`
-            );
+          const targetType =
+            target.kind === "storage" ? target.storageBuffer.elementType : target.workgroupVariable.type;
+          if (targetType !== "i32" && targetType !== "u32") {
+            const targetName = target.kind === "storage" ? target.storageBuffer.name : target.workgroupVariable.name;
+            throw new Error(`ShaderLab ${name} target "${targetName}" must contain scalar int or uint values.`);
           }
-          target.storageBuffer.atomic = true;
+          if (target.kind === "storage") {
+            target.storageBuffer.atomic = true;
+          } else {
+            target.workgroupVariable.atomic = true;
+          }
           atomicTargets.add(target.expression);
         }
       }
@@ -985,7 +1012,21 @@ export class WGSLVisitor extends GLESVisitor {
         const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
         if (storageBuffer?.atomic && !atomicTargets.has(current)) {
           throw new Error(
-            `ShaderLab storage buffer "${storageBuffer.name}" uses atomic elements; only atomicAdd access is supported.`
+            `ShaderLab storage buffer "${storageBuffer.name}" uses atomic elements; only atomic operations are supported.`
+          );
+        }
+        const workgroupVariable = root ? this._workgroupVariables.get(root) : undefined;
+        if (workgroupVariable?.atomic && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab shared variable "${workgroupVariable.name}" uses atomic elements; only atomic operations are supported.`
+          );
+        }
+      } else if (current instanceof ASTNode.VariableIdentifier) {
+        const name = ParserUtils.extractDirectIdentLexeme(current);
+        const workgroupVariable = name ? this._workgroupVariables.get(name) : undefined;
+        if (workgroupVariable?.atomic && !workgroupVariable.arrayLength && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab shared variable "${workgroupVariable.name}" is atomic; only atomic operations are supported.`
           );
         }
       }
@@ -1008,7 +1049,33 @@ export class WGSLVisitor extends GLESVisitor {
     }
     const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
     const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
-    return storageBuffer ? { storageBuffer, expression: current } : undefined;
+    return storageBuffer ? { kind: "storage", storageBuffer, expression: current } : undefined;
+  }
+
+  private _atomicReference(node: TreeNode): AtomicReference | undefined {
+    const storageReference = this._storageElementReference(node);
+    if (storageReference) {
+      return storageReference;
+    }
+
+    let current = node;
+    while (current.children.length === 1 && current.children[0] instanceof TreeNode) {
+      current = current.children[0];
+    }
+    if (current instanceof ASTNode.VariableIdentifier) {
+      const name = ParserUtils.extractDirectIdentLexeme(current);
+      const workgroupVariable = name ? this._workgroupVariables.get(name) : undefined;
+      if (workgroupVariable && !workgroupVariable.arrayLength) {
+        return { kind: "workgroup", workgroupVariable, expression: current };
+      }
+      return undefined;
+    }
+    if (!(current instanceof ASTNode.PostfixExpression) || current.children.length !== 4) {
+      return undefined;
+    }
+    const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+    const workgroupVariable = root ? this._workgroupVariables.get(root) : undefined;
+    return workgroupVariable?.arrayLength ? { kind: "workgroup", workgroupVariable, expression: current } : undefined;
   }
 
   private _createVertexWrapper(): string {

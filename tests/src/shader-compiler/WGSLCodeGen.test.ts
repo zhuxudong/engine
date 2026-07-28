@@ -86,6 +86,44 @@ Shader "WGSL/ComputeAtomicAppend" {
 }
 `;
 
+const workgroupAtomicComputeShader = `
+Shader "WGSL/ComputeWorkgroupAtomicAppend" {
+  SubShader "Default" {
+    Pass "Append" {
+      shared uint groupCount;
+      shared uint groupBase;
+      buffer uint counters[];
+      buffer uint outputValues[];
+
+      void appendValues() {
+        uint index = gl_GlobalInvocationID.x;
+        if (gl_LocalInvocationID.x == 0u) {
+          atomicStore(groupCount, 0u);
+        }
+        barrier();
+
+        bool valid = index % 3u != 0u;
+        uint localSlot = 0u;
+        if (valid) {
+          localSlot = atomicAdd(groupCount, 1u);
+        }
+        barrier();
+
+        if (gl_LocalInvocationID.x == 0u) {
+          groupBase = atomicAdd(counters[0u], atomicLoad(groupCount));
+        }
+        barrier();
+        if (valid) {
+          outputValues[groupBase + localSlot] = index;
+        }
+      }
+
+      ComputeShader = appendValues;
+    }
+  }
+}
+`;
+
 function generateWGSL(): { vertex: string; fragment: string } {
   return generateWGSLFromSource(basicShader);
 }
@@ -227,6 +265,29 @@ describe("ShaderCompiler WGSL codegen", () => {
     expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
   });
 
+  it("lowers shared atomics with load and store to valid WGSL", async () => {
+    const { compute, reflection } = generateWGSLCompute(workgroupAtomicComputeShader);
+
+    expect(compute).toContain("var<workgroup> groupCount: atomic<u32>;");
+    expect(compute).toContain("var<workgroup> groupBase: u32;");
+    expect(compute).toContain("atomicStore(&groupCount, 0u)");
+    expect(compute).toContain("atomicAdd(&groupCount, 1u)");
+    expect(compute).toContain("atomicLoad(&groupCount)");
+    expect(compute).toContain("atomicAdd(&counters[0u], atomicLoad(&groupCount))");
+    expect(reflection.storageBuffers?.map(({ name }) => name)).toEqual(["counters", "outputValues"]);
+    expect(reflection.uniforms.some(({ name }) => name === "groupCount" || name === "groupBase")).toBe(false);
+
+    if (!navigator.gpu) {
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
+
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+  });
+
   it("executes the generated compute artifact and copies storage-buffer data", async () => {
     if (!navigator.gpu) {
       return;
@@ -327,6 +388,64 @@ describe("ShaderCompiler WGSL codegen", () => {
     readback.unmap();
   });
 
+  it("executes two generated workgroups with one global reservation each", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const { compute } = generateWGSLCompute(workgroupAtomicComputeShader);
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: device.createShaderModule({ code: compute }), entryPoint: "main" }
+    });
+    const invocationCount = 128;
+    const expected = Array.from({ length: invocationCount }, (_, index) => index).filter((index) => index % 3 !== 0);
+    const counter = device.createBuffer({
+      size: Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+    const output = device.createBuffer({
+      size: invocationCount * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+      size: (invocationCount + 1) * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    device.queue.writeBuffer(counter, 0, new Uint32Array([0]));
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: counter } },
+        { binding: 1, resource: { buffer: output } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(2);
+    pass.end();
+    encoder.copyBufferToBuffer(counter, 0, readback, 0, Uint32Array.BYTES_PER_ELEMENT);
+    encoder.copyBufferToBuffer(
+      output,
+      0,
+      readback,
+      Uint32Array.BYTES_PER_ELEMENT,
+      invocationCount * Uint32Array.BYTES_PER_ELEMENT
+    );
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    const result = new Uint32Array(readback.getMappedRange().slice(0));
+    expect(result[0]).toBe(expected.length);
+    expect(Array.from(result.slice(1, expected.length + 1)).sort((left, right) => left - right)).toEqual(expected);
+    readback.unmap();
+  });
+
   it("rejects unsupported non-atomic access to an atomic storage buffer", () => {
     const source = atomicComputeShader.replace(
       "outputValues[outputOffsets[0u] + gl_LocalInvocationID.x] = index;",
@@ -334,7 +453,15 @@ describe("ShaderCompiler WGSL codegen", () => {
     );
 
     expect(() => generateWGSLCompute(source)).toThrow(
-      'ShaderLab storage buffer "counters" uses atomic elements; only atomicAdd access is supported.'
+      'ShaderLab storage buffer "counters" uses atomic elements; only atomic operations are supported.'
+    );
+  });
+
+  it("rejects non-atomic access to a shared atomic variable", () => {
+    const source = workgroupAtomicComputeShader.replace("uint localSlot = 0u;", "uint localSlot = groupCount;");
+
+    expect(() => generateWGSLCompute(source)).toThrow(
+      'ShaderLab shared variable "groupCount" is atomic; only atomic operations are supported.'
     );
   });
 
@@ -351,6 +478,20 @@ describe("ShaderCompiler WGSL codegen", () => {
     expect(compute).toContain("var<storage, read_write> counters: array<atomic<u32>>");
     expect(compute).toContain("atomicAdd(&counters[0u], u32(64))");
     expect(compute).toContain("workgroupBarrier()");
+  });
+
+  it("preserves shared atomic lowering in a WGSL precompiled artifact", () => {
+    const compiler = new ShaderCompiler();
+    const artifact = compiler._precompile(workgroupAtomicComputeShader, ShaderLanguage.WGSL, "shaders://root/");
+    const pass = artifact.subShaders[0].passes[0];
+    const compute = ShaderMacroProcessor.evaluate(
+      pass.computeShaderInstructions!,
+      new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "64"]])
+    );
+
+    expect(compute).toContain("var<workgroup> groupCount: atomic<u32>;");
+    expect(compute).toContain("atomicStore(&groupCount, 0u)");
+    expect(compute).toContain("atomicLoad(&groupCount)");
   });
 
   it("rejects workgroup memory and barriers in render passes", () => {
