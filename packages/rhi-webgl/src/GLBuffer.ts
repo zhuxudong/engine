@@ -18,6 +18,12 @@ export class GLBuffer implements IPlatformBuffer {
     bufferUsage: BufferUsage = BufferUsage.Static,
     data?: ArrayBuffer | ArrayBufferView
   ) {
+    if (type & (BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer)) {
+      throw new Error("Storage and indirect buffer bindings are not supported by the WebGL backend.");
+    }
+    if ((type & (type - 1)) !== 0) {
+      throw new Error("The WebGL backend accepts exactly one buffer binding.");
+    }
     const gl = rhi.gl;
     const glBuffer = gl.createBuffer();
     const glBufferUsage = this._getGLBufferUsage(gl, bufferUsage);
@@ -32,6 +38,8 @@ export class GLBuffer implements IPlatformBuffer {
       case BufferBindFlag.ConstantBuffer:
         glBindTarget = (<WebGL2RenderingContext>gl).UNIFORM_BUFFER;
         break;
+      default:
+        throw new Error(`Unsupported WebGL buffer binding: ${type}`);
     }
     this._gl = gl;
     this._glBuffer = glBuffer;

@@ -28,7 +28,7 @@ export class WebGPUBuffer implements IPlatformBuffer {
     const size = Math.max(4, WebGPUBuffer._alignToFour(byteLength));
     this._shadowData = new Uint8Array(size);
     this._gpuBuffer = device.device.createBuffer({
-      label: BufferBindFlag[type],
+      label: WebGPUBuffer._getLabel(type),
       size,
       usage: WebGPUBuffer._getUsage(type)
     });
@@ -116,16 +116,32 @@ export class WebGPUBuffer implements IPlatformBuffer {
 
   private static _getUsage(type: BufferBindFlag): GPUBufferUsageFlags {
     const copyUsage = GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    switch (type) {
-      case BufferBindFlag.VertexBuffer:
-        return GPUBufferUsage.VERTEX | copyUsage;
-      case BufferBindFlag.IndexBuffer:
-        return GPUBufferUsage.INDEX | copyUsage;
-      case BufferBindFlag.ConstantBuffer:
-        return GPUBufferUsage.UNIFORM | copyUsage;
-      default:
-        throw new Error(`Unsupported buffer binding: ${type}`);
+    const supportedBindings =
+      BufferBindFlag.VertexBuffer |
+      BufferBindFlag.IndexBuffer |
+      BufferBindFlag.ConstantBuffer |
+      BufferBindFlag.StorageBuffer |
+      BufferBindFlag.IndirectBuffer;
+    if (!Number.isInteger(type) || (type as number) === 0 || (type & ~supportedBindings) !== 0) {
+      throw new Error(`Unsupported buffer bindings: ${type}`);
     }
+    let usage = copyUsage;
+    if (type & BufferBindFlag.VertexBuffer) usage |= GPUBufferUsage.VERTEX;
+    if (type & BufferBindFlag.IndexBuffer) usage |= GPUBufferUsage.INDEX;
+    if (type & BufferBindFlag.ConstantBuffer) usage |= GPUBufferUsage.UNIFORM;
+    if (type & BufferBindFlag.StorageBuffer) usage |= GPUBufferUsage.STORAGE;
+    if (type & BufferBindFlag.IndirectBuffer) usage |= GPUBufferUsage.INDIRECT;
+    return usage;
+  }
+
+  private static _getLabel(type: BufferBindFlag): string {
+    const labels: string[] = [];
+    if (type & BufferBindFlag.VertexBuffer) labels.push("Vertex");
+    if (type & BufferBindFlag.IndexBuffer) labels.push("Index");
+    if (type & BufferBindFlag.ConstantBuffer) labels.push("Constant");
+    if (type & BufferBindFlag.StorageBuffer) labels.push("Storage");
+    if (type & BufferBindFlag.IndirectBuffer) labels.push("Indirect");
+    return labels.length > 0 ? `${labels.join("|")} buffer` : "Invalid buffer";
   }
 
   private static _alignToFour(byteLength: number): number {

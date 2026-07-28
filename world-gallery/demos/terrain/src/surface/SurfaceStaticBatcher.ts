@@ -99,7 +99,7 @@ export class SurfaceStaticBatcher {
     const capacity = ranges.reduce((count, item) => count + item.range.count, 0);
     const instanceBuffer = new Buffer(
       engine,
-      BufferBindFlag.VertexBuffer,
+      BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
       capacity * SURFACE_INSTANCE_STRIDE,
       BufferUsage.Dynamic
     );
