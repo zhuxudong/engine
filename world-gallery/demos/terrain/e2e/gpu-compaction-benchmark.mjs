@@ -1,13 +1,15 @@
 import { chromium } from "@playwright/test";
 
 const variants = {
-  beforeCompute:
-    process.env.BASELINE_URL ?? "http://127.0.0.1:5188/demos/terrain/grasslands/?backend=webgpu",
-  gpuCompaction:
-    process.env.CANDIDATE_URL ?? "http://127.0.0.1:5187/demos/terrain/grasslands/?backend=webgpu"
+  beforeCompute: process.env.BASELINE_URL ?? "http://127.0.0.1:5188/demos/terrain/grasslands/?backend=webgpu",
+  gpuCompaction: process.env.CANDIDATE_URL ?? "http://127.0.0.1:5187/demos/terrain/grasslands/?backend=webgpu"
 };
 const churnLods = process.env.BENCHMARK_LOD_CHURN === "1";
 const executablePath = process.env.BENCHMARK_BROWSER_EXECUTABLE ?? chromium.executablePath();
+const labels = {
+  beforeCompute: process.env.BASELINE_LABEL ?? "beforeCompute",
+  gpuCompaction: process.env.CANDIDATE_LABEL ?? "gpuCompaction"
+};
 const orders = [
   ["beforeCompute", "gpuCompaction"],
   ["gpuCompaction", "beforeCompute"],
@@ -39,8 +41,10 @@ for (let round = 0; round < orders.length; round++) {
       }
     });
     page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+    const navigationStartedAt = performance.now();
     await page.goto(variants[variant], { waitUntil: "networkidle", timeout: 120_000 });
     await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
+    const readyMs = performance.now() - navigationStartedAt;
     await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
     await page.waitForFunction(() => window.grasslandsDebug.inspectSurface().transitioningRanges === 0);
     await page.waitForTimeout(1_800);
@@ -83,6 +87,8 @@ for (let round = 0; round < orders.length; round++) {
     results.push({
       round: round + 1,
       variant,
+      label: labels[variant],
+      readyMs,
       fps: (frameTimes.length * 1_000) / duration,
       p50: sorted[Math.floor(sorted.length * 0.5)],
       p95: sorted[Math.floor(sorted.length * 0.95)],
