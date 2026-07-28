@@ -190,8 +190,9 @@ export class WGSLVisitor extends GLESVisitor {
     const params = paramsNode instanceof ASTNode.FunctionCallParameterList ? paramsNode.paramNodes : [];
 
     if (call.fnSymbol instanceof FnSymbol) {
-      VisitorContext.context.referenceGlobal(call.fnSymbol.ident, ESymbolType.FN);
-      const parameterInfo = call.fnSymbol.astNode.protoType.parameterList ?? [];
+      const functionSymbol = this._resolveFunctionSymbol(identifier.lexeme, params, call.fnSymbol);
+      VisitorContext.context.referenceGlobal(functionSymbol.ident, ESymbolType.FN);
+      const parameterInfo = functionSymbol.astNode.protoType.parameterList ?? [];
       const args: string[] = [];
       for (let i = 0; i < params.length; i++) {
         const info = parameterInfo[i];
@@ -199,7 +200,9 @@ export class WGSLVisitor extends GLESVisitor {
           continue;
         }
         const expression = params[i].codeGen(this);
-        const samplerType = info?.typeInfo && this._samplerType(info.typeInfo.typeLexeme);
+        const samplerType =
+          (info?.typeInfo && this._samplerType(info.typeInfo.typeLexeme)) ??
+          (info?.astNode instanceof TreeNode ? this._opaqueSamplerParameter(info.astNode)?.samplerType : undefined);
         if (samplerType) {
           args.push(expression, this._samplerName(expression));
         } else if (info?.astNode instanceof ASTNode.ParameterDeclaration && this._isOutParameter(info.astNode)) {
@@ -209,7 +212,7 @@ export class WGSLVisitor extends GLESVisitor {
           args.push(expression);
         }
       }
-      return `${this._functionName(call.fnSymbol.astNode)}(${args.join(", ")})`;
+      return `${this._functionName(functionSymbol.astNode)}(${args.join(", ")})`;
     }
 
     const name = identifier.lexeme;
@@ -368,7 +371,12 @@ export class WGSLVisitor extends GLESVisitor {
 
   override visitParameterDeclaration(node: ASTNode.ParameterDeclaration): string {
     if (!node.ident || !node.typeInfo) {
-      return this.defaultCodeGen(node.children);
+      const opaqueSampler = this._opaqueSamplerParameter(node);
+      if (opaqueSampler) {
+        const { name, samplerType } = opaqueSampler;
+        return `${name}: ${samplerType.texture}, ${name}_sampler: ${samplerType.sampler}`;
+      }
+      return super.visitParameterDeclaration(node);
     }
     const name = node.ident.lexeme;
     const samplerType = this._samplerType(node.typeInfo.typeLexeme);
@@ -410,21 +418,38 @@ export class WGSLVisitor extends GLESVisitor {
     const pointerParams = new Set<string>();
     const samplerParams = new Map<string, string>();
     for (const info of node.protoType.parameterList ?? []) {
-      if (!info.ident || !info.typeInfo || !(info.astNode instanceof ASTNode.ParameterDeclaration)) {
+      if (!(info.astNode instanceof TreeNode)) {
         continue;
       }
-      if (this._isOutParameter(info.astNode)) {
+      if (
+        info.ident &&
+        info.typeInfo &&
+        info.astNode instanceof ASTNode.ParameterDeclaration &&
+        this._isOutParameter(info.astNode)
+      ) {
         pointerParams.add(info.ident.lexeme);
       }
-      if (this._samplerType(info.typeInfo.typeLexeme)) {
+      if (info.ident && info.typeInfo && this._samplerType(info.typeInfo.typeLexeme)) {
         samplerParams.set(info.ident.lexeme, info.typeInfo.typeLexeme);
+      } else {
+        const opaqueSampler = this._opaqueSamplerParameter(info.astNode);
+        if (opaqueSampler) {
+          samplerParams.set(opaqueSampler.name, opaqueSampler.typeLexeme);
+        }
       }
     }
     this._pointerParameterStack.push(pointerParams);
     this._samplerParameterStack.push(samplerParams);
     const parameters = node.protoType.parameterList
       ?.filter((item) => !item.typeInfo || !VisitorContext.context.getStructRole(item.typeInfo.typeLexeme))
-      .map((item) => item.astNode.codeGen(this))
+      .map((item) => {
+        const opaqueSampler = item.astNode instanceof TreeNode ? this._opaqueSamplerParameter(item.astNode) : undefined;
+        if (opaqueSampler) {
+          const { name, samplerType } = opaqueSampler;
+          return `${name}: ${samplerType.texture}, ${name}_sampler: ${samplerType.sampler}`;
+        }
+        return item.astNode.codeGen(this);
+      })
       .join(", ");
     const returnType = this._typeFromSpecifier(node.protoType.returnType.typeSpecifier);
     const body = node.statements.codeGen(this);
@@ -436,7 +461,8 @@ export class WGSLVisitor extends GLESVisitor {
           !VisitorContext.context.getStructRole(item.typeInfo.typeLexeme) &&
           item.astNode instanceof ASTNode.ParameterDeclaration &&
           !this._isOutParameter(item.astNode) &&
-          !this._samplerType(item.typeInfo.typeLexeme)
+          !this._samplerType(item.typeInfo.typeLexeme) &&
+          !this._opaqueSamplerParameter(item.astNode)
       )
       .map((item) => `var ${item.ident!.lexeme}: ${this._type(item.typeInfo!)} = _in_${item.ident!.lexeme};`)
       .join("\n");
@@ -1127,8 +1153,17 @@ ${outputs.join("\n")}
         return this._type(member.typeInfo);
       }
     }
+    if (node instanceof ASTNode.FunctionCall) {
+      const call = node.children[0] as ASTNode.FunctionCallGeneric;
+      const identifier = call.children[0] as ASTNode.FunctionIdentifier;
+      const paramsNode = call.children[2];
+      if (call.fnSymbol instanceof FnSymbol && paramsNode instanceof ASTNode.FunctionCallParameterList) {
+        const functionSymbol = this._resolveFunctionSymbol(identifier.lexeme, paramsNode.paramNodes, call.fnSymbol);
+        return this._typeFromSpecifier(functionSymbol.astNode.protoType.returnType.typeSpecifier);
+      }
+    }
     const directType = (node as TreeNode & { type?: unknown }).type;
-    if (directType !== undefined && directType !== TypeAny) {
+    if (directType !== undefined && directType !== TypeAny && !this._containsOverloadedFunctionCall(node)) {
       const resolved = this._typeFromDataType(directType);
       if (resolved !== String(TypeAny)) {
         return resolved;
@@ -1406,18 +1441,131 @@ ${outputs.join("\n")}
       return code;
     }
     const prefix = semanticBranch
-      .map((condition) => `${condition.defined ? "#ifdef" : "#ifndef"} ${condition.name}`)
+      .map((condition) =>
+        condition.expression
+          ? condition.defined
+            ? `#if ${condition.expression}`
+            : `#if !(${condition.expression})`
+          : `${condition.defined ? "#ifdef" : "#ifndef"} ${condition.name}`
+      )
       .join("\n");
     return `${prefix}\n${code}\n${"#endif\n".repeat(semanticBranch.length).trimEnd()}`;
   }
 
   private _reflectionConditions(branch: BranchSignature): BranchSignature | undefined {
-    const semanticBranch = this._semanticBranch(branch);
+    const semanticBranch = this._semanticBranch(branch).filter((condition) => !condition.expression);
     return semanticBranch.length > 0 ? semanticBranch : undefined;
   }
 
   private _semanticBranch(branch: BranchSignature): BranchSignature {
     return branch.filter((condition) => condition.defined || !this._includeGuardMacros.has(condition.name));
+  }
+
+  private _resolveFunctionSymbol(
+    name: string,
+    params: readonly (ASTNode.AssignmentExpression | ASTNode.MacroCallArgBlock)[],
+    fallback: FnSymbol
+  ): FnSymbol {
+    const candidates = this._functionSymbols.get(name);
+    if (!candidates || candidates.length < 2) {
+      return fallback;
+    }
+    const argumentTypes = params.map((param) => this._expressionType(param));
+    const matches = candidates.filter((candidate) => {
+      const parameterList = candidate.astNode.protoType.parameterList ?? [];
+      if (parameterList.length !== argumentTypes.length) {
+        return false;
+      }
+      return parameterList.every((parameter, index) => {
+        if (!parameter.typeInfo || !argumentTypes[index]) {
+          return true;
+        }
+        return this._type(parameter.typeInfo) === argumentTypes[index];
+      });
+    });
+    return matches.length === 1 ? matches[0] : fallback;
+  }
+
+  private _containsOverloadedFunctionCall(node: TreeNode): boolean {
+    if (node instanceof ASTNode.FunctionCall) {
+      const call = node.children[0] as ASTNode.FunctionCallGeneric;
+      const identifier = call.children[0] as ASTNode.FunctionIdentifier;
+      if (call.fnSymbol instanceof FnSymbol && (this._functionSymbols.get(identifier.lexeme)?.length ?? 0) > 1) {
+        return true;
+      }
+    }
+    return node.children.some((child) => child instanceof TreeNode && this._containsOverloadedFunctionCall(child));
+  }
+
+  private _opaqueSamplerParameter(node: TreeNode):
+    | {
+        name: string;
+        typeLexeme: string;
+        samplerType: { texture: string; sampler: "sampler" | "sampler_comparison" };
+      }
+    | undefined {
+    if (node instanceof ASTNode.ParameterDeclaration) {
+      const macroSampler = this._opaqueSamplerMacroParameter(node);
+      if (macroSampler) {
+        return macroSampler;
+      }
+    }
+    const source =
+      node instanceof ASTNode.ParameterDeclaration ? super.visitParameterDeclaration(node) : node.codeGen(this);
+    const match =
+      /(?:^|\s)(?:(?:lowp|mediump|highp)\s+)?(sampler2DShadow|[iu]?sampler2D(?:Array)?|samplerCube)\s+([A-Za-z_]\w*)\b/m.exec(
+        source
+      );
+    if (!match) {
+      return undefined;
+    }
+    const samplerType = this._samplerType(match[1]);
+    return samplerType ? { name: match[2], typeLexeme: match[1], samplerType } : undefined;
+  }
+
+  private _opaqueSamplerMacroParameter(node: ASTNode.ParameterDeclaration):
+    | {
+        name: string;
+        typeLexeme: string;
+        samplerType: { texture: string; sampler: "sampler" | "sampler_comparison" };
+      }
+    | undefined {
+    const macroCall = node.children.find(
+      (child): child is ASTNode.MacroCallFunction => child instanceof ASTNode.MacroCallFunction
+    );
+    const paramsNode = macroCall?.children[2];
+    if (!macroCall || !(paramsNode instanceof ASTNode.FunctionCallParameterList)) {
+      return undefined;
+    }
+
+    const candidates: {
+      name: string;
+      typeLexeme: string;
+      samplerType: { texture: string; sampler: "sampler" | "sampler_comparison" };
+    }[] = [];
+    for (const definition of macroCall.visibleMacroDefinitions) {
+      if (!definition.valueText) {
+        continue;
+      }
+      const match =
+        /(?:^|\s)(?:(?:lowp|mediump|highp)\s+)?(sampler2DShadow|[iu]?sampler2D(?:Array)?|samplerCube)\s+([A-Za-z_]\w*)\b/.exec(
+          definition.valueText
+        );
+      if (!match) {
+        continue;
+      }
+      const samplerType = this._samplerType(match[1]);
+      const parameterIndex = definition.params.indexOf(match[2]);
+      const actualParameter = paramsNode.paramNodes[parameterIndex];
+      if (samplerType && actualParameter) {
+        candidates.push({
+          name: actualParameter.codeGen(this).trim(),
+          typeLexeme: match[1],
+          samplerType
+        });
+      }
+    }
+    return candidates.find((candidate) => candidate.typeLexeme === "sampler2DShadow") ?? candidates[0];
   }
 
   private _requiresUniformArrayWrapper(type: string): boolean {

@@ -94,7 +94,7 @@ export class Lexer extends BaseLexer {
   static sameBranch(a: BranchSignature, b: BranchSignature): boolean {
     if (a.length !== b.length) return false;
     for (let i = 0, n = a.length; i < n; i++) {
-      if (a[i].name !== b[i].name || a[i].defined !== b[i].defined) return false;
+      if (a[i].name !== b[i].name || a[i].defined !== b[i].defined || a[i].expression !== b[i].expression) return false;
     }
     return true;
   }
@@ -190,6 +190,18 @@ export class Lexer extends BaseLexer {
         case Keyword.MACRO_IF:
           this._branchStack.push({ name: `__if_${++Lexer._ifCounter}`, defined: true });
           break;
+        case Keyword.MACRO_CONDITIONAL_EXPRESSION: {
+          const index = this._branchStack.length - 1;
+          const top = this._branchStack[index];
+          if (top?.name.startsWith("__if_")) {
+            this._branchStack[index] = {
+              name: top.name,
+              defined: top.defined,
+              expression: tok.lexeme.trim()
+            };
+          }
+          break;
+        }
         case Keyword.MACRO_ELIF:
           // Each `#elif` link gets a fresh tag so it's exclusive with earlier arms.
           if (this._branchStack.length > 0) {
@@ -202,7 +214,12 @@ export class Lexer extends BaseLexer {
         case Keyword.MACRO_ELSE: {
           // Flip polarity: `#ifdef X` → `[X=true]` becomes `[X=false]`; `__if_n` likewise.
           const top = this._branchStack[this._branchStack.length - 1];
-          if (top) this._branchStack[this._branchStack.length - 1] = { name: top.name, defined: !top.defined };
+          if (top)
+            this._branchStack[this._branchStack.length - 1] = {
+              name: top.name,
+              defined: !top.defined,
+              expression: top.expression
+            };
           break;
         }
         case Keyword.MACRO_ENDIF:
@@ -922,11 +939,13 @@ export class Lexer extends BaseLexer {
     // path sees — comments stripped, whitespace collapsed). Two `#define`s
     // with the same name but different value text produce different keys,
     // so disjoint-branch entries stay separate.
-    const dedupKey = `${paramsLexeme ?? ""}=${Lexer._normalizeValueText(this._source, valueStart, valueEnd)}`;
+    const valueText = Lexer._normalizeValueText(this._source, valueStart, valueEnd);
+    const dedupKey = `${paramsLexeme ?? ""}=${valueText}`;
     const info: MacroDefineInfo = {
       isFunction: paramsLexeme !== undefined,
       params,
       dedupKey,
+      valueText,
       branch: this._branchStack.length === 0 ? EMPTY_BRANCH : this._branchStack.slice()
     };
     const arr = this.macroDefineList[name];

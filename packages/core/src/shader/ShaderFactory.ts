@@ -89,6 +89,7 @@ mat3 _normalMatFromModel(mat3 m) {
   // shader-compiler DCE may have stripped them from Transform.glsl.
   // NOTE: keep this in sync with _derivedDefines above.
   private static readonly _cameraMatrixCandidates: ReadonlyArray<string> = ["camera_ViewMat", "camera_VPMat"];
+  private static readonly _depthTextureUniformNames: ReadonlySet<string> = new Set(["camera_DepthTexture"]);
 
   private static readonly _uboUniformRegex =
     /^[ \t]*uniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+(\w+)\s*(\[.+?\])?\s*;/gm;
@@ -307,6 +308,55 @@ mat3 _normalMatFromModel(mat3 m) {
         uniforms: reflection.uniforms.filter((uniform) => !instanceUniforms.has(uniform.name))
       },
       instanceLayout
+    };
+  }
+
+  /**
+   * Lowers engine depth-texture uniforms from ShaderLab's vec4 sampler contract to WGSL's depth texture contract.
+   * @param source - Macro-resolved WGSL stage source.
+   * @param reflection - Reflection matching the source variant.
+   * @returns Rewritten source and reflection with native WebGPU depth texture types.
+   * @internal
+   */
+  static lowerWGSLDepthTextures(
+    source: string,
+    reflection: IShaderReflection
+  ): { source: string; reflection: IShaderReflection } {
+    const depthResources = reflection.resources.filter(
+      (resource) => ShaderFactory._depthTextureUniformNames.has(resource.name) && !resource.comparison
+    );
+    if (depthResources.length === 0) {
+      return { source, reflection };
+    }
+
+    for (const resource of depthResources) {
+      const name = resource.name;
+      const escapedName = ShaderFactory._escapeRegExp(name);
+      source = source.replace(new RegExp(`(var\\s+${escapedName}\\s*:\\s*)texture_2d<f32>`, "g"), "$1texture_depth_2d");
+
+      const helperName = `gs_sampleDepth_${name}`;
+      const sampleCall = new RegExp(`textureSample\\(\\s*${escapedName}\\s*,\\s*${escapedName}_sampler\\s*,`, "g");
+      if (sampleCall.test(source)) {
+        source = source.replace(sampleCall, `${helperName}(${name}, ${name}_sampler,`);
+        source =
+          `fn ${helperName}(texture: texture_depth_2d, textureSampler: sampler, uv: vec2<f32>) -> vec4<f32> {
+  let depth = textureSample(texture, textureSampler, uv);
+  return vec4<f32>(depth, 0.0, 0.0, 1.0);
+}
+` + source;
+      }
+    }
+
+    return {
+      source,
+      reflection: {
+        ...reflection,
+        resources: reflection.resources.map((resource) =>
+          ShaderFactory._depthTextureUniformNames.has(resource.name) && !resource.comparison
+            ? { ...resource, textureType: "texture_depth_2d" }
+            : resource
+        )
+      }
     };
   }
 
@@ -550,10 +600,15 @@ fn gs_rendererNormalMatrix() -> mat4x4<f32> {
       if (!source.includes("var<private> _gsInstanceIndex: i32;")) {
         source = `var<private> _gsInstanceIndex: i32;\n${source}`;
       }
-      source = source.replace(
-        "struct GSFragmentInput {",
-        `struct GSFragmentInput {\n  @location(${varyingLocation}) @interpolate(flat) gsInstanceIndex: u32,`
-      );
+      const instanceInput = `  @location(${varyingLocation}) @interpolate(flat) gsInstanceIndex: u32,`;
+      if (source.includes("struct GSFragmentInput {")) {
+        source = source.replace("struct GSFragmentInput {", `struct GSFragmentInput {\n${instanceInput}`);
+      } else {
+        source = source.replace(
+          "@fragment fn main()",
+          `struct GSFragmentInput {\n${instanceInput}\n}\n@fragment fn main(input: GSFragmentInput)`
+        );
+      }
       source = source.replace(
         /(^|\n)(\s*)gs_fragmentEntry\(\);/,
         "$1$2_gsInstanceIndex = i32(input.gsInstanceIndex);\n$2gs_fragmentEntry();"

@@ -243,6 +243,14 @@ export class ShaderPass extends ShaderPart {
       isWebGPU ? vertexSource : undefined,
       isWebGPU ? fragmentSource : undefined
     );
+    if (isWebGPU && reflection) {
+      let lowered = ShaderFactory.lowerWGSLDepthTextures(vertexSource, reflection);
+      vertexSource = lowered.source;
+      reflection = lowered.reflection;
+      lowered = ShaderFactory.lowerWGSLDepthTextures(fragmentSource, reflection);
+      fragmentSource = lowered.source;
+      reflection = lowered.reflection;
+    }
 
     let instanceLayout: InstanceBufferLayout | null = null;
     if (isGPUInstance) {
@@ -400,6 +408,11 @@ export class ShaderPass extends ShaderPart {
     const comparisonResources = new Set(
       reflection.resources.filter((resource) => resource.comparison).map((resource) => resource.name)
     );
+    const comparisonParameterPattern =
+      /\b([A-Za-z_]\w*)\s*:\s*texture_depth_[A-Za-z0-9_]+(?:<[^>]+>)?\s*,\s*\1_sampler\s*:\s*sampler_comparison\b/g;
+    for (const match of source.matchAll(comparisonParameterPattern)) {
+      comparisonResources.add(match[1]);
+    }
     if (comparisonResources.size === 0) {
       return source;
     }

@@ -1705,6 +1705,7 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.macro_call_symbol)
   export class MacroCallSymbol extends TreeNode {
     referenceSymbolNames: string[] = [];
+    visibleMacroDefinitions: MacroDefineInfo[] = [];
     macroName: string;
     /** True iff every `MacroDefineInfo` visible from this call site's branch
      *  has a `valueAst` (i.e. was parsed via the `macro_define` CFG rule).
@@ -1720,6 +1721,7 @@ export namespace ASTNode {
 
     override init(): void {
       this.referenceSymbolNames.length = 0;
+      this.visibleMacroDefinitions.length = 0;
       this.hasAstValue = false;
       this.isFunctionLikeMacro = false;
       this.aliasesNonBuiltinIdent = false;
@@ -1738,7 +1740,9 @@ export namespace ASTNode {
       const callSiteBranch = nameToken.branch;
       const defList = sa.macroDefineList[macroName];
       const refs = this.referenceSymbolNames;
+      const visibleDefinitions = this.visibleMacroDefinitions;
       refs.length = 0;
+      visibleDefinitions.length = 0;
       let visibleCount = 0;
       let allAst = true;
       let isFn = false;
@@ -1747,6 +1751,7 @@ export namespace ASTNode {
         for (let i = 0, n = defList.length; i < n; i++) {
           const info = defList[i];
           if (!Lexer.isVisibleFrom(info.branch, callSiteBranch)) continue;
+          visibleDefinitions.push(info);
           visibleCount++;
           if (info.valueAst == null) allAst = false;
           if (info.isFunction) isFn = true;
@@ -1807,6 +1812,7 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.macro_call_function)
   export class MacroCallFunction extends TreeNode {
     referenceSymbolNames: string[] = [];
+    visibleMacroDefinitions: MacroDefineInfo[] = [];
     macroName: string = "";
     hasAstValue: boolean = false;
     isFunctionLikeMacro: boolean = false;
@@ -1814,6 +1820,7 @@ export namespace ASTNode {
 
     override init(): void {
       this.referenceSymbolNames = [];
+      this.visibleMacroDefinitions = [];
       this.macroName = "";
       this.hasAstValue = false;
       this.isFunctionLikeMacro = false;
@@ -1824,6 +1831,7 @@ export namespace ASTNode {
       const child = this.children[0] as MacroCallSymbol;
 
       this.referenceSymbolNames = child.referenceSymbolNames;
+      this.visibleMacroDefinitions = child.visibleMacroDefinitions;
       this.macroName = child.macroName;
       this.hasAstValue = child.hasAstValue;
       this.isFunctionLikeMacro = child.isFunctionLikeMacro;

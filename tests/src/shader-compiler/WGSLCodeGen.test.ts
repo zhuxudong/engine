@@ -72,11 +72,7 @@ function generateWGSLFromSource(
   };
 }
 
-function formatCompilationErrors(
-  stage: "vertex" | "fragment",
-  info: GPUCompilationInfo,
-  source: string
-): string[] {
+function formatCompilationErrors(stage: string, info: GPUCompilationInfo, source: string): string[] {
   const lines = source.split("\n");
   return info.messages
     .filter((message) => message.type === "error")
@@ -132,9 +128,7 @@ describe("ShaderCompiler WGSL codegen", () => {
 
     const vertexInfo = await device.createShaderModule({ code: vertex }).getCompilationInfo();
     const fragmentInfo = await device.createShaderModule({ code: fragment }).getCompilationInfo();
-    const errors = [...vertexInfo.messages, ...fragmentInfo.messages].filter(
-      (message) => message.type === "error"
-    );
+    const errors = [...vertexInfo.messages, ...fragmentInfo.messages].filter((message) => message.type === "error");
 
     expect(errors.map((message) => message.message)).toEqual([]);
   });
@@ -199,14 +193,38 @@ Shader "WGSL/MacroAlias" {
       vertexInputs: [],
       fragmentOutputs: [0]
     };
-    const source =
-      "let attenuation = textureSampleLevel(scene_ShadowMap, scene_ShadowMap_sampler, shadowCoord, 0.0);";
+    const source = "let attenuation = textureSampleLevel(scene_ShadowMap, scene_ShadowMap_sampler, shadowCoord, 0.0);";
     const shaderPassInternals = ShaderPass as unknown as {
       _rewriteWGSLComparisonSamples(source: string, reflection: IShaderReflection): string;
     };
 
     expect(shaderPassInternals._rewriteWGSLComparisonSamples(source, reflection)).toBe(
       "let attenuation = textureSampleCompareLevel(scene_ShadowMap, scene_ShadowMap_sampler, (shadowCoord).xy, (shadowCoord).z);"
+    );
+  });
+
+  it("rewrites comparison samples for depth texture function parameters", () => {
+    const reflection: IShaderReflection = {
+      uniforms: [],
+      structs: [],
+      resources: [],
+      vertexInputs: [],
+      fragmentOutputs: [0]
+    };
+    const source = `
+fn sampleShadow(
+  shadowMap: texture_depth_2d,
+  shadowMap_sampler: sampler_comparison,
+  shadowCoord: vec3<f32>
+) -> f32 {
+  return textureSampleLevel(shadowMap, shadowMap_sampler, shadowCoord, 0.0);
+}`;
+    const shaderPassInternals = ShaderPass as unknown as {
+      _rewriteWGSLComparisonSamples(source: string, reflection: IShaderReflection): string;
+    };
+
+    expect(shaderPassInternals._rewriteWGSLComparisonSamples(source, reflection)).toContain(
+      "return textureSampleCompareLevel(shadowMap, shadowMap_sampler, (shadowCoord).xy, (shadowCoord).z);"
     );
   });
 
@@ -266,16 +284,41 @@ return output;
         varyingLocation: number
       ): string;
     };
-    const rewritten = shaderFactoryInternals._rewriteWGSLInstanceUniforms(
-      source,
-      uniforms,
-      true,
-      1
-    );
+    const rewritten = shaderFactoryInternals._rewriteWGSLInstanceUniforms(source, uniforms, true, 1);
 
     expect(rewritten.match(/_gsInstanceIndex = i32\(input\.instanceIndex\);/g)).toHaveLength(1);
     expect(rewritten).toContain("output.gsInstanceIndex = input.instanceIndex;");
     expect(rewritten).toContain("@location(1) @interpolate(flat) gsInstanceIndex: u32");
+  });
+
+  it("lowers the camera depth texture to a native WGSL depth resource", () => {
+    const reflection: IShaderReflection = {
+      uniforms: [],
+      structs: [],
+      resources: [
+        {
+          name: "camera_DepthTexture",
+          textureBinding: 1,
+          samplerBinding: 2,
+          textureType: "texture_2d<f32>",
+          comparison: false
+        }
+      ],
+      vertexInputs: [],
+      fragmentOutputs: [0]
+    };
+    const lowered = ShaderFactory.lowerWGSLDepthTextures(
+      `@group(0) @binding(1) var camera_DepthTexture: texture_2d<f32>;
+@group(0) @binding(2) var camera_DepthTexture_sampler: sampler;
+let depth = textureSample(camera_DepthTexture, camera_DepthTexture_sampler, screenUv).r;`,
+      reflection
+    );
+
+    expect(lowered.source).toContain("var camera_DepthTexture: texture_depth_2d;");
+    expect(lowered.source).toContain(
+      "gs_sampleDepth_camera_DepthTexture(camera_DepthTexture, camera_DepthTexture_sampler, screenUv).r"
+    );
+    expect(lowered.reflection.resources[0].textureType).toBe("texture_depth_2d");
   });
 
   it("compiles the world terrain ShaderLab pass to native-valid WGSL", async () => {
@@ -321,6 +364,69 @@ return output;
       ...formatCompilationErrors("vertex", vertexInfo, vertex),
       ...formatCompilationErrors("fragment", fragmentInfo, fragment)
     ];
+
+    expect(errors).toEqual([]);
+  });
+
+  it("compiles Grasslands surface and cloud variants to native-valid WGSL", async () => {
+    const [surfaceSource, cloudSource, cloudShadowInclude, worldNoiseInclude] = await Promise.all([
+      readFile("../world-gallery/demos/terrain/src/shaders/Surface.shader"),
+      readFile("../world-gallery/demos/terrain/grasslands/src/shaders/GrasslandsCloud.shader"),
+      readFile("../world-gallery/demos/terrain/src/shaders/Terrain/GrasslandsCloudShadow.glsl"),
+      readFile("../world-gallery/demos/terrain/src/shaders/Terrain/TerrainWorldNoise.glsl")
+    ]);
+    ShaderFactory.includeMap["Terrain/GrasslandsCloudShadow.glsl"] = cloudShadowInclude;
+    ShaderFactory.includeMap["Terrain/TerrainWorldNoise.glsl"] = worldNoiseInclude;
+    const sharedMacros = new Map([
+      ["GRAPHICS_API_WEBGPU", ""],
+      ["GRAPHICS_API_WEBGL2", ""],
+      ["HAS_TEX_LOD", ""],
+      ["HAS_DERIVATIVES", ""],
+      ["SCENE_FOG_MODE", "2"],
+      ["SCENE_SHADOW_CASCADED_COUNT", "4"],
+      ["SCENE_DIRECT_LIGHT_COUNT", "1"],
+      ["SCENE_POINT_LIGHT_COUNT", "0"],
+      ["SCENE_SPOT_LIGHT_COUNT", "0"]
+    ]);
+    const variants = [
+      {
+        name: "surface",
+        source: surfaceSource,
+        macros: new Map([
+          ...sharedMacros,
+          ["RENDERER_SURFACE_INSTANCED", ""],
+          ["RENDERER_HAS_TANGENT", ""],
+          ["MATERIAL_HAS_BASETEXTURE", ""],
+          ["MATERIAL_HAS_NORMALTEXTURE", ""],
+          ["MATERIAL_HAS_METALROUGHNESSTEXTURE", ""],
+          ["MATERIAL_HAS_OCCLUSIONTEXTURE", ""]
+        ])
+      },
+      {
+        name: "cloud",
+        source: cloudSource,
+        macros: sharedMacros
+      }
+    ];
+
+    if (!navigator.gpu) {
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const errors: string[] = [];
+    for (const variant of variants) {
+      const generated = generateWGSLFromSource(variant.source, variant.macros);
+      const [vertexInfo, fragmentInfo] = await Promise.all([
+        device.createShaderModule({ label: `${variant.name} vertex`, code: generated.vertex }).getCompilationInfo(),
+        device.createShaderModule({ label: `${variant.name} fragment`, code: generated.fragment }).getCompilationInfo()
+      ]);
+      errors.push(
+        ...formatCompilationErrors(`${variant.name} vertex`, vertexInfo, generated.vertex),
+        ...formatCompilationErrors(`${variant.name} fragment`, fragmentInfo, generated.fragment)
+      );
+    }
 
     expect(errors).toEqual([]);
   });

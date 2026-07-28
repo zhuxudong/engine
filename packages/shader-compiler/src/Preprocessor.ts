@@ -21,6 +21,8 @@ export interface MacroDefineInfo {
   /** Whitespace-normalized directive text. Dedup key against re-includes in
    *  the same branch; differing values produce different keys. */
   dedupKey: string;
+  /** Whitespace-normalized replacement text for opaque macro consumers. */
+  valueText?: string;
   /** `#ifdef` branch at registration time; call sites filter to visible entries. */
   branch: BranchSignature;
 }
