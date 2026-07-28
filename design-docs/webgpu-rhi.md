@@ -609,6 +609,71 @@ compute 使用的也是同一个主相机位置、distance scale、prototype sph
 - 若减少实例仍没有形成稳定 frame-time 收益，保留正确性能力与数据，不把它描述为大世界
   性能提升。
 
+#### 第八阶段实验检查点
+
+上述“全部 finite prototype 共用 max-distance stream”的实现只作为未提交实验运行，随后已从
+工作区撤销。Chromium 147.0.7727.15、Metal、1280×720 CSS、DPR 2；父提交
+`63ba2ea8b` 与候选交替采样三轮，每轮预热后记录 3 秒：
+
+| 场景 | 基线 FPS 中位数 | 候选 FPS 中位数 | 差值 | GPU 诊断 |
+| --- | ---: | ---: | ---: | ---: |
+| settled | 40.20 | 40.55 | +0.86% | 0 |
+| LOD churn | 35.33 | 35.14 | -0.55% | 0 |
+
+- 两个场景的方向相反，差值落在运行噪声内，没有形成可分离的整帧收益。
+- 关闭 wind、cloud、cloud shadow、post-process 与 fog 后，候选相对父提交的 RGB 平均绝对
+  通道差为 0.180，变化像素占 0.557%，最大通道差为 178。原因是候选让原先 range 级近似
+  max-distance 的多 LOD prototype 改用逐实例精确边界；它不是零像素语义改动。
+- Grasslands 的真实岩石、树木与灌木合计只有 4,132 个 finite 实例，且大部分已经处于低 LOD。
+  在没有 per-view stream 的前提下，该实验增加 metadata packing 与更广的 compaction 范围，
+  但不能做 camera/shadow 独立视锥裁剪。
+
+因此本阶段只保留源码事实、数据契约与实测记录，不提交这份实现。per-view indirect stream
+仍是投影实例继续做 frustum/occlusion 的前置 RHI 能力。
+
+### 非投影密集地表的六平面实例裁剪设计
+
+本切片继续使用第七阶段的能力谓词：单 LOD、无 cross-fade、所有 renderer 不投影。它不扩大到
+真实树木、岩石或灌木，因此主相机 visible stream 仍不会删除 shadow cascade 所需实例。
+Grasslands 中该谓词覆盖 286,937 个候选：草 254,518、花 18,052、假树 14,367。
+
+CPU 对每个 range 使用现有 `BoundingFrustum` 和 `CollisionUtil.frustumContainsBox` 分类：
+
+| range 关系 | 执行 |
+| --- | --- |
+| `Disjoint` | instance count 置 0，不生成 compute command |
+| `Contains` 且完全位于 max-distance 内 | 继续走 atlas direct copy |
+| `Intersects` 或跨越 max-distance | 按实际 workgroup size 切 tile，进入同一个 fine-cull pass |
+
+fine-cull parameter storage 由一个 camera/distance `vec4` 扩为 8 个 `vec4`：camera position 与
+distance scale、6 个单位化 world-space plane，以及 live wind magnitude/frustum enabled。
+plane 使用 Galacean `Plane` 的 `dot(normal, point) + distance >= -radius` 约定。相机只旋转时
+plane 也会变化，不能继续只用 camera position 判断 parameter 是否失效。
+
+每个 batch 的第四个 float 记录风位移比例；负值表示该 batch 只允许 distance fine cull，不执行
+frustum fine cull。保守球半径为：
+
+```text
+prototypeOriginRadius * max(abs(instanceScale)) * runtimeCategoryScale
++ abs(materialBaseWindForce * liveWindStrength)
+```
+
+该增量直接对应 `Surface.shader` 的现有位移：
+`flow * windWeight * material_WindForce * 100 * material_GlobalWindForce`；当前
+`flow = pow(noise, density) * 0.01`、global force 为 1。Grasslands 的 5 个草/花 glTF 经本地
+GLB accessor 检查均无 `COLOR_0`，所以 `vertexWindWeight()` 恒为 1；假树虽有归一化
+`COLOR_0.r = 1`，但材质 wind 关闭。为避免把尚未验证的 vertex-color 范围变成隐式资产契约，
+未来“启用 wind 且含 `COLOR_0`”的 batch 保持 distance-only，不进入六平面裁剪。
+
+本阶段不改变 Surface ShaderLab、WebGL2 renderer、阴影、LOD、density 或 category API。
+WebGPU 只在 CPU 已认定为可见的边界 range 内减少 indirect survivor；无边界 command 时沿用
+direct copy。验收必须对父提交交替测试 settled、相机连续旋转与移动，并报告：
+
+- 相同 camera/category/LOD/runtime tuning 下的截图像素差和 GPU/page diagnostic；
+- copy/fine workgroup 数、fine survivor 与 indirect batch 数；
+- FPS、frame p50/p95；方向不稳定时不保留实现，只保留本检查点；
+- WebGL2 默认路径的截图、可见计数和 E2E，证明 backend 切换仍通过刷新完成。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
