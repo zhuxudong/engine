@@ -2,6 +2,15 @@ import { ComputePass, Engine, Shader, ShaderLanguage } from "@galacean/engine";
 
 const SHADER_NAME = "Terrain/SurfaceStaticCompaction";
 
+/** @internal Number of vec4 values in one surface instance record. */
+export const SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE = 4;
+/** @internal Number of float values in one surface instance record. */
+export const SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE = SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE * 4;
+/** @internal Number of uint values in one indexed indirect draw record. */
+export const SURFACE_COMPACTION_INDIRECT_WORD_STRIDE = 5;
+/** @internal Number of uint values in one compaction command. */
+export const SURFACE_COMPACTION_COMMAND_WORD_STRIDE = 4;
+
 const SHADER_SOURCE = `
 Shader "${SHADER_NAME}" {
   SubShader "Default" {
@@ -16,10 +25,12 @@ Shader "${SHADER_NAME}" {
         uvec4 header = copyCommands[0];
         uint localIndex = gl_LocalInvocationID.x;
         if (workGroupIndex < header.x) {
-          uvec4 command = copyCommands[uint(1) + workGroupIndex];
+          uvec4 command = copyCommands[uint(1) + header.y + workGroupIndex];
           while (localIndex < command.z) {
-            uint sourceVector = (command.x + localIndex) * uint(4);
-            uint outputVector = (command.y + localIndex) * uint(4);
+            uint sourceVector =
+              (command.x + localIndex) * uint(${SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE});
+            uint outputVector =
+              (command.y + localIndex) * uint(${SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE});
             vec4 positionMetadata = sourceInstances[sourceVector];
             if (command.w > uint(0)) {
               uint encodedHue = uint(round(clamp(positionMetadata.w, 0.0, 1.0) * 255.0));
@@ -31,10 +42,15 @@ Shader "${SHADER_NAME}" {
             outputInstances[outputVector + uint(3)] = sourceInstances[sourceVector + uint(3)];
             localIndex += uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X);
           }
-        } else if (workGroupIndex == header.x) {
-          while (localIndex < header.y) {
-            indirectArguments[localIndex * uint(5) + uint(1)] = header.z;
-            localIndex += uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X);
+        }
+        if (workGroupIndex < header.y) {
+          uvec4 batch = copyCommands[uint(1) + workGroupIndex];
+          uint indirectIndex = gl_LocalInvocationID.x;
+          while (indirectIndex < batch.y) {
+            indirectArguments[
+              batch.x + indirectIndex * uint(${SURFACE_COMPACTION_INDIRECT_WORD_STRIDE}) + uint(1)
+            ] = batch.z;
+            indirectIndex += uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X);
           }
         }
       }
@@ -46,7 +62,7 @@ Shader "${SHADER_NAME}" {
 `;
 
 /**
- * Create the GPU compaction pass shared by one finite prototype LOD batch.
+ * Creates the GPU compaction pass shared by all finite prototype LOD batches.
  * @param engine - WebGPU engine that owns the compute pipeline.
  * @returns Compute pass compiled from ShaderLab.
  */

@@ -30,7 +30,7 @@ import {
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SURFACE_RUNTIME_SCALE_MAX, SURFACE_RUNTIME_SCALE_MIN } from "./SurfaceRuntimeContract";
-import { SurfaceStaticBatcher, type SurfaceStaticBatcherRange } from "./SurfaceStaticBatcher";
+import { SurfaceStaticBatcher, SurfaceStaticBatchGroup, type SurfaceStaticBatcherRange } from "./SurfaceStaticBatcher";
 import type {
   SurfacePrototypeRendererSpec,
   SurfacePrototypeSpec,
@@ -86,6 +86,7 @@ export class SurfaceWorld {
   private readonly _camera: Camera;
   private readonly _materials: readonly SurfaceMaterial[];
   private readonly _batches: readonly SurfaceBatch[];
+  private readonly _staticBatchGroup: SurfaceStaticBatchGroup | null;
   private readonly _staticBatchers: readonly SurfaceStaticBatcher[];
   private readonly _categoryCounts: Record<SurfaceCategory, number>;
   private readonly _impostorInstances: number;
@@ -102,7 +103,7 @@ export class SurfaceWorld {
     camera: Camera,
     materials: readonly SurfaceMaterial[],
     batches: readonly SurfaceBatch[],
-    staticBatchers: readonly SurfaceStaticBatcher[],
+    staticBatchGroup: SurfaceStaticBatchGroup | null,
     categoryCounts: Record<SurfaceCategory, number>,
     impostorInstances: number,
     worldStreamer: WorldSurfaceStreamer | null,
@@ -112,7 +113,8 @@ export class SurfaceWorld {
     this._camera = camera;
     this._materials = materials;
     this._batches = batches;
-    this._staticBatchers = staticBatchers;
+    this._staticBatchGroup = staticBatchGroup;
+    this._staticBatchers = staticBatchGroup?.batchers ?? [];
     this._categoryCounts = categoryCounts;
     this._impostorInstances = impostorInstances;
     this._worldStreamer = worldStreamer;
@@ -208,27 +210,19 @@ export class SurfaceWorld {
         staticSources.set(item.range.prototype, sources);
       }
     }
-    const staticBatchersByPrototype = new Map<string, readonly SurfaceStaticBatcher[]>();
-    for (const [prototypeId, sources] of staticSources) {
-      const prototype = prototypes.get(prototypeId)!;
-      const prototypeRoot = root.createChild(`${prototypeId}-compacted`);
-      staticBatchersByPrototype.set(
-        prototypeId,
-        prototype.lods.map((lod) =>
-          SurfaceStaticBatcher.create(
-            engine,
-            prototypeRoot,
-            prototype,
-            lod,
-            sources,
-            models,
-            materials,
-            manifestUrl
-          )
-        )
-      );
+    const staticBatchGroup =
+      staticSources.size > 0
+        ? SurfaceStaticBatchGroup.create(engine, root, staticSources, prototypes, models, materials, manifestUrl)
+        : null;
+    const staticBatchers = staticBatchGroup?.batchers ?? [];
+    const mutableStaticBatchersByPrototype = new Map<string, SurfaceStaticBatcher[]>();
+    for (const batcher of staticBatchers) {
+      const prototypeBatchers = mutableStaticBatchersByPrototype.get(batcher.prototypeId) ?? [];
+      prototypeBatchers.push(batcher);
+      mutableStaticBatchersByPrototype.set(batcher.prototypeId, prototypeBatchers);
     }
-    const staticBatchers = Array.from(staticBatchersByPrototype.values()).flat();
+    const staticBatchersByPrototype: ReadonlyMap<string, readonly SurfaceStaticBatcher[]> =
+      mutableStaticBatchersByPrototype;
     const batches: SurfaceBatch[] = [];
 
     for (const { range, decoded: decodedInstances } of decodedRanges) {
@@ -367,7 +361,7 @@ export class SurfaceWorld {
       camera,
       materialList,
       batches,
-      staticBatchers,
+      staticBatchGroup,
       categoryCounts,
       impostorInstances,
       worldStreamer,
@@ -629,7 +623,7 @@ export class SurfaceWorld {
           : 0;
       setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration);
     }
-    for (const batcher of this._staticBatchers) batcher.flush();
+    this._staticBatchGroup?.flush();
     this._coverageStreamer?.update(this._tuning);
     this._worldStreamer?.update(this._tuning);
   }

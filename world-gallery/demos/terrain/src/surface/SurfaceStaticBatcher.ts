@@ -8,6 +8,7 @@ import {
   Entity,
   GLTFResource,
   MeshRenderer,
+  ModelMesh,
   Vector3
 } from "@galacean/engine";
 import type { SurfaceCategory, SurfaceCellRange } from "./SurfaceContract";
@@ -19,10 +20,17 @@ import {
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SurfaceMaterial } from "./SurfaceMaterial";
-import { createSurfaceStaticCompactionPass } from "./SurfaceStaticCompaction";
+import {
+  createSurfaceStaticCompactionPass,
+  SURFACE_COMPACTION_COMMAND_WORD_STRIDE,
+  SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
+  SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE,
+  SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE
+} from "./SurfaceStaticCompaction";
 import {
   SURFACE_RUNTIME_SCALE_MAX,
   type SurfacePrototypeLodSpec,
+  type SurfacePrototypeRendererSpec,
   type SurfacePrototypeSpec
 } from "./SurfaceRuntimeContract";
 
@@ -43,18 +51,227 @@ interface SurfaceStaticRangeState {
   lodFade: number;
 }
 
+interface SurfaceStaticRenderSource {
+  readonly rendererSpec: SurfacePrototypeRendererSpec;
+  readonly rendererIndex: number;
+  readonly sourceMesh: ModelMesh;
+  readonly primitiveIndex: number;
+}
+
+interface SurfaceStaticBatchPlan {
+  readonly prototype: SurfacePrototypeSpec;
+  readonly lod: SurfacePrototypeLodSpec;
+  readonly ranges: readonly SurfaceStaticBatcherRange[];
+  readonly renderSources: readonly SurfaceStaticRenderSource[];
+  readonly outputInstanceOffset: number;
+  readonly indirectRecordOffset: number;
+  readonly indirectRecordCount: number;
+}
+
 interface InternalIndirectDrawRenderer extends MeshRenderer {
   _setIndirectDrawBuffer(subMeshIndex: number, buffer: Buffer | null, offset?: number): void;
 }
 
-const INDIRECT_ARGUMENT_WORD_STRIDE = 5;
+/**
+ * Owns one storage atlas and one compute dispatch for all finite prototype LOD batches.
+ *
+ * @internal
+ */
+export class SurfaceStaticBatchGroup {
+  private readonly _commandBuffer: Buffer;
+  private readonly _commands: Uint32Array;
+  private readonly _compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>;
+  private readonly _batchers: readonly SurfaceStaticBatcher[];
+
+  private constructor(
+    commandBuffer: Buffer,
+    commands: Uint32Array,
+    compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>,
+    batchers: readonly SurfaceStaticBatcher[]
+  ) {
+    this._commandBuffer = commandBuffer;
+    this._commands = commands;
+    this._compactionPass = compactionPass;
+    this._batchers = batchers;
+  }
+
+  /**
+   * Creates one device-limited storage atlas for every finite WebGPU surface batch.
+   * @param engine Engine owning the shared buffers.
+   * @param root Parent entity for compacted renderer sets.
+   * @param sourcesByPrototype Decoded source ranges keyed by prototype id.
+   * @param prototypes Prototype contracts keyed by id.
+   * @param models Loaded model resources keyed by absolute URL.
+   * @param materials Shared surface materials keyed by manifest material id.
+   * @param manifestUrl URL used to resolve prototype model references.
+   * @returns Shared compaction group and its prototype LOD batchers.
+   * @throws If a required storage binding or dispatch dimension exceeds the active device limits.
+   */
+  static create(
+    engine: Engine,
+    root: Entity,
+    sourcesByPrototype: ReadonlyMap<string, readonly SurfaceStaticBatcherRange[]>,
+    prototypes: ReadonlyMap<string, SurfacePrototypeSpec>,
+    models: ReadonlyMap<string, GLTFResource>,
+    materials: ReadonlyMap<string, SurfaceMaterial>,
+    manifestUrl: string
+  ): SurfaceStaticBatchGroup {
+    const sourceOffsetsByPrototype = new Map<string, ReadonlyMap<number, number>>();
+    let sourceInstanceCapacity = 0;
+    for (const [prototypeId, ranges] of sourcesByPrototype) {
+      const offsets = new Map<number, number>();
+      for (const item of ranges) {
+        offsets.set(item.range.offset, sourceInstanceCapacity);
+        sourceInstanceCapacity += item.range.count;
+      }
+      sourceOffsetsByPrototype.set(prototypeId, offsets);
+    }
+
+    const plans: SurfaceStaticBatchPlan[] = [];
+    let outputInstanceCapacity = 0;
+    let copyCommandCapacity = 0;
+    let indirectRecordCapacity = 0;
+    for (const [prototypeId, ranges] of sourcesByPrototype) {
+      const prototype = prototypes.get(prototypeId);
+      if (!prototype) throw new Error(`[SurfaceStaticBatchGroup] unknown prototype ${prototypeId}`);
+      const batchCapacity = ranges.reduce((count, item) => count + item.range.count, 0);
+      for (const lod of prototype.lods) {
+        const renderSources = collectRenderSources(lod, models, manifestUrl);
+        const indirectRecordCount = renderSources.reduce(
+          (count, source) => count + source.sourceMesh.subMeshes.length,
+          0
+        );
+        plans.push({
+          prototype,
+          lod,
+          ranges,
+          renderSources,
+          outputInstanceOffset: outputInstanceCapacity,
+          indirectRecordOffset: indirectRecordCapacity,
+          indirectRecordCount
+        });
+        outputInstanceCapacity += batchCapacity;
+        copyCommandCapacity += ranges.length;
+        indirectRecordCapacity += indirectRecordCount;
+      }
+    }
+
+    validateGroupCapacity(
+      engine,
+      sourceInstanceCapacity,
+      outputInstanceCapacity,
+      1 + plans.length + copyCommandCapacity,
+      indirectRecordCapacity,
+      Math.max(plans.length, copyCommandCapacity)
+    );
+
+    const sourceData = new Float32Array(sourceInstanceCapacity * SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE);
+    for (const [prototypeId, ranges] of sourcesByPrototype) {
+      const sourceOffsets = sourceOffsetsByPrototype.get(prototypeId)!;
+      for (const item of ranges) {
+        sourceData.set(item.data, sourceOffsets.get(item.range.offset)! * SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE);
+      }
+    }
+    const sourceBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, sourceData, BufferUsage.Static);
+    const outputBuffer = new Buffer(
+      engine,
+      BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
+      outputInstanceCapacity * SURFACE_INSTANCE_STRIDE,
+      BufferUsage.Dynamic
+    );
+    const indirectArguments = new Uint32Array(indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE);
+    for (const plan of plans) {
+      let indirectRecordIndex = plan.indirectRecordOffset;
+      for (const source of plan.renderSources) {
+        for (const subMesh of source.sourceMesh.subMeshes) {
+          const wordOffset = indirectRecordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
+          indirectArguments[wordOffset] = subMesh.count;
+          indirectArguments[wordOffset + 2] = subMesh.start;
+          indirectRecordIndex++;
+        }
+      }
+    }
+    const indirectBuffer = new Buffer(
+      engine,
+      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
+      indirectArguments,
+      BufferUsage.Dynamic
+    );
+    const commands = new Uint32Array((1 + plans.length + copyCommandCapacity) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE);
+    const commandBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, commands, BufferUsage.Dynamic);
+    const compactionPass = createSurfaceStaticCompactionPass(engine);
+    compactionPass.setBuffer("sourceInstances", sourceBuffer);
+    compactionPass.setBuffer("copyCommands", commandBuffer);
+    compactionPass.setBuffer("outputInstances", outputBuffer);
+    compactionPass.setBuffer("indirectArguments", indirectBuffer);
+
+    const prototypeRoots = new Map(
+      Array.from(sourcesByPrototype.keys(), (prototypeId) => [
+        prototypeId,
+        root.createChild(`${prototypeId}-compacted`)
+      ])
+    );
+    const batchers = plans.map((plan) =>
+      createBatcher(
+        engine,
+        prototypeRoots.get(plan.prototype.id)!,
+        plan,
+        sourceOffsetsByPrototype.get(plan.prototype.id)!,
+        outputBuffer,
+        indirectBuffer,
+        materials
+      )
+    );
+    return new SurfaceStaticBatchGroup(commandBuffer, commands, compactionPass, batchers);
+  }
+
+  /**
+   * Prototype LOD batches sharing this group's storage atlas.
+   * @returns Immutable batcher list.
+   */
+  get batchers(): readonly SurfaceStaticBatcher[] {
+    return this._batchers;
+  }
+
+  /**
+   * Compacts every dirty prototype LOD through one flattened compute dispatch.
+   */
+  flush(): void {
+    const dirtyBatchers = this._batchers.filter((batcher) => batcher._needsFlush());
+    if (dirtyBatchers.length === 0) return;
+
+    const commands = this._commands;
+    const copyCommandStart = 1 + dirtyBatchers.length;
+    let copyCommandCount = 0;
+    for (let index = 0; index < dirtyBatchers.length; index++) {
+      copyCommandCount += dirtyBatchers[index]._writeCommands(
+        commands,
+        (1 + index) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE,
+        (copyCommandStart + copyCommandCount) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE
+      );
+    }
+    commands[0] = copyCommandCount;
+    commands[1] = dirtyBatchers.length;
+    commands[2] = 0;
+    commands[3] = 0;
+    this._commandBuffer.setData(
+      commands,
+      0,
+      0,
+      (copyCommandStart + copyCommandCount) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE
+    );
+    this._compactionPass.dispatch(Math.max(copyCommandCount, dirtyBatchers.length));
+  }
+}
 
 /**
- * Compacts visible cell ranges into one instance stream for one prototype LOD.
+ * Retains visibility and renderer state for one prototype LOD inside a shared compaction group.
  *
  * @internal
  */
 export class SurfaceStaticBatcher {
+  /** Prototype id shared by this compacted stream. */
+  readonly prototypeId: string;
   /** Surface category shared by the compacted prototype. */
   readonly category: SurfaceCategory;
   /** Prototype LOD rendered by this compacted stream. */
@@ -65,21 +282,35 @@ export class SurfaceStaticBatcher {
   readonly lodHeight: number;
 
   private readonly _packedMetadata: boolean;
+  private readonly _outputInstanceOffset: number;
+  private readonly _indirectWordOffset: number;
   private readonly _indirectRecordCount: number;
-  private readonly _commandBuffer: Buffer;
-  private readonly _commands: Uint32Array;
-  private readonly _compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>;
   private readonly _ranges: ReadonlyMap<number, SurfaceStaticRangeState>;
   private readonly _renderers: readonly MeshRenderer[];
   private _dirty = true;
   private _instanceCount = 0;
 
-  private constructor(
+  /**
+   * Creates one prototype LOD view into a shared compaction group.
+   * @param prototypeId Prototype identifier.
+   * @param packedMetadata Whether instance metadata stores LOD cross-fade.
+   * @param outputInstanceOffset First instance in the shared output atlas.
+   * @param indirectRecordOffset First draw record in the shared indirect atlas.
+   * @param indirectRecordCount Number of draw records owned by this batch.
+   * @param ranges Retained visibility state keyed by source range offset.
+   * @param renderers Renderers consuming this batch's output slice.
+   * @param category Surface category.
+   * @param lodIndex Prototype LOD index.
+   * @param prototypeRadius Prototype-space culling radius.
+   * @param lodHeight Prototype height used for projected-size LOD selection.
+   * @internal
+   */
+  constructor(
+    prototypeId: string,
     packedMetadata: boolean,
+    outputInstanceOffset: number,
+    indirectRecordOffset: number,
     indirectRecordCount: number,
-    commandBuffer: Buffer,
-    commands: Uint32Array,
-    compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>,
     ranges: ReadonlyMap<number, SurfaceStaticRangeState>,
     renderers: readonly MeshRenderer[],
     category: SurfaceCategory,
@@ -87,151 +318,17 @@ export class SurfaceStaticBatcher {
     prototypeRadius: number,
     lodHeight: number
   ) {
+    this.prototypeId = prototypeId;
     this._packedMetadata = packedMetadata;
+    this._outputInstanceOffset = outputInstanceOffset;
+    this._indirectWordOffset = indirectRecordOffset * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
     this._indirectRecordCount = indirectRecordCount;
-    this._commandBuffer = commandBuffer;
-    this._commands = commands;
-    this._compactionPass = compactionPass;
     this._ranges = ranges;
     this._renderers = renderers;
     this.category = category;
     this.lodIndex = lodIndex;
     this.prototypeRadius = prototypeRadius;
     this.lodHeight = lodHeight;
-  }
-
-  /**
-   * Creates one renderer set and growable output stream for a prototype LOD.
-   * @param engine Engine owning the output buffers.
-   * @param root Parent entity for the compacted renderer set.
-   * @param prototype Prototype shared by every input range.
-   * @param lod Prototype LOD rendered by this compacted stream.
-   * @param ranges Decoded source ranges retaining independent culling state.
-   * @param models Loaded model resources keyed by absolute URL.
-   * @param materials Shared surface materials keyed by manifest material id.
-   * @param manifestUrl URL used to resolve prototype model references.
-   * @returns Ready compacted batcher with no submitted instances.
-   */
-  static create(
-    engine: Engine,
-    root: Entity,
-    prototype: SurfacePrototypeSpec,
-    lod: SurfacePrototypeLodSpec,
-    ranges: readonly SurfaceStaticBatcherRange[],
-    models: ReadonlyMap<string, GLTFResource>,
-    materials: ReadonlyMap<string, SurfaceMaterial>,
-    manifestUrl: string
-  ): SurfaceStaticBatcher {
-    const capacity = ranges.reduce((count, item) => count + item.range.count, 0);
-    const packedMetadata = prototype.lodCrossfade;
-    const instanceBuffer = new Buffer(
-      engine,
-      BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
-      capacity * SURFACE_INSTANCE_STRIDE,
-      BufferUsage.Dynamic
-    );
-    const states = new Map<number, SurfaceStaticRangeState>();
-    const sourceData = new Float32Array(capacity * 16);
-    let sourceInstanceOffset = 0;
-    for (const item of ranges) {
-      sourceData.set(item.data, sourceInstanceOffset * 16);
-      states.set(item.range.offset, { range: item.range, sourceInstanceOffset, visibleCount: 0, lodFade: 1 });
-      sourceInstanceOffset += item.range.count;
-    }
-    const sourceBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, sourceData, BufferUsage.Static);
-    const renderSources = lod.renderers.flatMap((rendererSpec, rendererIndex) => {
-      const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
-      return findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName).map((sourceMesh, primitiveIndex) => ({
-        rendererSpec,
-        rendererIndex,
-        sourceMesh,
-        primitiveIndex
-      }));
-    });
-    const indirectArguments = new Uint32Array(
-      renderSources.reduce((count, source) => count + source.sourceMesh.subMeshes.length, 0) *
-        INDIRECT_ARGUMENT_WORD_STRIDE
-    );
-    let indirectWordOffset = 0;
-    for (const source of renderSources) {
-      for (const subMesh of source.sourceMesh.subMeshes) {
-        indirectArguments[indirectWordOffset] = subMesh.count;
-        indirectArguments[indirectWordOffset + 2] = subMesh.start;
-        indirectWordOffset += INDIRECT_ARGUMENT_WORD_STRIDE;
-      }
-    }
-    const indirectBuffer = new Buffer(
-      engine,
-      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
-      indirectArguments,
-      BufferUsage.Dynamic
-    );
-    const commands = new Uint32Array((ranges.length + 1) * 4);
-    const commandBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, commands, BufferUsage.Dynamic);
-    const compactionPass = createSurfaceStaticCompactionPass(engine);
-    compactionPass.setBuffer("sourceInstances", sourceBuffer);
-    compactionPass.setBuffer("copyCommands", commandBuffer);
-    compactionPass.setBuffer("outputInstances", instanceBuffer);
-    compactionPass.setBuffer("indirectArguments", indirectBuffer);
-
-    const renderers: MeshRenderer[] = [];
-    let prototypeRadius = 0;
-    let lodHeight = 0;
-    let indirectRecordIndex = 0;
-    for (const source of renderSources) {
-      const { rendererSpec, rendererIndex, sourceMesh, primitiveIndex } = source;
-      const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
-      lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
-      prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
-      const bounds = mergedRangeBounds(ranges, prototypeBounds);
-      const entity = root.createChild(
-        `${prototype.id}-compacted-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
-      );
-      const renderer = entity.addComponent(MeshRenderer) as InternalIndirectDrawRenderer;
-      renderer.mesh = createSurfaceInstancedMesh(engine, sourceMesh, instanceBuffer, bounds, 0);
-      renderer.castShadows = rendererSpec.castShadows;
-      renderer.receiveShadows = rendererSpec.receiveShadows;
-      renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
-      SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
-      SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
-      SurfaceMaterial.setRendererPackedMetadata(packedMetadata, renderer.shaderData);
-      SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
-      SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
-      SurfaceMaterial.setRendererDebugInfo(prototype.category, [0, 0], renderer.shaderData);
-      SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
-      SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
-      SurfaceMaterial.setRendererWorldCellSize(0, renderer.shaderData);
-      SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
-      const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
-      const material = materials.get(materialId);
-      if (!material)
-        throw new Error(`[SurfaceStaticBatcher] ${prototype.id} references unknown material ${materialId}`);
-      for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
-        renderer.setMaterial(subMeshIndex, material);
-        renderer._setIndirectDrawBuffer(
-          subMeshIndex,
-          indirectBuffer,
-          indirectRecordIndex * INDIRECT_ARGUMENT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
-        );
-        indirectRecordIndex++;
-      }
-      entity.isActive = false;
-      renderers.push(renderer);
-    }
-
-    return new SurfaceStaticBatcher(
-      packedMetadata,
-      indirectArguments.length / INDIRECT_ARGUMENT_WORD_STRIDE,
-      commandBuffer,
-      commands,
-      compactionPass,
-      states,
-      renderers,
-      prototype.category,
-      lod.index,
-      prototypeRadius,
-      Math.max(lodHeight, 0.01)
-    );
   }
 
   /** Number of renderer/primitive batches owned by this prototype. */
@@ -265,38 +362,44 @@ export class SurfaceStaticBatcher {
     this._dirty = true;
   }
 
+  /** @internal */
+  _needsFlush(): boolean {
+    return this._dirty;
+  }
+
   /**
-   * Uploads compacted instance prefixes when range visibility changes.
-   * @returns Submitted instance count after compaction.
+   * Write this batch's indirect header and visible range copies into the shared command array.
+   * @param commands Shared u32 command array.
+   * @param batchWordOffset First word of this batch header.
+   * @param copyWordOffset First word available for range-copy commands.
+   * @returns Number of range-copy commands written.
+   * @internal
    */
-  flush(): number {
-    if (!this._dirty) return this._instanceCount;
+  _writeCommands(commands: Uint32Array, batchWordOffset: number, copyWordOffset: number): number {
     let instanceOffset = 0;
-    let commandCount = 0;
-    const commands = this._commands;
+    let copyCommandCount = 0;
     for (const state of this._ranges.values()) {
       const count = state.visibleCount;
       if (count === 0) continue;
-      const commandOffset = ++commandCount * 4;
+      const commandOffset = copyWordOffset + copyCommandCount * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
       commands[commandOffset] = state.sourceInstanceOffset;
-      commands[commandOffset + 1] = instanceOffset;
+      commands[commandOffset + 1] = this._outputInstanceOffset + instanceOffset;
       commands[commandOffset + 2] = count;
       commands[commandOffset + 3] = this._packedMetadata ? encodeLodFade(state.lodFade) + 1 : 0;
       instanceOffset += count;
+      copyCommandCount++;
     }
     this._instanceCount = instanceOffset;
-    commands[0] = commandCount;
-    commands[1] = this._indirectRecordCount;
-    commands[2] = instanceOffset;
-    commands[3] = 0;
-    this._commandBuffer.setData(commands, 0, 0, (commandCount + 1) * 4);
-    this._compactionPass.dispatch(commandCount + 1);
+    commands[batchWordOffset] = this._indirectWordOffset;
+    commands[batchWordOffset + 1] = this._indirectRecordCount;
+    commands[batchWordOffset + 2] = instanceOffset;
+    commands[batchWordOffset + 3] = 0;
     for (const renderer of this._renderers) {
-      renderer.entity.isActive = this._instanceCount > 0;
-      (renderer.mesh as BufferMesh).instanceCount = this._instanceCount;
+      renderer.entity.isActive = instanceOffset > 0;
+      (renderer.mesh as BufferMesh).instanceCount = instanceOffset;
     }
     this._dirty = false;
-    return this._instanceCount;
+    return copyCommandCount;
   }
 
   /**
@@ -308,6 +411,142 @@ export class SurfaceStaticBatcher {
     for (const renderer of this._renderers) {
       SurfaceMaterial.setRendererTuning(tint, scale, renderer.shaderData);
     }
+  }
+}
+
+function createBatcher(
+  engine: Engine,
+  root: Entity,
+  plan: SurfaceStaticBatchPlan,
+  sourceOffsets: ReadonlyMap<number, number>,
+  outputBuffer: Buffer,
+  indirectBuffer: Buffer,
+  materials: ReadonlyMap<string, SurfaceMaterial>
+): SurfaceStaticBatcher {
+  const { prototype, lod, ranges, renderSources } = plan;
+  const states = new Map<number, SurfaceStaticRangeState>();
+  for (const item of ranges) {
+    states.set(item.range.offset, {
+      range: item.range,
+      sourceInstanceOffset: sourceOffsets.get(item.range.offset)!,
+      visibleCount: 0,
+      lodFade: 1
+    });
+  }
+
+  const renderers: MeshRenderer[] = [];
+  let prototypeRadius = 0;
+  let lodHeight = 0;
+  let indirectRecordIndex = plan.indirectRecordOffset;
+  for (const source of renderSources) {
+    const { rendererSpec, rendererIndex, sourceMesh, primitiveIndex } = source;
+    const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
+    lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
+    prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
+    const bounds = mergedRangeBounds(ranges, prototypeBounds);
+    const entity = root.createChild(
+      `${prototype.id}-compacted-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
+    );
+    const renderer = entity.addComponent(MeshRenderer) as InternalIndirectDrawRenderer;
+    renderer.mesh = createSurfaceInstancedMesh(
+      engine,
+      sourceMesh,
+      outputBuffer,
+      bounds,
+      0,
+      plan.outputInstanceOffset * SURFACE_INSTANCE_STRIDE
+    );
+    renderer.castShadows = rendererSpec.castShadows;
+    renderer.receiveShadows = rendererSpec.receiveShadows;
+    renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
+    SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
+    SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
+    SurfaceMaterial.setRendererPackedMetadata(prototype.lodCrossfade, renderer.shaderData);
+    SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
+    SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
+    SurfaceMaterial.setRendererDebugInfo(prototype.category, [0, 0], renderer.shaderData);
+    SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
+    SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
+    SurfaceMaterial.setRendererWorldCellSize(0, renderer.shaderData);
+    SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
+    const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
+    const material = materials.get(materialId);
+    if (!material) throw new Error(`[SurfaceStaticBatcher] ${prototype.id} references unknown material ${materialId}`);
+    for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
+      renderer.setMaterial(subMeshIndex, material);
+      renderer._setIndirectDrawBuffer(
+        subMeshIndex,
+        indirectBuffer,
+        indirectRecordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
+      );
+      indirectRecordIndex++;
+    }
+    entity.isActive = false;
+    renderers.push(renderer);
+  }
+
+  return new SurfaceStaticBatcher(
+    prototype.id,
+    prototype.lodCrossfade,
+    plan.outputInstanceOffset,
+    plan.indirectRecordOffset,
+    plan.indirectRecordCount,
+    states,
+    renderers,
+    prototype.category,
+    lod.index,
+    prototypeRadius,
+    Math.max(lodHeight, 0.01)
+  );
+}
+
+function collectRenderSources(
+  lod: SurfacePrototypeLodSpec,
+  models: ReadonlyMap<string, GLTFResource>,
+  manifestUrl: string
+): readonly SurfaceStaticRenderSource[] {
+  return lod.renderers.flatMap((rendererSpec, rendererIndex) => {
+    const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
+    return findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName).map((sourceMesh, primitiveIndex) => ({
+      rendererSpec,
+      rendererIndex,
+      sourceMesh,
+      primitiveIndex
+    }));
+  });
+}
+
+function validateGroupCapacity(
+  engine: Engine,
+  sourceInstanceCapacity: number,
+  outputInstanceCapacity: number,
+  commandCapacity: number,
+  indirectRecordCapacity: number,
+  dispatchWorkgroups: number
+): void {
+  const limits = engine.computeCapabilities;
+  const storageBindings = [
+    ["source instance", sourceInstanceCapacity * SURFACE_INSTANCE_STRIDE],
+    ["output instance", outputInstanceCapacity * SURFACE_INSTANCE_STRIDE],
+    ["compaction command", commandCapacity * SURFACE_COMPACTION_COMMAND_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT],
+    [
+      "indirect argument",
+      indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
+    ]
+  ] as const;
+  for (const [name, byteLength] of storageBindings) {
+    if (byteLength > limits.maxStorageBufferBindingSize) {
+      throw new RangeError(
+        `[SurfaceStaticBatchGroup] ${name} storage requires ${byteLength} bytes, exceeding ` +
+          `${limits.maxStorageBufferBindingSize}.`
+      );
+    }
+  }
+  if (dispatchWorkgroups > limits.maxWorkgroupsPerDimension) {
+    throw new RangeError(
+      `[SurfaceStaticBatchGroup] compaction requires ${dispatchWorkgroups} workgroups, exceeding ` +
+        `${limits.maxWorkgroupsPerDimension}.`
+    );
   }
 }
 

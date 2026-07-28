@@ -10,6 +10,7 @@ import {
   IndexFormat,
   ModelMesh,
   Vector3,
+  VertexBufferBinding,
   VertexElement,
   VertexElementFormat
 } from "@galacean/engine";
@@ -26,6 +27,7 @@ const indexBindings = new WeakMap<ModelMesh, IndexBufferBinding>();
  * @param instanceBuffer Interleaved surface transform/color stream.
  * @param bounds Complete world-space bounds for every instance in this mesh.
  * @param instanceCount Initial active instance count.
+ * @param instanceBufferOffset Byte offset of this mesh's first instance record.
  * @returns BufferMesh sharing source geometry and owning the instance binding.
  */
 export function createSurfaceInstancedMesh(
@@ -33,14 +35,18 @@ export function createSurfaceInstancedMesh(
   source: ModelMesh,
   instanceBuffer: Buffer,
   bounds: BoundingBox,
-  instanceCount: number
+  instanceCount: number,
+  instanceBufferOffset: number = 0
 ): BufferMesh {
   const mesh = new BufferMesh(engine, `${source.name}-surface-instances`);
   source.vertexBufferBindings.forEach((binding, index) => mesh.setVertexBufferBinding(binding, index));
   const indexBufferBinding = getIndexBufferBinding(engine, source);
   if (indexBufferBinding) mesh.setIndexBufferBinding(indexBufferBinding);
   const bindingIndex = source.vertexBufferBindings.length;
-  mesh.setVertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, bindingIndex);
+  mesh.setVertexBufferBinding(
+    new VertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, instanceBufferOffset),
+    bindingIndex
+  );
   mesh.setVertexElements([
     ...source.vertexElements,
     new VertexElement("INSTANCE_POSITION_META", 0, VertexElementFormat.Vector4, bindingIndex, 1),
@@ -60,7 +66,12 @@ export function createSurfaceInstancedMesh(
  * @param instanceBuffer Replacement interleaved instance buffer.
  */
 export function rebindSurfaceInstanceBuffer(mesh: BufferMesh, instanceBuffer: Buffer): void {
-  mesh.setVertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, mesh.vertexBufferBindings.length - 1);
+  const bindingIndex = mesh.vertexBufferBindings.length - 1;
+  const previousBinding = mesh.vertexBufferBindings[bindingIndex];
+  mesh.setVertexBufferBinding(
+    new VertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, previousBinding.offset),
+    bindingIndex
+  );
 }
 
 /**
