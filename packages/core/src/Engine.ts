@@ -1,4 +1,5 @@
 import {
+  type ComputeCapabilities,
   type GraphicsBackend,
   IHardwareRenderer,
   IInputOptions,
@@ -259,6 +260,14 @@ export class Engine extends EventDispatcher {
    */
   get graphicsBackend(): GraphicsBackend {
     return this._hardwareRenderer.backend;
+  }
+
+  /**
+   * Backend-neutral compute support and device limits.
+   * @returns Immutable capabilities reported by the active graphics backend.
+   */
+  get computeCapabilities(): ComputeCapabilities {
+    return this._hardwareRenderer.computeCapabilities;
   }
 
   protected constructor(canvas: Canvas, hardwareRenderer: IHardwareRenderer, configuration: EngineConfiguration) {

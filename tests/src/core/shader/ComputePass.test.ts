@@ -54,6 +54,7 @@ describe("ComputePass", () => {
       device: GPUDevice;
       computeCapabilities: { recommendedWorkgroupSizeX: number };
     };
+    expect(engine.computeCapabilities).toBe(graphicDevice.computeCapabilities);
     const nativeOutput = (output._platformBuffer as unknown as { _gpuBuffer: GPUBuffer })._gpuBuffer;
     const readback = graphicDevice.device.createBuffer({
       size: values.byteLength,
