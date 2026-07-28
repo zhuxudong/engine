@@ -19,6 +19,7 @@ import {
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SurfaceMaterial } from "./SurfaceMaterial";
+import { createSurfaceStaticCompactionPass } from "./SurfaceStaticCompaction";
 import {
   SURFACE_RUNTIME_SCALE_MAX,
   type SurfacePrototypeLodSpec,
@@ -35,7 +36,9 @@ export interface SurfaceStaticBatcherRange {
   readonly maxScale: number;
 }
 
-interface SurfaceStaticRangeState extends SurfaceStaticBatcherRange {
+interface SurfaceStaticRangeState {
+  readonly range: SurfaceCellRange;
+  readonly sourceInstanceOffset: number;
   visibleCount: number;
   lodFade: number;
 }
@@ -61,22 +64,22 @@ export class SurfaceStaticBatcher {
   /** Prototype LOD height used by projected-size selection. */
   readonly lodHeight: number;
 
-  private readonly _instanceBuffer: Buffer;
-  private readonly _instanceOutput: Float32Array;
   private readonly _packedMetadata: boolean;
-  private readonly _indirectBuffer: Buffer;
-  private readonly _indirectArguments: Uint32Array;
+  private readonly _indirectRecordCount: number;
+  private readonly _commandBuffer: Buffer;
+  private readonly _commands: Uint32Array;
+  private readonly _compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>;
   private readonly _ranges: ReadonlyMap<number, SurfaceStaticRangeState>;
   private readonly _renderers: readonly MeshRenderer[];
   private _dirty = true;
   private _instanceCount = 0;
 
   private constructor(
-    instanceBuffer: Buffer,
-    instanceOutput: Float32Array,
     packedMetadata: boolean,
-    indirectBuffer: Buffer,
-    indirectArguments: Uint32Array,
+    indirectRecordCount: number,
+    commandBuffer: Buffer,
+    commands: Uint32Array,
+    compactionPass: ReturnType<typeof createSurfaceStaticCompactionPass>,
     ranges: ReadonlyMap<number, SurfaceStaticRangeState>,
     renderers: readonly MeshRenderer[],
     category: SurfaceCategory,
@@ -84,11 +87,11 @@ export class SurfaceStaticBatcher {
     prototypeRadius: number,
     lodHeight: number
   ) {
-    this._instanceBuffer = instanceBuffer;
-    this._instanceOutput = instanceOutput;
     this._packedMetadata = packedMetadata;
-    this._indirectBuffer = indirectBuffer;
-    this._indirectArguments = indirectArguments;
+    this._indirectRecordCount = indirectRecordCount;
+    this._commandBuffer = commandBuffer;
+    this._commands = commands;
+    this._compactionPass = compactionPass;
     this._ranges = ranges;
     this._renderers = renderers;
     this.category = category;
@@ -128,9 +131,14 @@ export class SurfaceStaticBatcher {
       BufferUsage.Dynamic
     );
     const states = new Map<number, SurfaceStaticRangeState>();
+    const sourceData = new Float32Array(capacity * 16);
+    let sourceInstanceOffset = 0;
     for (const item of ranges) {
-      states.set(item.range.offset, { ...item, visibleCount: 0, lodFade: 1 });
+      sourceData.set(item.data, sourceInstanceOffset * 16);
+      states.set(item.range.offset, { range: item.range, sourceInstanceOffset, visibleCount: 0, lodFade: 1 });
+      sourceInstanceOffset += item.range.count;
     }
+    const sourceBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, sourceData, BufferUsage.Static);
     const renderSources = lod.renderers.flatMap((rendererSpec, rendererIndex) => {
       const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
       return findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName).map((sourceMesh, primitiveIndex) => ({
@@ -158,6 +166,13 @@ export class SurfaceStaticBatcher {
       indirectArguments,
       BufferUsage.Dynamic
     );
+    const commands = new Uint32Array((ranges.length + 1) * 4);
+    const commandBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, commands, BufferUsage.Dynamic);
+    const compactionPass = createSurfaceStaticCompactionPass(engine);
+    compactionPass.setBuffer("sourceInstances", sourceBuffer);
+    compactionPass.setBuffer("copyCommands", commandBuffer);
+    compactionPass.setBuffer("outputInstances", instanceBuffer);
+    compactionPass.setBuffer("indirectArguments", indirectBuffer);
 
     const renderers: MeshRenderer[] = [];
     let prototypeRadius = 0;
@@ -205,11 +220,11 @@ export class SurfaceStaticBatcher {
     }
 
     return new SurfaceStaticBatcher(
-      instanceBuffer,
-      new Float32Array(capacity * 16),
       packedMetadata,
-      indirectBuffer,
-      indirectArguments,
+      indirectArguments.length / INDIRECT_ARGUMENT_WORD_STRIDE,
+      commandBuffer,
+      commands,
+      compactionPass,
       states,
       renderers,
       prototype.category,
@@ -257,32 +272,25 @@ export class SurfaceStaticBatcher {
   flush(): number {
     if (!this._dirty) return this._instanceCount;
     let instanceOffset = 0;
+    let commandCount = 0;
+    const commands = this._commands;
     for (const state of this._ranges.values()) {
       const count = state.visibleCount;
       if (count === 0) continue;
-      const targetFloatOffset = instanceOffset * 16;
-      const sourceFloatLength = count * 16;
-      this._instanceOutput.set(state.data.subarray(0, sourceFloatLength), targetFloatOffset);
-      if (this._packedMetadata) {
-        for (let sourceInstance = 0; sourceInstance < count; sourceInstance++) {
-          const sourceFloatOffset = sourceInstance * 16;
-          this._instanceOutput[targetFloatOffset + sourceFloatOffset + 3] = packInstanceMetadata(
-            state.data[sourceFloatOffset + 3],
-            state.lodFade
-          );
-        }
-      }
+      const commandOffset = ++commandCount * 4;
+      commands[commandOffset] = state.sourceInstanceOffset;
+      commands[commandOffset + 1] = instanceOffset;
+      commands[commandOffset + 2] = count;
+      commands[commandOffset + 3] = this._packedMetadata ? encodeLodFade(state.lodFade) + 1 : 0;
       instanceOffset += count;
     }
     this._instanceCount = instanceOffset;
-    if (instanceOffset > 0) {
-      this._instanceBuffer.setData(this._instanceOutput, 0, 0, instanceOffset * 16);
-    }
-    const indirectArguments = this._indirectArguments;
-    for (let offset = 1; offset < indirectArguments.length; offset += INDIRECT_ARGUMENT_WORD_STRIDE) {
-      indirectArguments[offset] = this._instanceCount;
-    }
-    this._indirectBuffer.setData(indirectArguments);
+    commands[0] = commandCount;
+    commands[1] = this._indirectRecordCount;
+    commands[2] = instanceOffset;
+    commands[3] = 0;
+    this._commandBuffer.setData(commands, 0, 0, (commandCount + 1) * 4);
+    this._compactionPass.dispatch(commandCount + 1);
     for (const renderer of this._renderers) {
       renderer.entity.isActive = this._instanceCount > 0;
       (renderer.mesh as BufferMesh).instanceCount = this._instanceCount;
@@ -329,9 +337,6 @@ function boundsRadius(bounds: BoundingBox): number {
   );
 }
 
-function packInstanceMetadata(cellHue: number, lodFade: number): number {
-  // A 24-bit integer stays exact in f32, preserving the existing vec4 layout on 8-buffer mobile GPUs.
-  const encodedHue = Math.round(Math.min(Math.max(cellHue, 0), 1) * 255);
-  const encodedLodFade = Math.round((lodFade * 0.5 + 0.5) * 65535);
-  return encodedHue * 65536 + encodedLodFade;
+function encodeLodFade(lodFade: number): number {
+  return Math.round((lodFade * 0.5 + 0.5) * 65535);
 }
