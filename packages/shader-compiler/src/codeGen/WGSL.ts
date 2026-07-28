@@ -41,6 +41,12 @@ type Uniform = IShaderUniformReflection & {
 type StorageBuffer = IShaderStorageBufferReflection & {
   sourceIndex: number;
   branch: BranchSignature;
+  atomic: boolean;
+};
+
+type StorageElementReference = {
+  storageBuffer: StorageBuffer;
+  expression: ASTNode.PostfixExpression;
 };
 
 /**
@@ -93,6 +99,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._vertexEntry = vertexEntry;
     this._fragmentEntry = fragmentEntry;
     this._collectGlobalResources(node, vertexEntry, fragmentEntry);
+    this._prepareStorageAtomics(node, false);
 
     const generated = super.visitShaderProgram(node, vertexEntry, fragmentEntry);
     this._collectFragmentOutputs(node, fragmentEntry);
@@ -122,6 +129,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._resetProgram();
     VisitorContext.reset();
     this._collectGlobalResources(node, "", "", computeEntry);
+    this._prepareStorageAtomics(node, true);
 
     const generated = this._visitComputeProgramBody(node, computeEntry);
     const reflection = this._createReflection();
@@ -254,6 +262,16 @@ export class WGSLVisitor extends GLESVisitor {
     }
 
     const name = identifier.lexeme;
+    if (name === "atomicAdd") {
+      const target = params[0] ? this._storageElementReference(params[0]) : undefined;
+      if (!target || params.length !== 2) {
+        throw new Error("ShaderLab atomicAdd requires a direct element of a writable int[] or uint[] storage buffer.");
+      }
+      const targetCode = params[0].codeGen(this);
+      const valueCode = params[1].codeGen(this);
+      return `atomicAdd(&${targetCode}, ${valueCode})`;
+    }
+
     const args = params.map((param) => param.codeGen(this));
     const textureCall = this._textureCall(name, params, args);
     if (textureCall) {
@@ -700,7 +718,8 @@ export class WGSLVisitor extends GLESVisitor {
             elementType: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
             arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
             sourceIndex: symbol.astNode.location.start.index,
-            branch
+            branch,
+            atomic: false
           });
         }
         continue;
@@ -801,7 +820,7 @@ export class WGSLVisitor extends GLESVisitor {
     const fragmentOutputs = Array.from(this._fragmentOutputs.values()).map(({ location }) => location);
     const storageBuffers = Array.from(this._storageBuffers.values())
       .sort((left, right) => left.sourceIndex - right.sourceIndex)
-      .map(({ sourceIndex: _sourceIndex, branch, ...storageBuffer }) => ({
+      .map(({ sourceIndex: _sourceIndex, branch, atomic: _atomic, ...storageBuffer }) => ({
         ...storageBuffer,
         conditions: this._reflectionConditions(branch)
       }));
@@ -863,9 +882,10 @@ export class WGSLVisitor extends GLESVisitor {
     const storageBuffers = Array.from(this._storageBuffers.values())
       .sort((left, right) => left.sourceIndex - right.sourceIndex)
       .map((storageBuffer) => {
+        const elementType = storageBuffer.atomic ? `atomic<${storageBuffer.elementType}>` : storageBuffer.elementType;
         const arrayType = storageBuffer.arrayLength
-          ? `array<${storageBuffer.elementType}, ${storageBuffer.arrayLength}>`
-          : `array<${storageBuffer.elementType}>`;
+          ? `array<${elementType}, ${storageBuffer.arrayLength}>`
+          : `array<${elementType}>`;
         return this._guardBranch(
           storageBuffer.branch,
           `@group(0) @binding(${storageBuffer.binding}) var<storage, ${storageBuffer.access}> ${storageBuffer.name}: ${arrayType};`
@@ -876,6 +896,83 @@ export class WGSLVisitor extends GLESVisitor {
       ? "fn gs_nan() -> f32 { var bits: u32 = 0x7fc00000u; return bitcast<f32>(bits); }"
       : "";
     return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${resources}\n${storageBuffers}\n${nanHelper}`;
+  }
+
+  private _prepareStorageAtomics(node: TreeNode, isComputeProgram: boolean): void {
+    const atomicTargets = new Set<ASTNode.PostfixExpression>();
+    const visitAtomicCalls = (current: TreeNode): void => {
+      if (current instanceof ASTNode.FunctionCall) {
+        const call = current.children[0] as ASTNode.FunctionCallGeneric;
+        const identifier = call.children[0] as ASTNode.FunctionIdentifier;
+        const paramsNode = call.children[2];
+        if (
+          !(call.fnSymbol instanceof FnSymbol) &&
+          identifier.lexeme === "atomicAdd" &&
+          paramsNode instanceof ASTNode.FunctionCallParameterList
+        ) {
+          if (!isComputeProgram) {
+            throw new Error("ShaderLab atomicAdd is only supported in compute passes.");
+          }
+          const params = paramsNode.paramNodes;
+          const target = params[0] ? this._storageElementReference(params[0]) : undefined;
+          if (!target || params.length !== 2) {
+            throw new Error(
+              "ShaderLab atomicAdd requires a direct element of a writable int[] or uint[] storage buffer."
+            );
+          }
+          if (target.storageBuffer.access !== "read_write") {
+            throw new Error(`ShaderLab atomicAdd target "${target.storageBuffer.name}" must be writable.`);
+          }
+          if (target.storageBuffer.elementType !== "i32" && target.storageBuffer.elementType !== "u32") {
+            throw new Error(
+              `ShaderLab atomicAdd target "${target.storageBuffer.name}" must contain scalar int or uint elements.`
+            );
+          }
+          target.storageBuffer.atomic = true;
+          atomicTargets.add(target.expression);
+        }
+      }
+      for (const child of current.children) {
+        if (child instanceof TreeNode) {
+          visitAtomicCalls(child);
+        }
+      }
+    };
+    visitAtomicCalls(node);
+
+    if (atomicTargets.size === 0) {
+      return;
+    }
+    const rejectNonAtomicAccess = (current: TreeNode): void => {
+      if (current instanceof ASTNode.PostfixExpression && current.children.length === 4) {
+        const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+        const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
+        if (storageBuffer?.atomic && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab storage buffer "${storageBuffer.name}" uses atomic elements; only atomicAdd access is supported.`
+          );
+        }
+      }
+      for (const child of current.children) {
+        if (child instanceof TreeNode) {
+          rejectNonAtomicAccess(child);
+        }
+      }
+    };
+    rejectNonAtomicAccess(node);
+  }
+
+  private _storageElementReference(node: TreeNode): StorageElementReference | undefined {
+    let current = node;
+    while (current.children.length === 1 && current.children[0] instanceof TreeNode) {
+      current = current.children[0];
+    }
+    if (!(current instanceof ASTNode.PostfixExpression) || current.children.length !== 4) {
+      return undefined;
+    }
+    const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+    const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
+    return storageBuffer ? { storageBuffer, expression: current } : undefined;
   }
 
   private _createVertexWrapper(): string {

@@ -63,6 +63,25 @@ Shader "WGSL/ComputeCopy" {
 }
 `;
 
+const atomicComputeShader = `
+Shader "WGSL/ComputeAtomicAppend" {
+  SubShader "Default" {
+    Pass "Append" {
+      buffer uint counters[];
+      buffer uint outputValues[];
+
+      void appendValues() {
+        uint index = gl_GlobalInvocationID.x;
+        uint outputIndex = atomicAdd(counters[0u], 1u);
+        outputValues[outputIndex] = index;
+      }
+
+      ComputeShader = appendValues;
+    }
+  }
+}
+`;
+
 function generateWGSL(): { vertex: string; fragment: string } {
   return generateWGSLFromSource(basicShader);
 }
@@ -178,6 +197,28 @@ describe("ShaderCompiler WGSL codegen", () => {
     expect(errors.map((message) => message.message)).toEqual([]);
   });
 
+  it("lowers ShaderLab storage atomicAdd to valid WGSL", async () => {
+    const { compute, reflection } = generateWGSLCompute(atomicComputeShader);
+
+    expect(compute).toContain("var<storage, read_write> counters: array<atomic<u32>>");
+    expect(compute).toContain("atomicAdd(&counters[0u], 1u)");
+    expect(reflection.storageBuffers?.[0]).toMatchObject({
+      name: "counters",
+      access: "read_write",
+      elementType: "u32"
+    });
+
+    if (!navigator.gpu) {
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
+
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+  });
+
   it("executes the generated compute artifact and copies storage-buffer data", async () => {
     if (!navigator.gpu) {
       return;
@@ -224,6 +265,82 @@ describe("ShaderCompiler WGSL codegen", () => {
 
     expect(new Uint32Array(readback.getMappedRange().slice(0))).toEqual(values);
     readback.unmap();
+  });
+
+  it("executes generated atomic append and preserves every invocation", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const { compute } = generateWGSLCompute(atomicComputeShader);
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: device.createShaderModule({ code: compute }), entryPoint: "main" }
+    });
+    const counter = device.createBuffer({
+      size: Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+    const output = device.createBuffer({
+      size: 64 * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+      size: 65 * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    device.queue.writeBuffer(counter, 0, new Uint32Array([0]));
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: counter } },
+        { binding: 1, resource: { buffer: output } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(counter, 0, readback, 0, Uint32Array.BYTES_PER_ELEMENT);
+    encoder.copyBufferToBuffer(output, 0, readback, Uint32Array.BYTES_PER_ELEMENT, 64 * Uint32Array.BYTES_PER_ELEMENT);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    const result = new Uint32Array(readback.getMappedRange().slice(0));
+    expect(result[0]).toBe(64);
+    expect(Array.from(result.slice(1)).sort((left, right) => left - right)).toEqual(
+      Array.from({ length: 64 }, (_, index) => index)
+    );
+    readback.unmap();
+  });
+
+  it("rejects unsupported non-atomic access to an atomic storage buffer", () => {
+    const source = atomicComputeShader.replace(
+      "outputValues[outputIndex] = index;",
+      "outputValues[outputIndex] = counters[0u];"
+    );
+
+    expect(() => generateWGSLCompute(source)).toThrow(
+      'ShaderLab storage buffer "counters" uses atomic elements; only atomicAdd access is supported.'
+    );
+  });
+
+  it("preserves atomic lowering in a WGSL precompiled artifact", () => {
+    const compiler = new ShaderCompiler();
+    const artifact = compiler._precompile(atomicComputeShader, ShaderLanguage.WGSL, "shaders://root/");
+    const pass = artifact.subShaders[0].passes[0];
+    const compute = ShaderMacroProcessor.evaluate(
+      pass.computeShaderInstructions!,
+      new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "64"]])
+    );
+
+    expect(compute).toContain("var<storage, read_write> counters: array<atomic<u32>>");
+    expect(compute).toContain("atomicAdd(&counters[0u], 1u)");
   });
 
   it("preserves compute instructions and reflection in a WGSL precompiled artifact", () => {

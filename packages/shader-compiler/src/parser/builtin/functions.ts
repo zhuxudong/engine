@@ -295,6 +295,8 @@ BuiltinFunction._create("floatBitsToInt", GenericType.GenType, GenericType.GenTy
 BuiltinFunction._create("floatBitsToUint", GenericType.GenUintType, GenericType.GenType);
 BuiltinFunction._create("intBitsToFloat", GenericType.GenType, GenericType.GenIntType);
 BuiltinFunction._create("uintBitsToFloat", GenericType.GenType, GenericType.GenUintType);
+BuiltinFunction._createWithScope("atomicAdd", Keyword.INT, EShaderStage.COMPUTE, Keyword.INT, Keyword.INT);
+BuiltinFunction._createWithScope("atomicAdd", Keyword.UINT, EShaderStage.COMPUTE, Keyword.UINT, Keyword.UINT);
 
 BuiltinFunction._create("packSnorm2x16", Keyword.UINT, Keyword.VEC2);
 BuiltinFunction._create("unpackSnorm2x16", Keyword.VEC2, Keyword.UINT);
