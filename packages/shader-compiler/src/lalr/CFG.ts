@@ -273,7 +273,8 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
       [Keyword.OUT],
       [Keyword.CENTROID],
       [Keyword.BUFFER],
-      [Keyword.READONLY]
+      [Keyword.READONLY],
+      [Keyword.SHARED]
     ],
     // #if _VERBOSE
     ASTNode.StorageQualifier.pool

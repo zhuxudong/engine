@@ -44,6 +44,14 @@ type StorageBuffer = IShaderStorageBufferReflection & {
   atomic: boolean;
 };
 
+type WorkgroupVariable = {
+  name: string;
+  type: string;
+  arrayLength?: string;
+  sourceIndex: number;
+  branch: BranchSignature;
+};
+
 type StorageElementReference = {
   storageBuffer: StorageBuffer;
   expression: ASTNode.PostfixExpression;
@@ -59,6 +67,7 @@ export class WGSLVisitor extends GLESVisitor {
   private readonly _uniforms = new Map<string, Uniform>();
   private readonly _resources = new Map<string, Resource>();
   private readonly _storageBuffers = new Map<string, StorageBuffer>();
+  private readonly _workgroupVariables = new Map<string, WorkgroupVariable>();
   private readonly _structs = new Map<string, StructSymbol>();
   private readonly _vertexInputs = new Map<string, IOField>();
   private readonly _vertexOutputs = new Map<string, IOField>();
@@ -262,6 +271,9 @@ export class WGSLVisitor extends GLESVisitor {
     }
 
     const name = identifier.lexeme;
+    if (name === "barrier" && this._stage() !== "compute") {
+      throw new Error("ShaderLab barrier is only supported in compute passes.");
+    }
     if (name === "atomicAdd") {
       const target = params[0] ? this._storageElementReference(params[0]) : undefined;
       if (!target || params.length !== 2) {
@@ -636,6 +648,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._uniforms.clear();
     this._resources.clear();
     this._storageBuffers.clear();
+    this._workgroupVariables.clear();
     this._structs.clear();
     this._vertexInputs.clear();
     this._vertexOutputs.clear();
@@ -705,6 +718,22 @@ export class WGSLVisitor extends GLESVisitor {
     for (const symbol of globals) {
       const name = symbol.ident;
       const branch = (symbol.astNode.children[1] as BaseToken).branch;
+      const isWorkgroupVariable = this._containsQualifier(symbol.astNode.children, Keyword.SHARED);
+      if (isWorkgroupVariable) {
+        if (!computeEntry) {
+          throw new Error(`ShaderLab shared variable "${name}" is only supported in compute passes.`);
+        }
+        if (!this._workgroupVariables.has(name)) {
+          this._workgroupVariables.set(name, {
+            name,
+            type: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
+            arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
+            sourceIndex: symbol.astNode.location.start.index,
+            branch
+          });
+        }
+        continue;
+      }
       const isStorageBuffer = this._containsQualifier(symbol.astNode.children, Keyword.BUFFER);
       if (isStorageBuffer) {
         if (!symbol.dataType.arraySpecifier) {
@@ -869,6 +898,13 @@ export class WGSLVisitor extends GLESVisitor {
       fields.length > 0
         ? `struct GSUniforms {\n${fields.join("\n")}\n}\n@group(0) @binding(0) var<uniform> gsUniforms: GSUniforms;`
         : "";
+    const workgroupVariables = Array.from(this._workgroupVariables.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map((variable) => {
+        const type = variable.arrayLength ? `array<${variable.type}, ${variable.arrayLength}>` : variable.type;
+        return this._guardBranch(variable.branch, `var<workgroup> ${variable.name}: ${type};`);
+      })
+      .join("\n");
     const resources = Array.from(this._resources.values())
       .sort((left, right) => left.sourceIndex - right.sourceIndex)
       .map((resource) =>
@@ -895,7 +931,7 @@ export class WGSLVisitor extends GLESVisitor {
     const nanHelper = this._requiresNanHelper
       ? "fn gs_nan() -> f32 { var bits: u32 = 0x7fc00000u; return bitcast<f32>(bits); }"
       : "";
-    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${resources}\n${storageBuffers}\n${nanHelper}`;
+    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${workgroupVariables}\n${resources}\n${storageBuffers}\n${nanHelper}`;
   }
 
   private _prepareStorageAtomics(node: TreeNode, isComputeProgram: boolean): void {
@@ -1231,6 +1267,8 @@ ${assignments.join("\n")}
         return "atan2";
       case "inversesqrt":
         return "inverseSqrt";
+      case "barrier":
+        return "workgroupBarrier";
       case "dFdx":
         return "dpdx";
       case "dFdy":

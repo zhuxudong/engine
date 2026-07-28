@@ -42,6 +42,7 @@ export enum Keyword {
   CENTROID,
   BUFFER,
   READONLY,
+  SHARED,
   SAMPLER2D,
   SAMPLER3D,
   SAMPLER_CUBE,

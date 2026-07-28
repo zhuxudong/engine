@@ -67,13 +67,17 @@ const atomicComputeShader = `
 Shader "WGSL/ComputeAtomicAppend" {
   SubShader "Default" {
     Pass "Append" {
+      shared uint outputOffsets[1];
       buffer uint counters[];
       buffer uint outputValues[];
 
       void appendValues() {
         uint index = gl_GlobalInvocationID.x;
-        uint outputIndex = atomicAdd(counters[0u], 1u);
-        outputValues[outputIndex] = index;
+        if (gl_LocalInvocationID.x == 0u) {
+          outputOffsets[0u] = atomicAdd(counters[0u], uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X));
+        }
+        barrier();
+        outputValues[outputOffsets[0u] + gl_LocalInvocationID.x] = index;
       }
 
       ComputeShader = appendValues;
@@ -197,16 +201,20 @@ describe("ShaderCompiler WGSL codegen", () => {
     expect(errors.map((message) => message.message)).toEqual([]);
   });
 
-  it("lowers ShaderLab storage atomicAdd to valid WGSL", async () => {
+  it("lowers ShaderLab storage atomics and workgroup synchronization to valid WGSL", async () => {
     const { compute, reflection } = generateWGSLCompute(atomicComputeShader);
 
+    expect(compute).toContain("var<workgroup> outputOffsets: array<u32, 1>;");
     expect(compute).toContain("var<storage, read_write> counters: array<atomic<u32>>");
-    expect(compute).toContain("atomicAdd(&counters[0u], 1u)");
+    expect(compute).toContain("atomicAdd(&counters[0u], u32(64))");
+    expect(compute).toContain("workgroupBarrier()");
     expect(reflection.storageBuffers?.[0]).toMatchObject({
       name: "counters",
       access: "read_write",
       elementType: "u32"
     });
+    expect(reflection.storageBuffers).toHaveLength(2);
+    expect(reflection.uniforms.some(({ name }) => name === "outputOffsets")).toBe(false);
 
     if (!navigator.gpu) {
       return;
@@ -267,7 +275,7 @@ describe("ShaderCompiler WGSL codegen", () => {
     readback.unmap();
   });
 
-  it("executes generated atomic append and preserves every invocation", async () => {
+  it("executes generated workgroup append and preserves every invocation", async () => {
     if (!navigator.gpu) {
       return;
     }
@@ -321,8 +329,8 @@ describe("ShaderCompiler WGSL codegen", () => {
 
   it("rejects unsupported non-atomic access to an atomic storage buffer", () => {
     const source = atomicComputeShader.replace(
-      "outputValues[outputIndex] = index;",
-      "outputValues[outputIndex] = counters[0u];"
+      "outputValues[outputOffsets[0u] + gl_LocalInvocationID.x] = index;",
+      "outputValues[outputOffsets[0u] + gl_LocalInvocationID.x] = counters[0u];"
     );
 
     expect(() => generateWGSLCompute(source)).toThrow(
@@ -330,7 +338,7 @@ describe("ShaderCompiler WGSL codegen", () => {
     );
   });
 
-  it("preserves atomic lowering in a WGSL precompiled artifact", () => {
+  it("preserves atomic and workgroup lowering in a WGSL precompiled artifact", () => {
     const compiler = new ShaderCompiler();
     const artifact = compiler._precompile(atomicComputeShader, ShaderLanguage.WGSL, "shaders://root/");
     const pass = artifact.subShaders[0].passes[0];
@@ -339,8 +347,28 @@ describe("ShaderCompiler WGSL codegen", () => {
       new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "64"]])
     );
 
+    expect(compute).toContain("var<workgroup> outputOffsets: array<u32, 1>;");
     expect(compute).toContain("var<storage, read_write> counters: array<atomic<u32>>");
-    expect(compute).toContain("atomicAdd(&counters[0u], 1u)");
+    expect(compute).toContain("atomicAdd(&counters[0u], u32(64))");
+    expect(compute).toContain("workgroupBarrier()");
+  });
+
+  it("rejects workgroup memory and barriers in render passes", () => {
+    const sharedSource = basicShader.replace(
+      "mat4 renderer_MVPMat;",
+      "shared uint outputOffsets[1];\n      mat4 renderer_MVPMat;"
+    );
+    expect(() => generateWGSLFromSource(sharedSource)).toThrow(
+      'ShaderLab shared variable "outputOffsets" is only supported in compute passes.'
+    );
+
+    const barrierSource = basicShader.replace(
+      "Varyings vert(Attributes attributes) {",
+      "Varyings vert(Attributes attributes) {\n        barrier();"
+    );
+    expect(() => generateWGSLFromSource(barrierSource)).toThrow(
+      "ShaderLab barrier is only supported in compute passes."
+    );
   });
 
   it("preserves compute instructions and reflection in a WGSL precompiled artifact", () => {

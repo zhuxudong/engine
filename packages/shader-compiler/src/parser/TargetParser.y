@@ -364,6 +364,7 @@ storage_qualifier:
     | centroid
     | buffer
     | readonly
+    | shared
     ;
 
 interpolation_qualifier:
