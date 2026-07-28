@@ -7,10 +7,11 @@ const configuredUrl = process.env.TERRAIN_E2E_URL;
 const baseUrl = new URL(configuredUrl ?? "http://127.0.0.1:5175");
 const port = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
 const browserChannel = process.env.TERRAIN_E2E_CHANNEL;
+const webgpu = process.env.TERRAIN_E2E_WEBGPU === "1";
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "terrain.spec.ts",
+  testMatch: ["terrain.spec.ts", "webgpu-grasslands.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 300_000,
@@ -22,6 +23,11 @@ export default defineConfig({
     baseURL: baseUrl.origin,
     viewport: { width: 1024, height: 576 },
     channel: browserChannel,
+    launchOptions: webgpu
+      ? {
+          args: ["--enable-unsafe-webgpu", "--use-angle=metal"]
+        }
+      : undefined,
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },

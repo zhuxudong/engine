@@ -1,6 +1,6 @@
 import { ShaderFactory } from "@galacean/engine-core";
-import grasslandsCloudShadowSource from "./includes/GrasslandsCloudShadow.glsl?raw";
-import terrainWorldNoiseSource from "./includes/TerrainWorldNoise.glsl?raw";
+import grasslandsCloudShadowSource from "./Terrain/GrasslandsCloudShadow.glsl?raw";
+import terrainWorldNoiseSource from "./Terrain/TerrainWorldNoise.glsl?raw";
 
 const GRASSLANDS_CLOUD_SHADOW_INCLUDE = "Terrain/GrasslandsCloudShadow.glsl";
 const TERRAIN_WORLD_NOISE_INCLUDE = "Terrain/TerrainWorldNoise.glsl";

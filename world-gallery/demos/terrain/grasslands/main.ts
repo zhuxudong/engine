@@ -8,10 +8,8 @@ import {
   Shader,
   TonemappingEffect,
   TonemappingMode,
-  Vector3,
-  WebGLEngine
+  Vector3
 } from "@galacean/engine";
-import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
 import { TerrainMaterial } from "../src/TerrainMaterial";
 import {
@@ -49,6 +47,7 @@ import terrainShaderSource from "../src/shaders/Terrain.shader?raw";
 import { registerTerrainShaderIncludes } from "../src/shaders/registerTerrainShaderIncludes";
 import { SurfaceWorld } from "../src/surface/SurfaceWorld";
 import type { SurfaceRuntimeTuningUpdate } from "../src/surface/SurfaceRuntimeContract";
+import { bindTerrainBackendSelector, createTerrainEngine } from "../src/TerrainEngineBootstrap";
 import { loadGrasslandsArchitecture, type GrasslandsArchitectureSpec } from "./src/GrasslandsArchitecture";
 import {
   GrasslandsCloudSystem,
@@ -157,7 +156,8 @@ void boot().catch((error: unknown) => {
 
 async function boot(): Promise<void> {
   setStatus("initializing engine");
-  const engine = await WebGLEngine.create({ canvas: "canvas", shaderCompiler: new ShaderCompiler() });
+  const { engine, backend } = await createTerrainEngine("canvas");
+  bindTerrainBackendSelector(document.querySelector<HTMLSelectElement>("#backend"), backend);
   const performancePanel = new TerrainPerformancePanel(engine);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
@@ -564,7 +564,7 @@ async function boot(): Promise<void> {
   const snapshot = surfaceWorld.inspect();
   setStatus(
     `ready · 9 terrain tiles · ${snapshot.totalInstances.toLocaleString()} surface instances · ` +
-      `${architecture.placements} architecture placements · ${clouds.inspect().instances} sky clouds`
+      `${architecture.placements} architecture placements · ${clouds.inspect().instances} sky clouds · ${backend}`
   );
 }
 

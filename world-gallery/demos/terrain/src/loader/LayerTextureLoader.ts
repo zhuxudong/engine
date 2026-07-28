@@ -26,30 +26,22 @@ export async function loadLayerTextures(
       normalRoughness: await loadImage(new URL(layer.normalRoughness, manifestUrl).href)
     }))
   );
-  const width = images[0].albedoHeight.naturalWidth;
-  const height = images[0].albedoHeight.naturalHeight;
+  const width = images[0].albedoHeight.width;
+  const height = images[0].albedoHeight.height;
   for (let index = 0; index < images.length; index++) {
     const pair = images[index];
     if (
-      pair.albedoHeight.naturalWidth !== width ||
-      pair.albedoHeight.naturalHeight !== height ||
-      pair.normalRoughness.naturalWidth !== width ||
-      pair.normalRoughness.naturalHeight !== height
+      pair.albedoHeight.width !== width ||
+      pair.albedoHeight.height !== height ||
+      pair.normalRoughness.width !== width ||
+      pair.normalRoughness.height !== height
     ) {
       throw new Error(`[TerrainLayers] layer ${index} does not match ${width}x${height}`);
     }
   }
 
   const albedoHeight = new Texture2DArray(engine, width, height, layers.length, TextureFormat.R8G8B8A8, true, true);
-  const normalRoughness = new Texture2DArray(
-    engine,
-    width,
-    height,
-    layers.length,
-    TextureFormat.R8G8B8A8,
-    true,
-    false
-  );
+  const normalRoughness = new Texture2DArray(engine, width, height, layers.length, TextureFormat.R8G8B8A8, true, false);
   for (let layer = 0; layer < layers.length; layer++) {
     albedoHeight.setImageSource(layer, images[layer].albedoHeight);
     normalRoughness.setImageSource(layer, images[layer].normalRoughness);
@@ -63,12 +55,13 @@ export async function loadLayerTextures(
   return { albedoHeight, normalRoughness };
 }
 
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.crossOrigin = "anonymous";
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error(`[TerrainLayers] failed to load ${url}`));
-    image.src = url;
+async function loadImage(url: string): Promise<ImageBitmap> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`[TerrainLayers] failed to load ${url}: ${response.status}`);
+  }
+  return createImageBitmap(await response.blob(), {
+    colorSpaceConversion: "none",
+    premultiplyAlpha: "none"
   });
 }

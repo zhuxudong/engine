@@ -7,10 +7,8 @@ import {
   Shader,
   TonemappingEffect,
   TonemappingMode,
-  Vector3,
-  WebGLEngine
+  Vector3
 } from "@galacean/engine";
-import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { FreeControl, OrbitControl } from "@galacean/engine-toolkit-controls";
 import { TerrainClipmap } from "./src/clipmap/TerrainClipmap";
 import { TerrainMaterial } from "./src/TerrainMaterial";
@@ -47,6 +45,7 @@ import { mountTerrainInspector } from "./src/debug/TerrainDebugInspector";
 import { createTerrainEnvironment } from "./src/lighting/TerrainEnvironment";
 import { TerrainPerformancePanel } from "./src/performance/TerrainPerformancePanel";
 import { SurfaceWorld } from "./src/surface/SurfaceWorld";
+import { bindTerrainBackendSelector, createTerrainEngine } from "./src/TerrainEngineBootstrap";
 
 export {
   TERRAIN_DEBUG_VIEWS,
@@ -127,7 +126,8 @@ void boot().catch((error: unknown) => {
 
 async function boot(): Promise<void> {
   setStatus("initializing engine");
-  const engine = await WebGLEngine.create({ canvas: "canvas", shaderCompiler: new ShaderCompiler() });
+  const { engine, backend } = await createTerrainEngine("canvas");
+  bindTerrainBackendSelector(document.querySelector<HTMLSelectElement>("#backend"), backend);
   const performancePanel = new TerrainPerformancePanel(engine);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
@@ -448,7 +448,7 @@ async function boot(): Promise<void> {
   engine.run();
   setStatus(
     `ready · ${terrainData.regions.length} regions · ${clipmap.segmentCount} clipmap segments · ` +
-      "deterministic surface streaming"
+      `deterministic surface streaming · ${backend}`
   );
 }
 

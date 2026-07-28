@@ -694,15 +694,14 @@ Shader "Terrain" {
       vec4 shadeTerrain(Varyings varyings) {
         #ifdef TERRAIN_DEBUG
         if (material_DebugView == 27) {
-          return renderer_DebugWire > 0.5 ? vec4(0.65, 0.95, 1.0, 1.0) : vec4(0.015, 0.02, 0.03, 1.0);
+          float wireFactor = step(0.5, renderer_DebugWire);
+          return vec4(mix(vec3(0.015, 0.02, 0.03), vec3(0.65, 0.95, 1.0), wireFactor), 1.0);
         }
         if (material_DebugView == 13) {
-          if (renderer_DebugWire > 0.5) {
-            vec3 ringColor = lodColor(renderer_Lod);
-            float morphBrightness = mix(0.5, 1.0, varyings.geomorphFactor);
-            return vec4(ringColor * morphBrightness, 1.0);
-          }
-          return vec4(0.025, 0.03, 0.045, 1.0);
+          vec3 ringColor = lodColor(renderer_Lod);
+          float morphBrightness = mix(0.5, 1.0, varyings.geomorphFactor);
+          float wireFactor = step(0.5, renderer_DebugWire);
+          return vec4(mix(vec3(0.025, 0.03, 0.045), ringColor * morphBrightness, wireFactor), 1.0);
         }
         if (material_DebugView == 14) {
           float factor = clamp(

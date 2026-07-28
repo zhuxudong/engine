@@ -8,9 +8,10 @@ const FRAME_SAMPLE_COUNT = 120;
 
 type PanelState = "expanded" | "collapsed" | "hidden";
 
-interface WebGLEngineInternals {
+interface GraphicsEngineInternals {
   readonly _hardwareRenderer: {
-    readonly gl: WebGLRenderingContext | WebGL2RenderingContext;
+    readonly backend: "webgl" | "webgpu";
+    readonly gl?: WebGLRenderingContext | WebGL2RenderingContext;
   };
 }
 
@@ -98,9 +99,9 @@ const METRICS: readonly MetricDefinition[] = [
     title: "Toolkit WebGL hook 观察到的活动着色器数。"
   },
   {
-    key: "webgl",
-    label: "WebGL / 图形接口",
-    title: "当前 WebGL 上下文版本。"
+    key: "graphicsApi",
+    label: "Graphics API / 图形接口",
+    title: "当前引擎图形后端。"
   }
 ];
 
@@ -133,17 +134,17 @@ export interface TerrainPerformanceSceneMetrics {
 export type TerrainPerformanceSceneMetricsProvider = () => TerrainPerformanceSceneMetrics | null;
 
 /**
- * Displays engine, WebGL, clipmap, and surface statistics in a shared foldable
+ * Displays engine, graphics-backend, clipmap, and surface statistics in a shared foldable
  * overlay.
  */
 export class TerrainPerformancePanel {
   private readonly _engine: Engine;
-  private readonly _core: Core;
+  private readonly _core: Core | null;
   private readonly _root: HTMLElement;
   private readonly _metrics: HTMLDListElement;
   private readonly _launcher: HTMLButtonElement;
   private readonly _toggle: HTMLButtonElement;
-  private readonly _webglVersion: string;
+  private readonly _graphicsApi: string;
   private readonly _values = new Map<string, HTMLElement>();
   private readonly _frameTimes: number[] = [];
   private _sceneMetrics: TerrainPerformanceSceneMetricsProvider = () => null;
@@ -156,7 +157,7 @@ export class TerrainPerformancePanel {
   /**
    * Creates the panel and starts sampling.
    *
-   * @param engine Engine whose WebGL and graphics-memory statistics are observed.
+   * @param engine Engine whose rendering and graphics-memory statistics are observed.
    */
   constructor(engine: Engine) {
     this._engine = engine;
@@ -174,12 +175,18 @@ export class TerrainPerformancePanel {
     this._setState("hidden");
     document.body.appendChild(this._root);
 
-    // engine-toolkit-stats uses the same internal boundary because Engine does
-    // not expose its WebGL context as public API.
-    const gl = (engine as unknown as WebGLEngineInternals)._hardwareRenderer.gl;
-    this._webglVersion =
-      typeof WebGL2RenderingContext !== "undefined" && gl instanceof WebGL2RenderingContext ? "2.0" : "1.0";
-    this._core = new Core(gl);
+    const renderer = (engine as unknown as GraphicsEngineInternals)._hardwareRenderer;
+    const gl = renderer.gl;
+    if (renderer.backend === "webgpu") {
+      this._graphicsApi = "WebGPU";
+      this._core = null;
+    } else {
+      this._graphicsApi =
+        typeof WebGL2RenderingContext !== "undefined" && gl instanceof WebGL2RenderingContext
+          ? "WebGL 2.0"
+          : "WebGL 1.0";
+      this._core = new Core(gl!);
+    }
     this._animationFrame = requestAnimationFrame(this._update);
     window.addEventListener("beforeunload", this.destroy, { once: true });
   }
@@ -194,13 +201,13 @@ export class TerrainPerformancePanel {
   }
 
   /**
-   * Releases WebGL hooks and removes the overlay.
+   * Releases backend hooks and removes the overlay.
    */
   destroy = (): void => {
     if (!this._animationFrame) return;
     cancelAnimationFrame(this._animationFrame);
     this._animationFrame = 0;
-    this._core.release();
+    this._core?.release();
     this._root.remove();
     window.removeEventListener("beforeunload", this.destroy);
   };
@@ -222,13 +229,13 @@ export class TerrainPerformancePanel {
       const memory = (performance as unknown as PerformanceMemorySource).memory;
       this._setValue("jsMemory", memory ? `${Math.round(memory.usedJSHeapSize / BYTES_PER_MEGABYTE)} MB` : "—");
       this._setValue("gpuMemory", `${formatMegabytes(this._engine.renderingStatistics.totalMemory)} MB`);
-      this._setValue("webgl", this._webglVersion);
+      this._setValue("graphicsApi", this._graphicsApi);
       this._updateSceneMetrics();
       this._lastPanelUpdate = time;
       this._frameCount = 0;
     }
 
-    const sample = this._core.update();
+    const sample = this._core?.update();
     if (sample) {
       this._setValue("drawCalls", sample.drawCall.toLocaleString("en-US"));
       this._setValue("meshTriangles", Math.round(sample.triangles).toLocaleString("en-US"));
