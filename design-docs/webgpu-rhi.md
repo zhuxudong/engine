@@ -460,6 +460,59 @@ Grasslands 的 source binding 为 17.77 MiB、output binding 为 18.08 MiB，最
   决策仍在 CPU。将 cell culling/LOD 迁入 atlas compute 才能检验每帧 GPU-driven 收益；
   不能把本检查点描述为已经完成 GPU culling。
 
+### 实例级精确裁剪第七阶段设计
+
+本阶段只改变满足以下能力谓词的 finite prototype：只有一个 LOD、不启用 LOD cross-fade，且
+所有 renderer 都不投影阴影。谓词来自渲染语义，不读取 `grass`、`flower` 等 category。多 LOD、
+cross-fade 或 shadow caster 继续使用第六检查点的 range 级 CPU 选择与 GPU copy，避免相机裁剪
+删除相机外但仍会进入 shadow cascade 的实例。
+
+Grasslands 当前资产中，该谓词覆盖 3 个草 prototype 和 2 个花 prototype，共 272,570 个
+候选实例、290 个 cell range。按 demo authored camera 的实例位置到相机距离离线计数，不加入
+prototype radius 和视锥保守量时，当前 range 级选择与实例点距离选择的差异如下。该表只说明
+候选裁剪空间，不是最终可见数或性能结果。
+
+| category | 总候选 | 当前 range 选择 | 实例点距离选择 | 相对当前减少 |
+| --- | ---: | ---: | ---: | ---: |
+| grass | 254,518 | 136,466 | 104,016 | 23.78% |
+| flower | 18,052 | 14,234 | 13,101 | 7.96% |
+| 合计 | 272,570 | 150,700 | 117,117 | 22.28% |
+
+实现沿用 atlas 与单次 flattened dispatch：
+
+1. CPU 继续做 cell conservative culling、density prefix 和能力谓词判断，并上传 range command。
+2. 一个 workgroup 消费一个 range command；每个 invocation 以步进循环检查实例位置、动态
+   category scale、prototype sphere 与相机 max distance/六视锥平面。
+3. workgroup 内存中的 atomic counter 分配局部 survivor slot；leader 对该 render batch 的
+   storage counter 只执行一次全局 `atomicAdd`，随后所有 survivor 写入连续 output slice。
+4. 第二个 ShaderLab compute pass 将 batch counter 写入对应 indirect record 的 instance count。
+   counter reset、fine cull 与 finalize 不读取或暴露原生 `GPUDevice`。
+
+该算法直接参考 PlayCanvas
+[`compute-gsplat-projector.js`](https://github.com/playcanvas/engine/blob/332a922d2dcf48bf3c774d296c999c69581d3d2c/src/scene/shader-lib/wgsl/chunks/gsplat/compute-gsplat-projector.js)
+和
+[`compute-gsplat-shadow-cull.js`](https://github.com/playcanvas/engine/blob/332a922d2dcf48bf3c774d296c999c69581d3d2c/src/scene/shader-lib/wgsl/chunks/gsplat/compute-gsplat-shadow-cull.js)
+的 workgroup 聚合模式：局部 atomic compaction，每 workgroup 一次全局 atomic reservation；
+后者还将 coarse candidate 和六平面 conservative fine cull 分为独立阶段。ShaderLab 先补
+`shared int/uint` 的 `atomicAdd`、`atomicLoad`、`atomicStore` WGSL codegen 与 `.wgslc`，
+terrain shader 才能使用该模式；不在 example 内嵌手写 WGSL。
+
+新增 cull parameter 与 batch counter 后，compaction 同一 pass 最多绑定 6 个 storage buffer，
+不超过 WebGPU 最低 `maxStorageBuffersPerShaderStage = 8`。workgroup size 继续由
+`Engine.computeCapabilities` 和 `GALACEAN_COMPUTE_WORKGROUP_SIZE_X` 派生。range 数超过设备
+`maxComputeWorkgroupsPerDimension` 或任何 atlas binding 超过实际 device limit 时显式失败；
+本阶段不加入 paging、subgroup 或 prefix-sum fallback。
+
+验收分别报告：
+
+- ShaderLab 生成源码、`.wgslc`、原生 WebGPU validation，以及至少两个 workgroup 的完整
+  survivor 集合，证明不是只编译未执行。
+- 固定相机的实例/category、renderer/indirect batch、截图像素差和 GPU diagnostics。
+- 静态 settled 与连续相机移动的 WebGL2/WebGPU FPS、frame p50/p95、host update time、
+  dispatch 数、全局 atomic 次数和实际输出实例数。
+- 若减少实例仍没有形成稳定 frame-time 收益，保留正确性能力与数据，不把它描述为大世界
+  性能提升。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
