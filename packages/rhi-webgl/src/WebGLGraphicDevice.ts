@@ -427,6 +427,25 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     }
   }
 
+  /**
+   * Reports the unsupported indirect-draw capability on WebGL.
+   * @param _primitive Primitive that would supply vertex and index buffers.
+   * @param _subPrimitive Sub-primitive that would supply topology.
+   * @param _shaderProgram Shader program that would supply the pipeline state.
+   * @param _indirectBuffer Buffer that would contain indirect arguments.
+   * @param _indirectOffset Byte offset that would select the argument record.
+   * @throws Always; indirect drawing is only available on WebGPU.
+   */
+  drawPrimitiveIndirect(
+    _primitive: GLPrimitive,
+    _subPrimitive: SubMesh,
+    _shaderProgram: IPlatformShaderProgram,
+    _indirectBuffer: IPlatformBuffer,
+    _indirectOffset: number = 0
+  ): never {
+    throw new Error("Indirect drawing is not supported by the WebGL backend.");
+  }
+
   getMainFrameBufferWidth(): number {
     return this._mainFrameWidth || this._gl.drawingBufferWidth;
   }

@@ -1,9 +1,10 @@
-import { BufferBindFlag, BufferUsage } from "@galacean/engine-core";
-import { describe, expect, it } from "vitest";
+import { BufferBindFlag, BufferUsage, IndexFormat, MeshTopology, type Primitive, SubMesh } from "@galacean/engine-core";
+import { describe, expect, it, vi } from "vitest";
 import { GLBuffer } from "../../rhi-webgl/src/GLBuffer";
 import type { WebGLGraphicDevice } from "../../rhi-webgl/src/WebGLGraphicDevice";
 import { WebGPUBuffer } from "../src/WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "../src/WebGPUGraphicDevice";
+import { WebGPUPrimitive } from "../src/WebGPUPrimitive";
 
 Object.defineProperty(globalThis, "GPUBufferUsage", {
   configurable: true,
@@ -78,6 +79,62 @@ describe("WebGPU buffer bindings", () => {
         )
     ).toThrow("Storage and indirect buffer bindings are not supported by the WebGL backend.");
   });
+
+  it("encodes indexed and non-indexed indirect draws", () => {
+    const indirect = new WebGPUBuffer(
+      createDevice([]),
+      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
+      36,
+      BufferUsage.Dynamic
+    );
+    const indexGPUBuffer = {} as GPUBuffer;
+    const indexedPrimitive = createPrimitive({
+      format: IndexFormat.UInt16,
+      buffer: { _platformBuffer: { _gpuBuffer: indexGPUBuffer } }
+    });
+    const indexedPass = createRenderPass();
+
+    indexedPrimitive._encodeDraw(indexedPass.pass, new SubMesh(2, 6, MeshTopology.Triangles), undefined, indirect, 16);
+
+    expect(indexedPass.setIndexBuffer).toHaveBeenCalledWith(indexGPUBuffer, "uint16");
+    expect(indexedPass.drawIndexedIndirect).toHaveBeenCalledWith(indirect._gpuBuffer, 16);
+    expect(indexedPass.drawIndexed).not.toHaveBeenCalled();
+
+    const nonIndexedPrimitive = createPrimitive();
+    const nonIndexedPass = createRenderPass();
+    nonIndexedPrimitive._encodeDraw(
+      nonIndexedPass.pass,
+      new SubMesh(0, 3, MeshTopology.Triangles),
+      undefined,
+      indirect,
+      0
+    );
+    expect(nonIndexedPass.drawIndirect).toHaveBeenCalledWith(indirect._gpuBuffer, 0);
+    expect(nonIndexedPass.draw).not.toHaveBeenCalled();
+    indirect.destroy();
+  });
+
+  it("validates indirect bindings, alignment, and record size", () => {
+    const pass = createRenderPass().pass;
+    const indexedPrimitive = createPrimitive({
+      format: IndexFormat.UInt16,
+      buffer: { _platformBuffer: { _gpuBuffer: {} as GPUBuffer } }
+    });
+    const directOnly = new WebGPUBuffer(createDevice([]), BufferBindFlag.StorageBuffer, 20, BufferUsage.Dynamic);
+    const indirect = new WebGPUBuffer(createDevice([]), BufferBindFlag.IndirectBuffer, 20, BufferUsage.Dynamic);
+
+    expect(() => indexedPrimitive._encodeDraw(pass, new SubMesh(0, 3), undefined, directOnly, 0)).toThrow(
+      "Indirect draw requires a buffer created with BufferBindFlag.IndirectBuffer."
+    );
+    expect(() => indexedPrimitive._encodeDraw(pass, new SubMesh(0, 3), undefined, indirect, 2)).toThrow(
+      "Indirect draw offset 2 must be a non-negative multiple of 4."
+    );
+    expect(() => indexedPrimitive._encodeDraw(pass, new SubMesh(0, 3), undefined, indirect, 4)).toThrow(
+      "Indirect draw arguments [4, 24) exceed 20 bytes."
+    );
+    directOnly.destroy();
+    indirect.destroy();
+  });
 });
 
 function createDevice(descriptors: GPUBufferDescriptor[]): WebGPUGraphicDevice {
@@ -89,4 +146,44 @@ function createDevice(descriptors: GPUBufferDescriptor[]): WebGPUGraphicDevice {
       }
     }
   } as unknown as WebGPUGraphicDevice;
+}
+
+function createPrimitive(indexBufferBinding?: unknown): WebGPUPrimitive {
+  return new WebGPUPrimitive(
+    {} as WebGPUGraphicDevice,
+    {
+      vertexBufferBindings: [],
+      indexBufferBinding,
+      instanceCount: 0
+    } as Primitive
+  );
+}
+
+function createRenderPass(): {
+  pass: GPURenderPassEncoder;
+  setIndexBuffer: ReturnType<typeof vi.fn>;
+  drawIndexed: ReturnType<typeof vi.fn>;
+  drawIndexedIndirect: ReturnType<typeof vi.fn>;
+  draw: ReturnType<typeof vi.fn>;
+  drawIndirect: ReturnType<typeof vi.fn>;
+} {
+  const setIndexBuffer = vi.fn();
+  const drawIndexed = vi.fn();
+  const drawIndexedIndirect = vi.fn();
+  const draw = vi.fn();
+  const drawIndirect = vi.fn();
+  return {
+    pass: {
+      setIndexBuffer,
+      drawIndexed,
+      drawIndexedIndirect,
+      draw,
+      drawIndirect
+    } as unknown as GPURenderPassEncoder,
+    setIndexBuffer,
+    drawIndexed,
+    drawIndexedIndirect,
+    draw,
+    drawIndirect
+  };
 }

@@ -14,6 +14,8 @@ export class WebGPUBuffer implements IPlatformBuffer {
   readonly _bindingId = WebGPUBuffer._counter++;
 
   private readonly _device: WebGPUGraphicDevice;
+  private readonly _bindingFlags: BufferBindFlag;
+  private readonly _byteLength: number;
   private readonly _shadowData: Uint8Array;
   private _lastUploadEnd = 0;
 
@@ -25,6 +27,8 @@ export class WebGPUBuffer implements IPlatformBuffer {
     data?: ArrayBuffer | ArrayBufferView
   ) {
     this._device = device;
+    this._bindingFlags = type;
+    this._byteLength = byteLength;
     const size = Math.max(4, WebGPUBuffer._alignToFour(byteLength));
     this._shadowData = new Uint8Array(size);
     this._gpuBuffer = device.device.createBuffer({
@@ -112,6 +116,22 @@ export class WebGPUBuffer implements IPlatformBuffer {
   /** @internal */
   _getUploadedData(): Uint8Array {
     return this._shadowData.subarray(0, this._lastUploadEnd);
+  }
+
+  /** @internal */
+  _validateIndirectDraw(indexed: boolean, offset: number): void {
+    if (!(this._bindingFlags & BufferBindFlag.IndirectBuffer)) {
+      throw new Error("Indirect draw requires a buffer created with BufferBindFlag.IndirectBuffer.");
+    }
+    if (!Number.isInteger(offset) || offset < 0 || (offset & 3) !== 0) {
+      throw new RangeError(`Indirect draw offset ${offset} must be a non-negative multiple of 4.`);
+    }
+    const argumentByteLength = indexed ? 20 : 16;
+    if (offset + argumentByteLength > this._byteLength) {
+      throw new RangeError(
+        `Indirect draw arguments [${offset}, ${offset + argumentByteLength}) exceed ${this._byteLength} bytes.`
+      );
+    }
   }
 
   private static _getUsage(type: BufferBindFlag): GPUBufferUsageFlags {

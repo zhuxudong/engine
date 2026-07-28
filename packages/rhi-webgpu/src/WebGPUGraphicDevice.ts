@@ -353,6 +353,27 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     primitive.draw(platformProgram, subPrimitive);
   }
 
+  /**
+   * Encodes an indirect draw using the primitive's current pipeline and bindings.
+   * @param primitive Primitive supplying vertex and optional index buffers.
+   * @param subPrimitive Sub-primitive supplying topology for pipeline selection.
+   * @param shaderProgram Shader program supplying pipeline and bind groups.
+   * @param indirectBuffer Platform buffer containing WebGPU draw arguments.
+   * @param indirectOffset Byte offset of the argument record.
+   */
+  drawPrimitiveIndirect(
+    primitive: WebGPUPrimitive,
+    subPrimitive: SubMesh,
+    shaderProgram: IPlatformShaderProgram,
+    indirectBuffer: IPlatformBuffer,
+    indirectOffset: number = 0
+  ): void {
+    const platformProgram =
+      (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
+      shaderProgram;
+    primitive.draw(platformProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset);
+  }
+
   getMainFrameBufferWidth(): number {
     return this._canvas.width;
   }

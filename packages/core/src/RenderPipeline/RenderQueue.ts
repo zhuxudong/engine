@@ -219,7 +219,18 @@ export class RenderQueue {
           }
           primitive.instanceCount = 0;
         } else {
-          rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
+          const indirectBuffer = curElement.indirectBuffer;
+          if (indirectBuffer) {
+            rhi.drawPrimitiveIndirect(
+              curElement.primitive,
+              curElement.subPrimitive,
+              program,
+              indirectBuffer._platformBuffer,
+              curElement.indirectOffset
+            );
+          } else {
+            rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
+          }
         }
       }
     }

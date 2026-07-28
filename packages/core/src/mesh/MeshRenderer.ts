@@ -5,6 +5,7 @@ import { RenderElement } from "../RenderPipeline/RenderElement";
 import { Renderer, RendererUpdateFlags } from "../Renderer";
 import { Logger } from "../base/Logger";
 import { ignoreClone } from "../clone/CloneManager";
+import { Buffer, BufferBindFlag } from "../graphic";
 import { Mesh, MeshModifyFlags } from "../graphic/Mesh";
 import { ShaderMacro } from "../shader/ShaderMacro";
 
@@ -21,6 +22,9 @@ export class MeshRenderer extends Renderer {
   private static _tangentMacro = ShaderMacro.getByName("RENDERER_HAS_TANGENT");
 
   private _enableVertexColor: boolean = false;
+
+  @ignoreClone
+  private _indirectDrawBindings: Array<MeshRendererIndirectDrawBinding | undefined> = [];
 
   /** @internal */
   @ignoreClone
@@ -53,6 +57,35 @@ export class MeshRenderer extends Renderer {
     }
   }
 
+  /** @internal */
+  _setIndirectDrawBuffer(subMeshIndex: number, buffer: Buffer | null, offset: number = 0): void {
+    if (!Number.isInteger(subMeshIndex) || subMeshIndex < 0) {
+      throw new RangeError(`Indirect draw sub-mesh index ${subMeshIndex} must be a non-negative integer.`);
+    }
+    if (!Number.isInteger(offset) || offset < 0 || (offset & 3) !== 0) {
+      throw new RangeError(`Indirect draw offset ${offset} must be a non-negative multiple of 4.`);
+    }
+    if (buffer) {
+      if (buffer.engine !== this.engine) {
+        throw new Error("Indirect draw buffer must belong to the renderer's engine.");
+      }
+      if (!(buffer.type & BufferBindFlag.IndirectBuffer)) {
+        throw new Error("Indirect draw buffer must include BufferBindFlag.IndirectBuffer.");
+      }
+    }
+
+    const bindings = this._indirectDrawBindings;
+    const previous = bindings[subMeshIndex];
+    if (previous?.buffer === buffer && previous.offset === offset) return;
+    if (previous && !previous.buffer.destroyed) this._addResourceReferCount(previous.buffer, -1);
+    if (buffer) {
+      this._addResourceReferCount(buffer, 1);
+      bindings[subMeshIndex] = { buffer, offset };
+    } else {
+      bindings[subMeshIndex] = undefined;
+    }
+  }
+
   /**
    * @internal
    */
@@ -65,6 +98,10 @@ export class MeshRenderer extends Renderer {
    * @internal
    */
   protected override _onDestroy(): void {
+    for (const binding of this._indirectDrawBindings) {
+      if (binding && !binding.buffer.destroyed) this._addResourceReferCount(binding.buffer, -1);
+    }
+    this._indirectDrawBindings.length = 0;
     const mesh = this._mesh;
     if (mesh) {
       mesh.destroyed || this._addResourceReferCount(mesh, -1);
@@ -167,6 +204,11 @@ export class MeshRenderer extends Renderer {
 
       const renderElement = renderElementPool.get();
       renderElement.set(this, material, mesh._primitive, subMeshes[i]);
+      const indirectBinding = this._indirectDrawBindings[i];
+      if (indirectBinding) {
+        renderElement.indirectBuffer = indirectBinding.buffer;
+        renderElement.indirectOffset = indirectBinding.offset;
+      }
       renderElement.priority = priority;
       renderElement.distanceForSort = distanceForSort;
       renderPipeline.pushRenderElement(context, renderElement);
@@ -221,6 +263,11 @@ export class MeshRenderer extends Renderer {
     type & MeshModifyFlags.Bounds && (this._dirtyUpdateFlag |= RendererUpdateFlags.WorldVolume);
     type & MeshModifyFlags.VertexElements && (this._dirtyUpdateFlag |= MeshRendererUpdateFlags.VertexElementMacro);
   }
+}
+
+interface MeshRendererIndirectDrawBinding {
+  readonly buffer: Buffer;
+  readonly offset: number;
 }
 
 /**

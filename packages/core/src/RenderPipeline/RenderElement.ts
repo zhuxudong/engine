@@ -1,5 +1,5 @@
 import { Renderer } from "../Renderer";
-import { Primitive, SubMesh } from "../graphic";
+import { Buffer, Primitive, SubMesh } from "../graphic";
 import { Material } from "../material";
 import { ShaderData, SubShader } from "../shader";
 import { Texture2D } from "../texture";
@@ -15,6 +15,8 @@ export class RenderElement implements IPoolElement {
   subPrimitive: SubMesh;
   subShader: SubShader;
   shaderData?: ShaderData;
+  indirectBuffer: Buffer | null = null;
+  indirectOffset: number = 0;
   instancedRenderers: Renderer[] = [];
   subDistancePriority: number = 0;
   /** @internal Marks a batch leader — a self-contained draw range that must not be merged again downstream */
@@ -39,6 +41,8 @@ export class RenderElement implements IPoolElement {
     this.texture = texture;
     this.subChunk = subChunk;
     this.instancedRenderers.length = 0;
+    this.indirectBuffer = null;
+    this.indirectOffset = 0;
     this.subDistancePriority = 0;
     this._isBatched = false;
   }
@@ -55,6 +59,8 @@ export class RenderElement implements IPoolElement {
     this.distanceForSort = source.distanceForSort;
     this.subShader = source.subShader;
     this.shaderData = source.shaderData;
+    this.indirectBuffer = source.indirectBuffer;
+    this.indirectOffset = source.indirectOffset;
     this.subDistancePriority = source.subDistancePriority;
   }
 
@@ -65,6 +71,8 @@ export class RenderElement implements IPoolElement {
     this.subPrimitive = null;
     this.subShader = null;
     this.shaderData && (this.shaderData = null);
+    this.indirectBuffer = null;
+    this.indirectOffset = 0;
     this.instancedRenderers = null;
 
     this.texture && (this.texture = null);

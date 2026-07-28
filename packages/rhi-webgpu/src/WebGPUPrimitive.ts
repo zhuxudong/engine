@@ -19,8 +19,13 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     this.primitive = primitive;
   }
 
-  draw(shaderProgram: IPlatformShaderProgram, subPrimitive: SubPrimitive): void {
-    (shaderProgram as WebGPUShaderProgram).draw(this, subPrimitive);
+  draw(
+    shaderProgram: IPlatformShaderProgram,
+    subPrimitive: SubPrimitive,
+    indirectBuffer?: WebGPUBuffer,
+    indirectOffset: number = 0
+  ): void {
+    (shaderProgram as WebGPUShaderProgram).draw(this, subPrimitive, indirectBuffer, indirectOffset);
   }
 
   destroy(): void {}
@@ -118,7 +123,13 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   /** @internal */
-  _encodeDraw(pass: GPURenderPassEncoder, subPrimitive: SubPrimitive, defaultBufferSlot?: number): void {
+  _encodeDraw(
+    pass: GPURenderPassEncoder,
+    subPrimitive: SubPrimitive,
+    defaultBufferSlot?: number,
+    indirectBuffer?: WebGPUBuffer,
+    indirectOffset: number = 0
+  ): void {
     const primitive = this.primitive;
     for (let index = 0; index < primitive.vertexBufferBindings.length; index++) {
       const binding = primitive.vertexBufferBindings[index];
@@ -135,7 +146,15 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     if (indexBinding) {
       const format = this._indexFormat();
       pass.setIndexBuffer((indexBinding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer, format);
-      pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
+      if (indirectBuffer) {
+        indirectBuffer._validateIndirectDraw(true, indirectOffset);
+        pass.drawIndexedIndirect(indirectBuffer._gpuBuffer, indirectOffset);
+      } else {
+        pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
+      }
+    } else if (indirectBuffer) {
+      indirectBuffer._validateIndirectDraw(false, indirectOffset);
+      pass.drawIndirect(indirectBuffer._gpuBuffer, indirectOffset);
     } else {
       pass.draw(subPrimitive.count, instanceCount, subPrimitive.start, 0);
     }
