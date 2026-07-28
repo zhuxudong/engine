@@ -35,6 +35,12 @@ interface SurfaceStaticRangeState extends SurfaceStaticBatcherRange {
   visibleCount: number;
 }
 
+interface InternalIndirectDrawRenderer extends MeshRenderer {
+  _setIndirectDrawBuffer(subMeshIndex: number, buffer: Buffer | null, offset?: number): void;
+}
+
+const INDIRECT_ARGUMENT_WORD_STRIDE = 5;
+
 /**
  * Compacts visible single-LOD cell ranges into one instance stream per prototype.
  *
@@ -50,6 +56,8 @@ export class SurfaceStaticBatcher {
 
   private readonly _instanceBuffer: Buffer;
   private readonly _instanceOutput: Float32Array;
+  private readonly _indirectBuffer: Buffer;
+  private readonly _indirectArguments: Uint32Array;
   private readonly _ranges: ReadonlyMap<number, SurfaceStaticRangeState>;
   private readonly _renderers: readonly MeshRenderer[];
   private _dirty = true;
@@ -58,6 +66,8 @@ export class SurfaceStaticBatcher {
   private constructor(
     instanceBuffer: Buffer,
     instanceOutput: Float32Array,
+    indirectBuffer: Buffer,
+    indirectArguments: Uint32Array,
     ranges: ReadonlyMap<number, SurfaceStaticRangeState>,
     renderers: readonly MeshRenderer[],
     category: SurfaceCategory,
@@ -66,6 +76,8 @@ export class SurfaceStaticBatcher {
   ) {
     this._instanceBuffer = instanceBuffer;
     this._instanceOutput = instanceOutput;
+    this._indirectBuffer = indirectBuffer;
+    this._indirectArguments = indirectArguments;
     this._ranges = ranges;
     this._renderers = renderers;
     this.category = category;
@@ -108,52 +120,84 @@ export class SurfaceStaticBatcher {
       states.set(item.range.offset, { ...item, visibleCount: 0 });
     }
 
+    const lod = prototype.lods[0];
+    const renderSources = lod.renderers.flatMap((rendererSpec, rendererIndex) => {
+      const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
+      return findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName).map((sourceMesh, primitiveIndex) => ({
+        rendererSpec,
+        rendererIndex,
+        sourceMesh,
+        primitiveIndex
+      }));
+    });
+    const indirectArguments = new Uint32Array(
+      renderSources.reduce((count, source) => count + source.sourceMesh.subMeshes.length, 0) *
+        INDIRECT_ARGUMENT_WORD_STRIDE
+    );
+    let indirectWordOffset = 0;
+    for (const source of renderSources) {
+      for (const subMesh of source.sourceMesh.subMeshes) {
+        indirectArguments[indirectWordOffset] = subMesh.count;
+        indirectArguments[indirectWordOffset + 2] = subMesh.start;
+        indirectWordOffset += INDIRECT_ARGUMENT_WORD_STRIDE;
+      }
+    }
+    const indirectBuffer = new Buffer(
+      engine,
+      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
+      indirectArguments,
+      BufferUsage.Dynamic
+    );
+
     const renderers: MeshRenderer[] = [];
     let prototypeRadius = 0;
     let lodHeight = 0;
-    const lod = prototype.lods[0];
-    for (let rendererIndex = 0; rendererIndex < lod.renderers.length; rendererIndex++) {
-      const rendererSpec = lod.renderers[rendererIndex];
-      const modelUrl = new URL(rendererSpec.model, manifestUrl).href;
-      const sourceMeshes = findSurfaceModelMeshes(models.get(modelUrl)!, rendererSpec.meshName);
-      for (let primitiveIndex = 0; primitiveIndex < sourceMeshes.length; primitiveIndex++) {
-        const sourceMesh = sourceMeshes[primitiveIndex];
-        const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
-        lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
-        prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
-        const bounds = mergedRangeBounds(ranges, prototypeBounds);
-        const entity = root.createChild(
-          `${prototype.id}-compacted-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
+    let indirectRecordIndex = 0;
+    for (const source of renderSources) {
+      const { rendererSpec, rendererIndex, sourceMesh, primitiveIndex } = source;
+      const prototypeBounds = transformSurfaceBounds(sourceMesh.bounds, rendererSpec);
+      lodHeight = Math.max(lodHeight, prototypeBounds.max.y - prototypeBounds.min.y);
+      prototypeRadius = Math.max(prototypeRadius, boundsRadius(prototypeBounds));
+      const bounds = mergedRangeBounds(ranges, prototypeBounds);
+      const entity = root.createChild(
+        `${prototype.id}-compacted-lod${lod.index}-renderer${rendererIndex}-primitive${primitiveIndex}`
+      );
+      const renderer = entity.addComponent(MeshRenderer) as InternalIndirectDrawRenderer;
+      renderer.mesh = createSurfaceInstancedMesh(engine, sourceMesh, instanceBuffer, bounds, 0);
+      renderer.castShadows = rendererSpec.castShadows;
+      renderer.receiveShadows = rendererSpec.receiveShadows;
+      renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
+      SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
+      SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
+      SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
+      SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
+      SurfaceMaterial.setRendererDebugInfo(prototype.category, [0, 0], renderer.shaderData);
+      SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
+      SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
+      SurfaceMaterial.setRendererWorldCellSize(0, renderer.shaderData);
+      SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
+      const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
+      const material = materials.get(materialId);
+      if (!material)
+        throw new Error(`[SurfaceStaticBatcher] ${prototype.id} references unknown material ${materialId}`);
+      for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
+        renderer.setMaterial(subMeshIndex, material);
+        renderer._setIndirectDrawBuffer(
+          subMeshIndex,
+          indirectBuffer,
+          indirectRecordIndex * INDIRECT_ARGUMENT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
         );
-        const renderer = entity.addComponent(MeshRenderer);
-        renderer.mesh = createSurfaceInstancedMesh(engine, sourceMesh, instanceBuffer, bounds, 0);
-        renderer.castShadows = rendererSpec.castShadows;
-        renderer.receiveShadows = rendererSpec.receiveShadows;
-        renderer.enableVertexColor = sourceMesh.vertexElements.some((element) => element.attribute === "COLOR_0");
-        SurfaceMaterial.setRendererVertexColor(renderer.enableVertexColor, renderer.shaderData);
-        SurfaceMaterial.setRendererInstanced(true, renderer.shaderData);
-        SurfaceMaterial.setRendererBillboard(prototype.impostor, renderer.shaderData);
-        SurfaceMaterial.setRendererTransform(rendererSpec, renderer.shaderData);
-        SurfaceMaterial.setRendererDebugInfo(prototype.category, [0, 0], renderer.shaderData);
-        SurfaceMaterial.setRendererLodFade(false, 1, renderer.shaderData);
-        SurfaceMaterial.setRendererWorldNoise(false, renderer.shaderData);
-        SurfaceMaterial.setRendererWorldCellSize(0, renderer.shaderData);
-        SurfaceMaterial.setRendererTuning([1, 1, 1], 1, renderer.shaderData);
-        const materialId = rendererSpec.materials[Math.min(primitiveIndex, rendererSpec.materials.length - 1)];
-        const material = materials.get(materialId);
-        if (!material)
-          throw new Error(`[SurfaceStaticBatcher] ${prototype.id} references unknown material ${materialId}`);
-        for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
-          renderer.setMaterial(subMeshIndex, material);
-        }
-        entity.isActive = false;
-        renderers.push(renderer);
+        indirectRecordIndex++;
       }
+      entity.isActive = false;
+      renderers.push(renderer);
     }
 
     return new SurfaceStaticBatcher(
       instanceBuffer,
       new Float32Array(capacity * 16),
+      indirectBuffer,
+      indirectArguments,
       states,
       renderers,
       prototype.category,
@@ -206,6 +250,11 @@ export class SurfaceStaticBatcher {
     if (instanceOffset > 0) {
       this._instanceBuffer.setData(this._instanceOutput, 0, 0, instanceOffset);
     }
+    const indirectArguments = this._indirectArguments;
+    for (let offset = 1; offset < indirectArguments.length; offset += INDIRECT_ARGUMENT_WORD_STRIDE) {
+      indirectArguments[offset] = this._instanceCount;
+    }
+    this._indirectBuffer.setData(indirectArguments);
     for (const renderer of this._renderers) {
       renderer.entity.isActive = this._instanceCount > 0;
       (renderer.mesh as BufferMesh).instanceCount = this._instanceCount;

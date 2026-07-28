@@ -244,6 +244,8 @@ export interface SurfaceRuntimeSnapshot {
   readonly rendererBatches: number;
   /** Renderer batches active after distance and LOD selection. */
   readonly visibleRendererBatches: number;
+  /** Active finite-region renderer batches submitted through indirect draw records. */
+  readonly indirectRendererBatches: number;
   readonly visibleRanges: number;
   readonly visibleInstances: number;
   /** Visible finite-region instances grouped by category after runtime density filtering. */

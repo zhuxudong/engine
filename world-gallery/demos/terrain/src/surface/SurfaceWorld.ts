@@ -552,6 +552,10 @@ export class SurfaceWorld {
       rendererBatches: coverage.rendererBatches + world.rendererBatches + finiteRendererBatches,
       visibleRendererBatches:
         coverage.activeRendererBatches + world.activeRendererBatches + visibleFiniteRendererBatches,
+      indirectRendererBatches: this._staticBatchers.reduce(
+        (count, batcher) => count + batcher.activeRendererBatchCount,
+        0
+      ),
       visibleRanges: visible.length,
       visibleInstances,
       visibleCategoryCounts,
