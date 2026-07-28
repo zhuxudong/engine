@@ -28,7 +28,7 @@ export default defineConfig({
   webServer: configuredUrl
     ? undefined
     : {
-        command: `pnpm run predev && pnpm exec vite serve . --config vite.config.js --host ${baseUrl.hostname} --port ${port}`,
+        command: `pnpm exec vite serve . --config vite.config.js --host ${baseUrl.hostname} --port ${port}`,
         cwd: galleryRoot,
         url: baseUrl.origin,
         reuseExistingServer: !process.env.CI,

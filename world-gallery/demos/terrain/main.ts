@@ -57,15 +57,12 @@ export {
   type TerrainDebugApi,
   type TerrainDebugLayerSnapshot,
   type TerrainDebugLayerTuningSnapshot,
-  type TerrainLightingSnapshot,
   type TerrainDebugTuningSnapshot,
   type TerrainDebugViewGroup,
   type TerrainDebugViewInfo,
   type TerrainDebugViewName,
   type TerrainMaterialTuningSnapshot,
   type TerrainProbeSnapshot,
-  type TerrainShaderRegistrationMode,
-  type TerrainShaderStartupSnapshot,
   type TerrainWorldNoiseTuning,
   type TerrainWaterDebugSnapshot
 } from "./src/debug/TerrainDebugContract";
@@ -87,14 +84,6 @@ const STATIC_CAMERA_POSES = {
     position: [512, 90, -430],
     target: [512, 0, -650]
   },
-  surface: {
-    position: [590, 85, -690],
-    target: [660, 45, -600]
-  },
-  "first-person": {
-    position: [590, 25, -690],
-    target: [660, 25, -600]
-  },
   top: {
     position: [512, 3500, -448],
     target: [512, 0, -512]
@@ -111,7 +100,7 @@ const STATIC_CAMERA_POSES = {
     position: [2450, 145, -1480],
     target: [2300, 100, -1650]
   }
-};
+} as const;
 
 const CAMERA_POSES = {
   "first-person": true,
@@ -129,9 +118,6 @@ const FIRST_PERSON_POSE: TerrainFirstPersonPose = {
 type StaticCameraPoseName = keyof typeof STATIC_CAMERA_POSES;
 
 const status = document.querySelector<HTMLDivElement>("#status");
-const backendSelector = document.querySelector<HTMLSelectElement>("#backend");
-
-type TerrainBackend = "webgl2" | "webgpu";
 
 void boot().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
@@ -207,9 +193,7 @@ async function boot(): Promise<void> {
     root.createChild("geometry-clipmap"),
     camera,
     terrainData,
-    detailedMaterial,
-    simplifiedMaterial,
-    manifest.material.sampling.normalMapMaxLod,
+    material,
     manifest.clipmap.meshSize,
     manifest.clipmap.meshLods
   );
@@ -320,18 +304,17 @@ async function boot(): Promise<void> {
       clipmap.snap(cameraEntity.transform.worldPosition);
     },
     setDebugLayer(layer) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setDebugLayer(layer);
+      material.setDebugLayer(layer);
     },
     getTuning() {
       return cloneTerrainDebugTuning(tuning);
     },
     setLayerTuning(layer, values) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layer, values);
+      material.setLayerTuning(layer, values);
       Object.assign(tuning.layers[layer], values);
     },
     setSamplingTuning(values) {
-      for (const terrainMaterial of terrainMaterials) terrainMaterial.setSamplingTuning(values);
-      if (values.normalMapMaxLod !== undefined) clipmap.setMaterialDetailLod(values.normalMapMaxLod);
+      material.setSamplingTuning(values);
       Object.assign(tuning.sampling, values);
     },
     setMaterialTuning(values) {
@@ -349,9 +332,6 @@ async function boot(): Promise<void> {
       surfaceWorld.setWorldNoiseTuning(values);
       groundSampler.setWorldNoiseTuning(values);
       replaceTerrainWorldNoiseTuning(tuning.world.noise, values);
-    },
-    getShaderStartup() {
-      return { ...terrainShaderStartup, platforms: [...terrainShaderStartup.platforms] };
     },
     getWaterDebug() {
       return { ...waterDebugState };
@@ -420,7 +400,7 @@ async function boot(): Promise<void> {
       const defaults = createTerrainDebugTuning(manifest);
       for (const layer of defaults.layers) {
         const { layer: layerId, ...values } = layer;
-        for (const terrainMaterial of terrainMaterials) terrainMaterial.setLayerTuning(layerId, values);
+        material.setLayerTuning(layerId, values);
       }
       material.setSamplingTuning(defaults.sampling);
       material.setMaterialTuning(defaults.material);
@@ -500,8 +480,7 @@ function applyCameraPose(cameraEntity: Entity, orbit: OrbitControl, poseName: St
   cameraEntity.transform.setPosition(pose.position[0], pose.position[1], pose.position[2]);
   const target = new Vector3(pose.target[0], pose.target[1], pose.target[2]);
   cameraEntity.transform.lookAt(target);
-  const orbit = cameraEntity.getComponent(OrbitControl);
-  if (orbit) orbit.target.copyFrom(target);
+  orbit.target.copyFrom(target);
 }
 
 function terrainWaterBounds(terrain: {

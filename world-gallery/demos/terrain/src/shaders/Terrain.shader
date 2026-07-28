@@ -12,16 +12,8 @@ Shader "Terrain" {
 
       struct Varyings {
         vec3 worldPosition;
-        vec4 positionCS;
         vec2 terrainCoord;
         float cameraDistance;
-        #ifdef TERRAIN_DIRECT_LIGHTING
-          float shadowAttenuation;
-          vec3 directIrradiance;
-        #endif
-        #ifdef TERRAIN_INDIRECT_LIGHTING
-          vec3 bakedIrradiance;
-        #endif
         #ifdef TERRAIN_DEBUG
           float geomorphFactor;
         #endif
@@ -44,6 +36,7 @@ Shader "Terrain" {
       #include "ShaderLibrary/Lighting/Light.glsl"
       #include "Terrain/GrasslandsCloudShadow.glsl"
       #ifdef TERRAIN_DEBUG
+        float renderer_Lod;
         float renderer_DebugWire;
       #endif
 
@@ -89,7 +82,6 @@ Shader "Terrain" {
 
       int material_DualTexture;
       float material_DualReduction;
-      float material_TriReduction;
       float material_DualNear;
       float material_DualFar;
 
@@ -159,14 +151,6 @@ Shader "Terrain" {
       }
 
       #include "Terrain/TerrainWorldNoise.glsl"
-
-      float worldBackgroundMaterialScale(vec2 terrainGrid) {
-        float missingRegion = worldNoiseRegionBlend(
-          terrainGrid * regionTexelSize() + vec2(0.5 * regionTexelSize())
-        );
-        float fade = smoothstep(1.0 - material_WorldNoiseRegionBlend, 1.0, missingRegion);
-        return mix(1.0, material_TriReduction, fade);
-      }
 
       // xy: local texel, z: texture-array layer, w: flattened region-map position.
       ivec4 getIndexCoord(vec2 terrainGrid, int searchDepth) {
@@ -425,15 +409,11 @@ Shader "Terrain" {
           layerDerivatives
         );
         albedo = textureGrad(material_LayerAlbedoArray, vec3(layerUv, float(layer)), layerDerivatives.xy, layerDerivatives.zw);
+        normal = textureGrad(material_LayerNormalArray, vec3(layerUv, float(layer)), layerDerivatives.xy, layerDerivatives.zw);
         albedo.rgb *= material_LayerColors[layer];
-        #ifdef TERRAIN_MATERIAL_DETAIL
-          normal = textureGrad(material_LayerNormalArray, vec3(layerUv, float(layer)), layerDerivatives.xy, layerDerivatives.zw);
-          normal.a = clamp(normal.a + material_LayerRoughnessMods[layer], 0.0, 1.0);
-          normal.xyz = normal.xzy * 2.0 - 1.0;
-          normal.xz = rotateVector(normal.xz, layerCosineSine) * projectionAlignment;
-        #else
-          normal = vec4(0.0, 1.0, 0.0, clamp(0.5 + material_LayerRoughnessMods[layer], 0.0, 1.0));
-        #endif
+        normal.a = clamp(normal.a + material_LayerRoughnessMods[layer], 0.0, 1.0);
+        normal.xyz = normal.xzy * 2.0 - 1.0;
+        normal.xz = rotateVector(normal.xz, layerCosineSine) * projectionAlignment;
       }
 
       void sampleLayer(
@@ -529,7 +509,6 @@ Shader "Terrain" {
         vec3 terrainNormal,
         float height,
         vec3 worldPosition,
-        int terrainLayer,
         inout TerrainSurface surface
       ) {
         vec2 samplePosition;
@@ -551,16 +530,6 @@ Shader "Terrain" {
           controlCosineSine,
           projectionAlignment
         );
-
-        #ifdef TERRAIN_DUAL_SCALING
-          if (terrainLayer < 0) {
-            // Keep the world scale at the authored boundary so texture phase cannot jump there.
-            float backgroundScale = worldBackgroundMaterialScale(sampleGrid);
-            samplePosition *= backgroundScale;
-            sampleUv *= backgroundScale;
-            derivatives *= backgroundScale;
-          }
-        #endif
 
         vec3 tangent = normalize(baseDdx);
         vec3 bitangent = -normalize(baseDdy);
@@ -896,23 +865,6 @@ Shader "Terrain" {
         }
         if (material_DebugView == 6) return vec4(vec3(float((raw3 >> 10u) & 0xfu) / 15.0), 1.0);
         if (material_DebugView == 7) return vec4(vec3(decodeScale(raw3)), 1.0);
-        if (material_DebugView == 32) {
-          float factor = 0.0;
-          #ifdef TERRAIN_DUAL_SCALING
-            float scale = index3.z < 0 ? worldBackgroundMaterialScale(indexPosition) : 1.0;
-            factor = (1.0 - scale) / max(1.0 - material_TriReduction, 0.0001);
-          #endif
-          return vec4(factor, 0.05, 1.0 - factor, 1.0);
-        }
-        if (material_DebugView == 31) {
-          uint features = (raw3 >> 3u) & 0xfu;
-          vec3 featureColor = vec3(0.04);
-          if ((features & 0x1u) != 0u) featureColor += vec3(0.08, 0.78, 0.18);
-          if ((features & 0x2u) != 0u) featureColor += vec3(0.08, 0.18, 0.78);
-          if ((features & 0x4u) != 0u) featureColor += vec3(0.78, 0.08, 0.12);
-          if ((features & 0x8u) != 0u) featureColor += vec3(0.72);
-          return vec4(min(featureColor, vec3(1.0)), 1.0);
-        }
         if (material_DebugView == 18) {
           float baseOver = length(fract(varyings.terrainCoord) - 0.5) < decodeBlend(raw3) * 0.45 + 0.1 ? 1.0 : 0.0;
           return vec4(mix(textureIdColor(decodeBase(raw3)), textureIdColor(decodeOverlay(raw3)), baseOver), 1.0);
@@ -961,14 +913,6 @@ Shader "Terrain" {
             controlCosineSine,
             projectionAlignment
           );
-          #ifdef TERRAIN_DUAL_SCALING
-            if (index3.z < 0) {
-              float backgroundScale = worldBackgroundMaterialScale(indexPosition);
-              samplePosition *= backgroundScale;
-              sampleUv *= backgroundScale;
-              derivatives *= backgroundScale;
-            }
-          #endif
           float layerScale = material_LayerUvScales[material_DebugLayer];
           vec2 detileCell;
           vec2 detiledUv;
@@ -1064,7 +1008,6 @@ Shader "Terrain" {
           normal3,
           h3,
           varyings.worldPosition,
-          index3.z,
           surface
         );
         if (bilerp) {
@@ -1079,7 +1022,6 @@ Shader "Terrain" {
             normal2,
             h2,
             varyings.worldPosition,
-            index2.z,
             surface
           );
           accumulateMaterial(
@@ -1093,7 +1035,6 @@ Shader "Terrain" {
             normal1,
             h1,
             varyings.worldPosition,
-            index1.z,
             surface
           );
           accumulateMaterial(
@@ -1107,7 +1048,6 @@ Shader "Terrain" {
             normal0,
             h0,
             varyings.worldPosition,
-            index0.z,
             surface
           );
         }

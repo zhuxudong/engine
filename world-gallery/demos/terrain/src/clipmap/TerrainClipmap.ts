@@ -27,9 +27,7 @@ type Offset = readonly [x: number, z: number];
 
 interface Segment {
   readonly entity: Entity;
-  readonly renderer: TerrainRenderer;
   readonly wireEntity: Entity;
-  readonly wireRenderer: TerrainRenderer;
   readonly lod: number;
   readonly group: number;
   readonly instance: number;
@@ -51,9 +49,6 @@ export class TerrainClipmap {
   private readonly _segments: Segment[] = [];
   private readonly _vertexSpacing: number;
   private readonly _offsets: ClipmapOffsets;
-  private readonly _detailedMaterial: TerrainMaterial;
-  private readonly _simplifiedMaterial: TerrainMaterial;
-  private _materialDetailLod: number;
   private _lastSignature = "";
 
   /**
@@ -62,9 +57,7 @@ export class TerrainClipmap {
    * @param root Identity-transform entity receiving the clipmap segments.
    * @param camera Camera whose world XZ position controls snapping.
    * @param data Terrain region dimensions and height bounds.
-   * @param detailedMaterial Terrain material compiled with normal-map and detailed direct-light sampling.
-   * @param simplifiedMaterial Terrain material compiled without far-ring normal-map sampling.
-   * @param materialDetailLod Highest clipmap LOD that uses the detailed material.
+   * @param material Shared terrain material.
    * @param meshSize terrain mesh size in quads.
    * @param meshLods Number of simultaneously active clipmap rings.
    */
@@ -73,23 +66,18 @@ export class TerrainClipmap {
     root: Entity,
     camera: Camera,
     data: TerrainData,
-    detailedMaterial: TerrainMaterial,
-    simplifiedMaterial: TerrainMaterial,
-    materialDetailLod: number,
+    material: TerrainMaterial,
     meshSize: number,
     meshLods: number
   ) {
     this._vertexSpacing = data.vertexSpacing;
     this._offsets = createOffsets(meshSize);
-    this._detailedMaterial = detailedMaterial;
-    this._simplifiedMaterial = simplifiedMaterial;
-    this._materialDetailLod = this._validateMaterialDetailLod(materialDetailLod, meshLods);
 
     const meshes = createMeshTypes(engine, meshSize, data.minHeight, data.maxHeight);
     for (let lod = 0; lod < meshLods; lod++) {
       this._createGroup(
         root,
-        this._materialForLod(lod),
+        material,
         lod,
         TILE,
         lod === 0 ? meshes.standardTile : meshes.tile,
@@ -98,7 +86,7 @@ export class TerrainClipmap {
       );
       this._createGroup(
         root,
-        this._materialForLod(lod),
+        material,
         lod,
         EDGE_A,
         lod === 0 ? meshes.standardEdgeA : meshes.edgeA,
@@ -107,7 +95,7 @@ export class TerrainClipmap {
       );
       this._createGroup(
         root,
-        this._materialForLod(lod),
+        material,
         lod,
         EDGE_B,
         lod === 0 ? meshes.standardEdgeB : meshes.edgeB,
@@ -116,7 +104,7 @@ export class TerrainClipmap {
       );
       this._createGroup(
         root,
-        this._materialForLod(lod),
+        material,
         lod,
         FILL_A,
         lod === 0 ? meshes.standardTrimA : meshes.fillA,
@@ -125,7 +113,7 @@ export class TerrainClipmap {
       );
       this._createGroup(
         root,
-        this._materialForLod(lod),
+        material,
         lod,
         FILL_B,
         lod === 0 ? meshes.standardTrimB : meshes.fillB,
@@ -204,21 +192,6 @@ export class TerrainClipmap {
     for (const segment of this._segments) segment.wireEntity.isActive = enabled;
   }
 
-  /**
-   * Reassigns clipmap rings between the two compiled terrain-material paths.
-   * @param lod Highest clipmap LOD that retains normal-map and detailed direct-light sampling.
-   */
-  setMaterialDetailLod(lod: number): void {
-    const nextLod = this._validateMaterialDetailLod(lod, this._lodCount());
-    if (nextLod === this._materialDetailLod) return;
-    this._materialDetailLod = nextLod;
-    for (const segment of this._segments) {
-      const material = this._materialForLod(segment.lod);
-      segment.renderer.setMaterial(material);
-      segment.wireRenderer.setMaterial(material);
-    }
-  }
-
   private _createGroup(
     root: Entity,
     material: TerrainMaterial,
@@ -247,7 +220,7 @@ export class TerrainClipmap {
       wireRenderer.setDebugWire(true);
       wireRenderer.priority = 1;
       wireEntity.isActive = false;
-      this._segments.push({ entity, renderer, wireEntity, wireRenderer, lod, group, instance });
+      this._segments.push({ entity, wireEntity, lod, group, instance });
     }
   }
 
@@ -266,17 +239,6 @@ export class TerrainClipmap {
 
   private _lodCount(): number {
     return this._segments[this._segments.length - 1].lod + 1;
-  }
-
-  private _materialForLod(lod: number): TerrainMaterial {
-    return lod <= this._materialDetailLod ? this._detailedMaterial : this._simplifiedMaterial;
-  }
-
-  private _validateMaterialDetailLod(lod: number, lodCount: number): number {
-    if (!Number.isInteger(lod) || lod < 0 || lod >= lodCount) {
-      throw new Error(`[TerrainClipmap] material detail LOD must be an integer in 0..${lodCount - 1}`);
-    }
-    return lod;
   }
 }
 

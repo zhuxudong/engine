@@ -17,7 +17,6 @@ import {
   type TerrainSamplingTuning,
   type TerrainWorldNoiseTuning
 } from "../TerrainMaterial";
-import type { SurfaceSystemSnapshot } from "../surface/SurfaceSystem";
 
 export type { TerrainWorldNoiseTuning } from "../TerrainMaterial";
 
@@ -55,9 +54,7 @@ export const TERRAIN_DEBUG_VIEWS = {
   "layer-source": TerrainDebugView.LayerSource,
   "layer-detiled": TerrainDebugView.LayerDetiled,
   "detile-rotation-axis": TerrainDebugView.DetileRotationAxis,
-  "dual-factor": TerrainDebugView.DualFactor,
-  "surface-features": TerrainDebugView.SurfaceFeatures,
-  "world-material-scale": TerrainDebugView.WorldMaterialScale
+  "dual-factor": TerrainDebugView.DualFactor
 } as const;
 
 /** Production shader debug-view name. */
@@ -81,21 +78,6 @@ export type TerrainCameraPoseName =
 
 /** terrain world background modes implemented by the Galacean core path. */
 export type TerrainBackgroundMode = "none" | "flat" | "noise";
-
-/** How the terrain ShaderLab source reached the engine. */
-export type TerrainShaderRegistrationMode = "precompiled" | "runtime";
-
-/** Observable timing and target data for terrain ShaderLab registration. */
-export interface TerrainShaderStartupSnapshot {
-  /** Whether the terrain uses the build artifact or the runtime compiler. */
-  readonly mode: TerrainShaderRegistrationMode;
-  /** Backend target encoded by the terrain artifact or runtime codegen. */
-  readonly platforms: readonly ("gles100" | "wgsl")[];
-  /** Time spent registering the selected shader artifact or runtime source, excluding raw-source module loading. */
-  readonly registrationMs: number;
-  /** Time spent fetching the raw source module in runtime comparison mode. */
-  readonly runtimeSourceLoadMs?: number;
-}
 
 /** Top-level inspector group for a terrain diagnostic. */
 export type TerrainDebugViewGroup = "surface" | "data" | "sampling" | "geometry";
@@ -248,7 +230,7 @@ export const TERRAIN_DEBUG_VIEW_INFO: Record<TerrainDebugViewName, TerrainDebugV
   "rough-map": {
     label: "Roughness map / 区域粗糙度图",
     group: "data",
-    description: "terrain _color_maps 的 alpha 灰阶；与 texture asset 的 roughness 合成为最终地形粗糙度。"
+    description: "terrain _color_maps 的 alpha 灰阶；PBR 路径将它混入最终 roughness。"
   },
   "detile-cell": {
     label: "Detile cell / 去重复单元",
@@ -324,8 +306,6 @@ export interface TerrainProbeSnapshot {
     readonly angleIndex: number;
     readonly scaleIndex: number;
     readonly scale: number;
-    /** Four Galacean surface-feature flags decoded from reserved control bits 3 through 6. */
-    readonly surfaceFeatures: number;
     readonly hole: boolean;
     readonly navigation: boolean;
     readonly autoshader: boolean;
@@ -545,8 +525,6 @@ export interface TerrainDebugApi {
   setWorldBackground(mode: TerrainBackgroundMode): void;
   /** Updates terrain world-noise settings. */
   setWorldNoiseTuning(tuning: TerrainWorldNoiseTuning): void;
-  /** Returns the terrain ShaderLab registration path and measured CPU work. */
-  getShaderStartup(): TerrainShaderStartupSnapshot;
   /** Returns independent water-pcg diagnostic state. */
   getWaterDebug(): TerrainWaterDebugSnapshot;
   /** Updates independent water-pcg diagnostic state. */
@@ -590,7 +568,5 @@ declare global {
   interface Window {
     /** Terrain diagnostics available after the demo reaches its ready state. */
     terrainDebug?: TerrainDebugApi;
-    /** Rendering backend selected before the engine and canvas context are created. */
-    terrainBackend?: "webgl2" | "webgpu";
   }
 }

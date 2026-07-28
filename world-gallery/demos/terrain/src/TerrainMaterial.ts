@@ -110,8 +110,6 @@ export interface TerrainDualScalingTuning {
   texture?: number;
   /** Reduced texture scale used after the near/far transition. */
   reduction?: number;
-  /** World-background material-coordinate scale applied with dual scaling. */
-  triScaleReduction?: number;
   /** Camera distance at which the far-scale blend starts. */
   near?: number;
   /** Camera distance at which the far-scale blend completes. */
@@ -221,7 +219,6 @@ export class TerrainMaterial extends BaseMaterial {
 
   private static readonly _dualTexture = ShaderProperty.getByName("material_DualTexture");
   private static readonly _dualReduction = ShaderProperty.getByName("material_DualReduction");
-  private static readonly _triReduction = ShaderProperty.getByName("material_TriReduction");
   private static readonly _dualNear = ShaderProperty.getByName("material_DualNear");
   private static readonly _dualFar = ShaderProperty.getByName("material_DualFar");
 
@@ -424,12 +421,10 @@ export class TerrainMaterial extends BaseMaterial {
     this.shaderData.setFloat(TerrainMaterial._mipmapBias, spec.sampling.mipmapBias);
     this.shaderData.setFloat(TerrainMaterial._biasDistance, spec.sampling.biasDistance);
     this.shaderData.setFloat(TerrainMaterial._depthBlur, spec.sampling.depthBlur);
-    this._setMacro(TerrainMaterial._linearControlBlendMacro, spec.sampling.linearControlBlend);
 
     const dual = spec.dualScaling;
     this.shaderData.setInt(TerrainMaterial._dualTexture, dual.texture);
     this.shaderData.setFloat(TerrainMaterial._dualReduction, dual.reduction);
-    this.shaderData.setFloat(TerrainMaterial._triReduction, dual.triScaleReduction);
     this.shaderData.setFloat(TerrainMaterial._dualNear, dual.near);
     this.shaderData.setFloat(TerrainMaterial._dualFar, dual.far);
     this._dualNearValue = dual.near;
@@ -588,12 +583,6 @@ export class TerrainMaterial extends BaseMaterial {
         this.shaderData.setFloat(
           TerrainMaterial._dualReduction,
           this._range("dualScaling.reduction", dual.reduction, 0.001, 1)
-        );
-      }
-      if (dual.triScaleReduction !== undefined) {
-        this.shaderData.setFloat(
-          TerrainMaterial._triReduction,
-          this._range("dualScaling.triScaleReduction", dual.triScaleReduction, 0.001, 1)
         );
       }
       const near = dual.near === undefined ? this._dualNearValue : this._range("dualScaling.near", dual.near, 0, 1000);

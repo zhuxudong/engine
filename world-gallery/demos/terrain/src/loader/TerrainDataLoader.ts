@@ -9,7 +9,7 @@ import {
   TextureWrapMode
 } from "@galacean/engine";
 import { TerrainData, TerrainRegionData } from "../data/TerrainData";
-import { TerrainManifest, type TerrainSurfaceFeatureAreaSpec } from "./ManifestLoader";
+import { TerrainManifest } from "./ManifestLoader";
 
 /**
  * Loads terrain regions into parallel height, control, and color/roughness texture arrays plus a region map.
@@ -56,7 +56,6 @@ export async function loadTerrainData(
       );
     }
   }
-  applySurfaceFeatures(controls, manifest);
 
   const heightMaps = new Texture2DArray(
     engine,
@@ -187,42 +186,4 @@ async function loadBuffer(engine: Engine, url: string): Promise<ArrayBuffer> {
     throw new Error(`[TerrainData] ${url} did not resolve to BufferAsset`);
   }
   return asset.buffer;
-}
-
-function applySurfaceFeatures(controls: readonly Uint32Array[], manifest: TerrainManifest): void {
-  const features = manifest.terrain.surfaceFeatures;
-  if (!features?.length) return;
-
-  const { regionSize, vertexSpacing, regions } = manifest.terrain;
-  for (const [regionIndex, region] of regions.entries()) {
-    const [regionX, regionZ] = region.location;
-    const originX = regionX * regionSize * vertexSpacing;
-    const originZ = regionZ * regionSize * vertexSpacing;
-    for (const feature of features) {
-      applySurfaceFeatureToRegion(controls[regionIndex], feature, regionSize, vertexSpacing, originX, originZ);
-    }
-  }
-}
-
-function applySurfaceFeatureToRegion(
-  control: Uint32Array,
-  feature: TerrainSurfaceFeatureAreaSpec,
-  regionSize: number,
-  spacing: number,
-  originX: number,
-  originZ: number
-): void {
-  const minColumn = Math.max(0, Math.ceil((feature.minX - originX) / spacing));
-  const maxColumn = Math.min(regionSize - 1, Math.floor((feature.maxX - originX) / spacing));
-  const minRow = Math.max(0, Math.ceil((feature.minZ - originZ) / spacing));
-  const maxRow = Math.min(regionSize - 1, Math.floor((feature.maxZ - originZ) / spacing));
-  if (minColumn > maxColumn || minRow > maxRow) return;
-
-  const featureMask = 1 << feature.bit;
-  for (let row = minRow; row <= maxRow; row++) {
-    const rowOffset = row * regionSize;
-    for (let column = minColumn; column <= maxColumn; column++) {
-      control[rowOffset + column] |= featureMask;
-    }
-  }
 }

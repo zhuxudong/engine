@@ -25,13 +25,6 @@ interface GeneratedShaderSource {
   readonly source: string;
 }
 
-interface TerrainShaderStartup {
-  readonly mode: "precompiled" | "runtime";
-  readonly platforms: readonly ("gles100" | "wgsl")[];
-  readonly registrationMs: number;
-  readonly runtimeSourceLoadMs?: number;
-}
-
 declare global {
   interface Window {
     /** Shader compile/link failures captured before the engine starts. */
@@ -1043,11 +1036,9 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
 
   await test.step("surface, region seam, and dual factor", async () => {
     const cases = [
-      { name: "overview", view: "surface", pose: "overview", viewFirst: false, minimumUniqueColors: 0 },
-      { name: "region-seam", view: "region-grid", pose: "seam", viewFirst: true, minimumUniqueColors: 3 },
-      { name: "dual-factor", view: "dual-factor", pose: "dual", viewFirst: true, minimumUniqueColors: 3 },
-      { name: "surface-features", view: "surface-features", pose: "top", viewFirst: true, minimumUniqueColors: 2 },
-      { name: "world-material-scale", view: "world-material-scale", pose: "background-seam", viewFirst: true, minimumUniqueColors: 3 }
+      { name: "overview", view: "surface", pose: "overview", viewFirst: false, checksFramebuffer: false },
+      { name: "region-seam", view: "region-grid", pose: "seam", viewFirst: true, checksFramebuffer: true },
+      { name: "dual-factor", view: "dual-factor", pose: "dual", viewFirst: true, checksFramebuffer: true }
     ] as const;
     for (const diagnostic of cases) {
       await page.evaluate(async ({ view, pose, viewFirst }) => {
@@ -1059,10 +1050,8 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
           await window.terrainDebug!.setView(view);
         }
       }, diagnostic);
-      if (diagnostic.minimumUniqueColors > 0) {
-        expect((await readFrameStats(page)).uniqueColors, diagnostic.name).toBeGreaterThanOrEqual(
-          diagnostic.minimumUniqueColors
-        );
+      if (diagnostic.checksFramebuffer) {
+        expect((await readFrameStats(page)).uniqueColors, diagnostic.name).toBeGreaterThan(2);
       }
     }
     const initialBackground = await page.evaluate(() => window.terrainDebug!.getTuning().world.background);
@@ -1094,8 +1083,6 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
 
   await test.step("production debug controls", async () => {
     const defaults = await page.evaluate(() => window.terrainDebug!.getTuning());
-    expect(defaults.sampling.linearControlBlend).toBe(false);
-    expect(defaults.sampling.normalMapMaxLod).toBe(1);
     expect(defaults.layers[1]).toMatchObject({
       layer: 1,
       uvScale: 1,
@@ -1133,7 +1120,7 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
       window.terrainDebug!.setMaterialTuning({
         autoShader: { enabled: false, slope: 0.75 },
         projection: { enabled: false, threshold: 0.8 },
-        dualScaling: { enabled: false, near: 90, far: 180, triScaleReduction: 0.25 },
+        dualScaling: { enabled: false, near: 90, far: 180 },
         macroVariation: { enabled: false, noise1Scale: 0.05, noise2Scale: 0.08 }
       });
       return window.terrainDebug!.getTuning();
@@ -1141,7 +1128,7 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(configured.material).toMatchObject({
       autoShader: { enabled: false, slope: 0.75 },
       projection: { enabled: false, threshold: 0.8 },
-      dualScaling: { enabled: false, near: 90, far: 180, triScaleReduction: 0.25 },
+      dualScaling: { enabled: false, near: 90, far: 180 },
       macroVariation: { enabled: false, noise1Scale: 0.05, noise2Scale: 0.08 }
     });
     const rejectedNear = await page.evaluate(() => {
@@ -1170,23 +1157,6 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
     expect(await page.evaluate(() => window.terrainDebug!.getTuning())).toEqual(defaults);
     await attachScreenshot(page, testInfo, "surface-color-map");
 
-    await page.evaluate(async () => {
-      await window.terrainDebug!.setPose("surface");
-      await window.terrainDebug!.setView("bilerp");
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    const fastControlBlend = await readFrameFingerprint(page);
-    await page.evaluate(async () => {
-      window.terrainDebug!.setSamplingTuning({ linearControlBlend: true });
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    expect(await page.evaluate(() => window.terrainDebug!.getTuning().sampling.linearControlBlend)).toBe(true);
-    expect(await readFrameFingerprint(page)).not.toBe(fastControlBlend);
-    await page.evaluate(async () => {
-      window.terrainDebug!.setSamplingTuning({ linearControlBlend: false });
-      await window.terrainDebug!.setView("surface");
-    });
-
     expect(
       await page.evaluate(() => {
         window.terrainDebug!.setWaterDebug({ enabled: true, height: 10 });
@@ -1201,97 +1171,6 @@ test("terrain data, clipmap, and production shader stay coherent", async ({ page
         return window.terrainDebug!.getWaterDebug();
       })
     ).toEqual({ enabled: false, height: 10 });
-  });
-
-  await test.step("surface-system placement and batching", async () => {
-    await page.evaluate(() => window.terrainDebug!.setSurface({ enabled: true }));
-    const surface = await page.evaluate(() => window.terrainDebug!.getSurface());
-    expect(surface.enabled).toBe(true);
-    expect(surface.counts.tree).toBeGreaterThan(0);
-    expect(surface.counts["tree-tall"]).toBeGreaterThan(0);
-    expect(surface.instancing).toBe("engine-auto");
-    expect(surface.instanceCount).toBeGreaterThan(20);
-    for (const asset of ["tree", "tree-tall"] as const) {
-      expect(surface.samples[asset].length).toBeGreaterThan(0);
-    }
-    const sampledTerrain = await page.evaluate(() => {
-      const surface = window.terrainDebug!.getSurface();
-      return Object.fromEntries(
-        Object.entries(surface.samples).map(([asset, placements]) => [
-          asset,
-          placements.map((placement) => ({
-            placement,
-            probe: window.terrainDebug!.readProbe(placement.position[0], placement.position[2])
-          }))
-        ])
-      );
-    });
-    for (const [asset, entries] of Object.entries(sampledTerrain)) {
-      for (const { placement, probe } of entries) {
-        expect(probe.height, asset).toBeCloseTo(placement.position[1] + placement.localMinY * placement.scale, 8);
-        expect(probe.control?.hole, asset).toBe(false);
-        expect(placement.region).toEqual([0, -1]);
-        expect(probe.control?.overlay, asset).toBe(1);
-        expect(probe.control?.surfaceFeatures, asset).toBe(1);
-      }
-    }
-
-    await page.evaluate(async () => {
-      window.__terrainDrawCalls = 0;
-      await window.terrainDebug!.setView("surface");
-      await window.terrainDebug!.setPose("surface");
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    expect((await readFrameStats(page)).uniqueColors).toBeGreaterThan(2);
-    expect(await page.evaluate(() => window.__terrainDrawCalls)).toBeLessThan(300);
-    const withSurface = await readFrameFingerprint(page);
-    await page.evaluate(() => window.terrainDebug!.setSurface({ enabled: false }));
-    expect(await readFrameFingerprint(page)).not.toBe(withSurface);
-    await page.evaluate(() => window.terrainDebug!.setSurface({ enabled: true }));
-    await page.evaluate(() => window.terrainDebug!.setPose("first-person"));
-    expect((await readFrameStats(page)).uniqueColors).toBeGreaterThan(2);
-    await attachScreenshot(page, testInfo, "surface-system");
-  });
-
-  await test.step("direct shadows and baked environment lighting", async () => {
-    await page.evaluate(async () => {
-      window.terrainDebug!.setSurface({ enabled: false });
-      await window.terrainDebug!.setView("surface");
-      await window.terrainDebug!.setPose("oblique");
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-
-    const directLightPattern = /DirectLight\s+directLight\s*=\s*getDirectLight\(0\)/;
-    const indirectLightPattern = /lighting\s*\+=\s*albedo\s*\*\s*ambientOcclusion\s*\*\s*varyings\.bakedIrradiance/;
-    const initialLightingShaderCount = await page.evaluate(() => window.__terrainGeneratedShaders.length);
-    await page.evaluate(async () => {
-      window.terrainDebug!.setLighting({ directLight: false, environment: true });
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    expect(await page.evaluate(() => window.terrainDebug!.getLighting())).toEqual({ directLight: false, shadows: true, environment: true });
-    const environmentOnlyShaders = await page.evaluate((count) => window.__terrainGeneratedShaders.slice(count), initialLightingShaderCount);
-    expect(environmentOnlyShaders.some((shader) => shader.stage === "fragment" && !directLightPattern.test(shader.source))).toBe(true);
-    const environmentOnly = await readCompositedFrameFingerprint(page);
-    await attachScreenshot(page, testInfo, "lighting-environment-only");
-
-    const compiledShaderCount = await page.evaluate(() => window.__terrainGeneratedShaders.length);
-    await page.evaluate(async () => {
-      window.terrainDebug!.setLighting({ directLight: true, environment: false });
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    });
-    expect(await page.evaluate(() => window.terrainDebug!.getLighting())).toEqual({ directLight: true, shadows: true, environment: false });
-    const directOnlyShaders = await page.evaluate((count) => window.__terrainGeneratedShaders.slice(count), compiledShaderCount);
-    expect(directOnlyShaders.some((shader) => shader.stage === "fragment" && directLightPattern.test(shader.source) && !indirectLightPattern.test(shader.source))).toBe(true);
-    const directOnly = await readCompositedFrameFingerprint(page);
-    await attachScreenshot(page, testInfo, "lighting-direct-shadow-only");
-
-    await page.evaluate(() => window.terrainDebug!.setLighting({ directLight: true, environment: true }));
-    expect(await page.evaluate(() => window.terrainDebug!.getLighting())).toEqual({ directLight: true, shadows: true, environment: true });
-    const combined = await readCompositedFrameFingerprint(page);
-    await attachScreenshot(page, testInfo, "lighting-direct-and-environment");
-
-    expect(new Set([environmentOnly, directOnly, combined]).size).toBe(3);
-    await page.evaluate(() => window.terrainDebug!.setSurface({ enabled: true }));
   });
 
   expect(await page.evaluate(() => window.__terrainShaderDiagnostics)).toEqual([]);
@@ -2500,15 +2379,6 @@ async function readFrameFingerprint(page: Page): Promise<number> {
         });
       })
   );
-}
-
-async function readCompositedFrameFingerprint(page: Page): Promise<number> {
-  const pixels = await page.screenshot({ type: "png" });
-  let hash = 2_166_136_261;
-  for (const pixel of pixels) {
-    hash = Math.imul(hash ^ pixel, 16_777_619);
-  }
-  return hash >>> 0;
 }
 
 async function attachScreenshot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
