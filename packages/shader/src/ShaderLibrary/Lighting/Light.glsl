@@ -118,8 +118,6 @@ struct EnvMapLight {
     float mipMapLevel;
     float diffuseIntensity;
     float specularIntensity;
-    float mipMapLevel2;
-    float specularTextureBlend;
 };
 
 
@@ -131,9 +129,6 @@ EnvMapLight scene_EnvMapLight;
 
 #ifdef SCENE_USE_SPECULAR_ENV
     samplerCube scene_EnvSpecularSampler;
-    #ifdef SCENE_USE_SPECULAR_ENV_BLEND
-        samplerCube scene_EnvSpecularSampler2;
-    #endif
 #endif
 
 

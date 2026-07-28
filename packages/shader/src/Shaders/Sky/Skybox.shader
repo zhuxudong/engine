@@ -6,8 +6,6 @@ Shader "Sky/Skybox" {
         material_Exposure("Exposure", Range(0, 8, 0.1)) = 1;
         material_Rotation("Rotation", Range(0, 360, 1)) = 0;
         material_CubeTexture("CubeTexture", TextureCube);
-        material_CubeTexture2("Secondary CubeTexture", TextureCube);
-        material_CubeTextureBlend("CubeTexture Blend", Range(0, 1, 0.01)) = 0;
       }
     }
   }
@@ -39,10 +37,6 @@ Shader "Sky/Skybox" {
       mat4 camera_VPMat;
       float material_Rotation;
       samplerCube material_CubeTexture;
-      #ifdef MATERIAL_HAS_SECONDARY_CUBE_TEXTURE
-        samplerCube material_CubeTexture2;
-        float material_CubeTextureBlend;
-      #endif
       float material_Exposure;
       vec4 material_TintColor;
 
@@ -66,13 +60,6 @@ Shader "Sky/Skybox" {
         vec4 textureColor = textureCube(material_CubeTexture, varyings.v_cubeUV);
         #ifdef ENGINE_NO_SRGB
           textureColor = sRGBToLinear(textureColor);
-        #endif
-        #ifdef MATERIAL_HAS_SECONDARY_CUBE_TEXTURE
-          vec4 secondaryTextureColor = textureCube(material_CubeTexture2, varyings.v_cubeUV);
-          #ifdef ENGINE_NO_SRGB
-            secondaryTextureColor = sRGBToLinear(secondaryTextureColor);
-          #endif
-          textureColor = mix(textureColor, secondaryTextureColor, material_CubeTextureBlend);
         #endif
         textureColor.rgb *= material_Exposure * material_TintColor.rgb;
         gl_FragColor = textureColor;
