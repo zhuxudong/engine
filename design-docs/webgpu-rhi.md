@@ -411,6 +411,55 @@ layout；连续 dispatch 保持在同一个 native compute pass，遇到 render�
   storage 输出顺序正确；Grasslands E2E 覆盖刷新切换、类别、LOD、indirect、有效截图和零
   GPU validation error。
 
+### Storage atlas 与 flattened dispatch 第六检查点
+
+候选 `8c7414f78` 将 44 个 prototype、109 个 prototype LOD batcher 的 source、output、
+command 和 indirect buffer 合并为一组 atlas。CPU 仍负责 cell culling、density prefix 和
+LOD 选择；所有 dirty batch header 与 visible range copy command 由一个 ShaderLab compute
+dispatch 消费。WebGL2 保持原 cell renderer 路径。
+
+`VertexBufferBinding.offset` 是两个后端共用的字节偏移：WebGL2 将其加到 attribute pointer，
+WebGPU 将其传给 `setVertexBuffer`。indirect argument 的 `firstInstance` 保持为 0，因此不要求
+可选的 [`"indirect-first-instance"`](https://gpuweb.github.io/types/types/GPUFeatureName.html)
+device feature，也不把 WebGPU 特例暴露给 surface mesh 或 example。
+
+Atlas 创建前通过 `Engine.computeCapabilities` 校验每个 storage binding 与 dispatch 维度。
+Grasslands 的 source binding 为 17.77 MiB、output binding 为 18.08 MiB，最大 dispatch 为
+2,157 workgroups；均低于 WebGPU 规范的最低
+[`maxStorageBufferBindingSize` 128 MiB 和 `maxComputeWorkgroupsPerDimension` 65,535](https://gpuweb.github.io/gpuweb/)。
+当前不实现 paging；超过实际 device limit 时显式抛出 `RangeError`，不拆成隐藏的临时路径。
+
+同机最终提交 A/B 使用父提交 `a20e02fe8` 作为每 batcher dispatch 基线。Chromium
+140.0.7339.16、Metal、1280×720 CSS、DPR 2、固定相机、关闭场景动画；每组交替运行三轮，
+预热 1.8 秒后采样 3 秒。
+
+| 场景 | 实现 | ready 中位数 | FPS 中位数 | p50 | p95 | GPU 诊断 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| settled | 每 batcher dispatch | 1,855 ms | 46.48 | 23.0 ms | 33.3 ms | 0 |
+| settled | flattened dispatch | 1,906 ms | 46.14 | 23.1 ms | 33.3 ms | 0 |
+| LOD churn | 每 batcher dispatch | 1,844 ms | 41.66 | 24.8 ms | 33.4 ms | 0 |
+| LOD churn | flattened dispatch | 1,880 ms | 43.21 | 23.7 ms | 33.2 ms | 0 |
+
+- settled FPS 为 -0.74%，LOD churn 为 +3.73%；另一次 Chromium 147 六样本复测分别为
+  +0.84% 和 +1.28%。不同运行的收益幅度不稳定，当前证据只记录整帧没有明显回退，不记录
+  可泛化的 FPS 提升。
+- ready 中位数分别增加 2.77% 和 1.94%；另一次复测增加 2.01% 和 4.71%。该实现没有启动
+  时间收益。
+- 在 settled 页面加载并继续运行一秒的相同窗口中，原生 `dispatchWorkgroups` 从 869 降到
+  10（-98.85%）；`createComputePipeline` 均为 1，`beginComputePass` 为 11/10。两个页面均为
+  169,199 个可见实例、76 个活动 indirect renderer batch。
+- compaction 相关 storage buffer 从 436 个、37,958,184 bytes 降到 4 个、
+  37,627,192 bytes：对象数 -99.08%，分配字节 -0.87%。减少的是 command/buffer 对象，
+  不是实例容量。
+- 五轮、每轮 40 次同步 LOD distance 切换中，host 总耗时中位数从 8.5 ms 降到 6.2 ms
+  （-27.1%）；单次结果落在 0.1 ms 计时粒度附近，只把总量方向作为证据。
+- 关闭 wind 与场景动画后，基线和候选的 category、LOD、可见实例逐项相同；截图 RGB 平均
+  绝对通道差为 0.0089，通道差大于 2 的比例为 0，最大通道差为 2。最终 E2E 另行验证
+  WebGL2→WebGPU 刷新、LOD 过渡、indirect、有效像素和零 validation diagnostic。
+- 该检查点消除了 CPU command encoding 中的 per-batcher dispatch 循环，但可见性与 LOD
+  决策仍在 CPU。将 cell culling/LOD 迁入 atlas compute 才能检验每帧 GPU-driven 收益；
+  不能把本检查点描述为已经完成 GPU culling。
+
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
 ### 移动端约束与验收
