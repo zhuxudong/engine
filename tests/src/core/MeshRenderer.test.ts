@@ -6,7 +6,8 @@ import {
   PrimitiveMesh,
   Entity,
   Camera,
-  ModelMesh
+  ModelMesh,
+  RenderElement
 } from "@galacean/engine-core";
 import { Vector3 } from "@galacean/engine-math";
 import { WebGLEngine } from "@galacean/engine";
@@ -68,6 +69,15 @@ describe("MeshRenderer", async function () {
     // Test that set false value works correctly.
     mr.enableVertexColor = false;
     expect(mr.enableVertexColor).to.be.equal(false);
+  });
+
+  it("does not CPU-batch indirect draw elements", () => {
+    const renderer = cubeEntity.getComponent(MeshRenderer);
+    const direct = { indirectBuffer: null } as RenderElement;
+    const indirect = { indirectBuffer: {} } as RenderElement;
+
+    expect(renderer._canBatch(indirect, direct)).toBe(false);
+    expect(renderer._canBatch(direct, indirect)).toBe(false);
   });
 
   it("bounds", () => {

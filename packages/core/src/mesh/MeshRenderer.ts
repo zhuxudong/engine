@@ -219,6 +219,8 @@ export class MeshRenderer extends Renderer {
    * @internal
    */
   override _canBatch(preElement: RenderElement, curElement: RenderElement): boolean {
+    // Indirect arguments already define a complete instance stream and cannot be replaced by CPU renderer instancing.
+    if (preElement.indirectBuffer || curElement.indirectBuffer) return false;
     if (!this._engine._hardwareRenderer.isWebGL2) return false;
     const curShaderData = curElement.component.shaderData;
     return (
