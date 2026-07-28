@@ -467,10 +467,10 @@ Grasslands 的 source binding 为 17.77 MiB、output binding 为 18.08 MiB，最
 cross-fade 或 shadow caster 继续使用第六检查点的 range 级 CPU 选择与 GPU copy，避免相机裁剪
 删除相机外但仍会进入 shadow cascade 的实例。
 
-Grasslands 当前资产中，该谓词覆盖 3 个草 prototype 和 2 个花 prototype，共 272,570 个
-候选实例、290 个 cell range。按 demo authored camera 的实例位置到相机距离离线计数，不加入
-prototype radius 和视锥保守量时，当前 range 级选择与实例点距离选择的差异如下。该表只说明
-候选裁剪空间，不是最终可见数或性能结果。
+Grasslands 当前资产中，该谓词覆盖 3 个草、2 个花和 `tree-fake-tree`，共 6 个 prototype、
+286,937 个候选实例、860 个 cell range。下表只统计草/花：按 demo authored camera 的实例位置
+到相机距离离线计数，不加入 prototype radius 和视锥保守量时，当前 range 级选择与实例点距离
+选择的差异如下。该表只说明这 5 个 prototype 的候选裁剪空间，不是最终可见数或性能结果。
 
 | category | 总候选 | 当前 range 选择 | 实例点距离选择 | 相对当前减少 |
 | --- | ---: | ---: | ---: | ---: |
@@ -478,15 +478,24 @@ prototype radius 和视锥保守量时，当前 range 级选择与实例点距�
 | flower | 18,052 | 14,234 | 13,101 | 7.96% |
 | 合计 | 272,570 | 150,700 | 117,117 | 22.28% |
 
+`tree-fake-tree` 另有 14,367 个候选实例、570 个 range，authored max distance 为 2,400。
+固定相机下，CPU 视锥/range 选择保留的 3,898 个实例全部通过实例距离判定；它验证能力谓词不能
+等同于“值得执行 fine cull”。是否执行由每帧 range 边界关系继续收窄。
+
 实现沿用 atlas 与单次 flattened dispatch：
 
-1. CPU 继续做 cell conservative culling、density prefix 和能力谓词判断，并上传 range command。
-2. 一个 workgroup 消费一个 range command；每个 invocation 以步进循环检查实例位置、动态
-   category scale、prototype sphere 与相机 max distance/六视锥平面。
+1. CPU 继续做 cell conservative culling、density prefix 和能力谓词判断；以 range placement
+   radius、prototype sphere、最大实例 scale 和动态 category scale 计算 conservative farthest
+   distance，将完全位于距离边界内的 range 直接复制为 output safe prefix。
+2. 只有跨越距离边界的 range 才切成不超过实际 workgroup size 的 command tile；一个 workgroup
+   消费一个 tile，每个 invocation 检查一个实例的位置、动态 category scale、prototype sphere
+   与相机 max distance。
 3. workgroup 内存中的 atomic counter 分配局部 survivor slot；leader 对该 render batch 的
-   storage counter 只执行一次全局 `atomicAdd`，随后所有 survivor 写入连续 output slice。
-4. 第二个 ShaderLab compute pass 将 batch counter 写入对应 indirect record 的 instance count。
-   counter reset、fine cull 与 finalize 不读取或暴露原生 `GPUDevice`。
+   storage counter 每 tile 只执行一次全局 `atomicAdd`，counter 从 safe-prefix count 开始，随后
+   survivor 追加到同一连续 output slice。
+4. finalize ShaderLab compute pass 将 batch counter 写入对应 indirect record 的 instance
+   count；没有边界 range 的 batch 只运行原有 copy。counter reset、fine cull 与 finalize 不读取
+   或暴露原生 `GPUDevice`。
 
 该算法直接参考 PlayCanvas
 [`compute-gsplat-projector.js`](https://github.com/playcanvas/engine/blob/332a922d2dcf48bf3c774d296c999c69581d3d2c/src/scene/shader-lib/wgsl/chunks/gsplat/compute-gsplat-projector.js)
@@ -496,6 +505,33 @@ prototype radius 和视锥保守量时，当前 range 级选择与实例点距�
 后者还将 coarse candidate 和六平面 conservative fine cull 分为独立阶段。ShaderLab 先补
 `shared int/uint` 的 `atomicAdd`、`atomicLoad`、`atomicStore` WGSL codegen 与 `.wgslc`，
 terrain shader 才能使用该模式；不在 example 内嵌手写 WGSL。
+
+首个落地切片只做 max-distance fine cull。相同 ShaderLab surface vertex 在 WebGL2 中把距离外
+实例移出 clip space，WebGPU compute 使用同一 sphere 判定，因此两后端保持像素语义一致，
+WebGPU 额外省去 survivor 之外的 vertex/primitive 工作。六平面 fine cull 暂缓：Grasslands
+草/花存在 vertex wind deformation，当前 prototype contract 没有可证明的最大位移界；
+在该界进入中立资产契约前直接使用静态 mesh sphere 会在视锥边缘产生假阴性。
+
+固定相机真实 WebGPU 读回中，强制 6 个 prototype 的全部可见 range 执行 fine cull 时，一次
+compaction flush 的 workgroup 分布为 copy/reset/fine/finalize = `646/1/1269/6`。加入上述
+边界分流后为 `857/1/411/5`：fine-cull workgroup 减少 67.61%，四个 pass 合计减少 33.71%。
+草/花的 5 个 counter 仍为 `5037/3469/44431/3193/4444`，`tree-fake-tree` 的 3,898 个实例
+改走 direct copy，合计 survivor 仍为 64,472；浏览器未产生 WebGPU validation diagnostic。
+
+Chromium 140 / Metal、1280×720 CSS、DPR 2、每项 3 秒采样、三轮交替顺序的整帧结果：
+
+| 场景 | backend/实现 | FPS 中位数 | p50 | p95 | GPU 诊断 |
+| --- | --- | ---: | ---: | ---: | --- |
+| settled | 当前 WebGL2 cell batch | 37.00 | 25.7 ms | 34.3 ms | 0 |
+| settled | 当前 WebGPU compact/indirect + fine cull | 49.65 | 17.5 ms | 26.5 ms | 0 |
+| LOD churn | 当前 WebGL2 cell batch | 35.28 | 25.6 ms | 34.7 ms | 0 |
+| LOD churn | 当前 WebGPU compact/indirect + fine cull | 42.00 | 24.9 ms | 33.3 ms | 0 |
+
+同一分支跨 backend 的 settled FPS 为 +34.20%，LOD churn 为 +19.06%，但它同时包含前几阶段
+WebGPU compact/indirect 合批与本阶段 fine cull，不能把全部差值归因于实例裁剪。以
+`edd39d2a9` 的 WebGPU compact/indirect 为隔离基线时，两次 settled 复测一次为 +2.54%，
+另一次为 -3.00%，方向相反；两次 LOD churn 分别为 -0.35% 和 -0.26%。本阶段目前只形成
+明确的 workgroup/vertex 候选减少，没有形成可泛化的独立整帧收益。
 
 新增 cull parameter 与 batch counter 后，compaction 同一 pass 最多绑定 6 个 storage buffer，
 不超过 WebGPU 最低 `maxStorageBuffersPerShaderStage = 8`。workgroup size 继续由
