@@ -134,7 +134,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     for (let index = 0; index < primitive.vertexBufferBindings.length; index++) {
       const binding = primitive.vertexBufferBindings[index];
       if (binding) {
-        pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer);
+        pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer, binding.offset);
       }
     }
     if (defaultBufferSlot !== undefined) {

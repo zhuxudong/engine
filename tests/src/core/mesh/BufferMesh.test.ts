@@ -82,10 +82,11 @@ describe("BufferMesh", () => {
     expect(mesh.vertexBufferBindings[0].buffer.refCount).to.equal(2);
     expect(mesh.vertexBufferBindings[0].stride).to.equal(1);
 
-    mesh.setVertexBufferBinding(new VertexBufferBinding(buffer2, 1), 3);
+    mesh.setVertexBufferBinding(new VertexBufferBinding(buffer2, 1, 4), 3);
     expect(mesh.vertexBufferBindings.length).to.equal(4);
     expect(mesh.vertexBufferBindings[3].buffer.refCount).to.equal(2);
     expect(mesh.vertexBufferBindings[3].stride).to.equal(1);
+    expect(mesh.vertexBufferBindings[3].offset).to.equal(4);
 
     // Test setVertexBufferBinding(vertexBuffer: Buffer, stride: number, index?: number) method.
     mesh.setVertexBufferBinding(buffer, 2, 1);

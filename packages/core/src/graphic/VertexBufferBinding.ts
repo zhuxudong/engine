@@ -8,6 +8,8 @@ export class VertexBufferBinding {
   _buffer: Buffer;
   /** @internal */
   _stride: number;
+  /** @internal */
+  _offset: number;
 
   /**
    * Vertex buffer.
@@ -24,12 +26,21 @@ export class VertexBufferBinding {
   }
 
   /**
+   * Byte offset of the first vertex record in the buffer.
+   */
+  get offset(): number {
+    return this._offset;
+  }
+
+  /**
    * Create vertex buffer.
    * @param buffer - Vertex buffer
    * @param stride - Vertex buffer stride
+   * @param offset - Byte offset of the first vertex record
    */
-  constructor(buffer: Buffer, stride: number) {
+  constructor(buffer: Buffer, stride: number, offset: number = 0) {
     this._buffer = buffer;
     this._stride = stride;
+    this._offset = offset;
   }
 }

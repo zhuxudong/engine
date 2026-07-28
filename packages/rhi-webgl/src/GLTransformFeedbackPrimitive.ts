@@ -82,11 +82,11 @@ export class GLTransformFeedbackPrimitive implements IPlatformTransformFeedbackP
 
     // @ts-ignore: Access internal _platformBuffer across packages
     gl.bindBuffer(gl.ARRAY_BUFFER, (<GLBuffer>feedbackBinding.buffer._platformBuffer)._glBuffer);
-    this._bindElements(gl, attribs, feedbackElements, feedbackBinding.stride);
+    this._bindElements(gl, attribs, feedbackElements, feedbackBinding.stride, feedbackBinding.offset);
 
     // @ts-ignore: Access internal _platformBuffer across packages
     gl.bindBuffer(gl.ARRAY_BUFFER, (<GLBuffer>inputBinding.buffer._platformBuffer)._glBuffer);
-    this._bindElements(gl, attribs, inputElements, inputBinding.stride);
+    this._bindElements(gl, attribs, inputElements, inputBinding.stride, inputBinding.offset);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     return vao;
@@ -96,14 +96,15 @@ export class GLTransformFeedbackPrimitive implements IPlatformTransformFeedbackP
     gl: WebGL2RenderingContext,
     attribs: Record<string, number>,
     elements: VertexElement[],
-    stride: number
+    stride: number,
+    bufferOffset: number
   ): void {
     for (const element of elements) {
       const loc = attribs[element.attribute];
       if (loc !== undefined && loc !== -1) {
         const info = element._formatMetaInfo;
         gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, info.size, info.type, info.normalized, stride, element.offset);
+        gl.vertexAttribPointer(loc, info.size, info.type, info.normalized, stride, bufferOffset + element.offset);
       }
     }
   }

@@ -118,7 +118,7 @@ export class GLPrimitive implements IPlatformPrimitive {
 
       const element = attributes[name];
       if (element) {
-        const { buffer, stride } = vertexBufferBindings[element.bindingIndex];
+        const { buffer, stride, offset } = vertexBufferBindings[element.bindingIndex];
         vbo = buffer._platformBuffer._glBuffer;
         // prevent binding the vbo which already bound at the last loop, e.g. a buffer with multiple attributes.
         if (lastBoundVbo !== vbo) {
@@ -128,7 +128,14 @@ export class GLPrimitive implements IPlatformPrimitive {
 
         gl.enableVertexAttribArray(loc);
         const elementInfo = element._formatMetaInfo;
-        gl.vertexAttribPointer(loc, elementInfo.size, elementInfo.type, elementInfo.normalized, stride, element.offset);
+        gl.vertexAttribPointer(
+          loc,
+          elementInfo.size,
+          elementInfo.type,
+          elementInfo.normalized,
+          stride,
+          offset + element.offset
+        );
         if (this._canUseInstancedArrays) {
           gl.vertexAttribDivisor(loc, element.instanceStepRate);
         }
