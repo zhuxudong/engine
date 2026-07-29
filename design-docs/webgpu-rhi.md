@@ -883,6 +883,43 @@ Chromium 147、Metal ANGLE、1280×720 CSS viewport、device scale factor 2 下�
 surface removal 收益，排序本身也未改善整帧尾延迟；不能把 category 消融上限归因为可由排序
 消除的 overdraw。实现未通过性能门，代码撤销，仅保留本检查点。
 
+### Optional Surface texture specialization 设计
+
+#### Fragment 成本事实
+
+同一 `hero` WebGPU 页面保持实例、draw、alpha discard、normal/metallic/occlusion 采样和 shadow
+caster 不变，只把 `SurfaceWorld.debugView` 在完整 `surface` 与跳过 `shadeSurface` 的
+`category` 间按 `surface/category/category/surface` 切换。两组配对 FPS 分别从 37.46 到
+48.33（+29.02%）、从 38.00 到 48.86（+28.59%），GPU/page diagnostic 为 0。该结果证明
+Forward PBR lighting 是显著成本上限，但不授权用简化 lighting model 改变画面。
+
+Grasslands 25 个 Surface material 中，5 个没有 normal、12 个没有 metallic-smoothness、18 个
+没有 occlusion；9 个 vegetation material 全部没有 metallic-smoothness 和 occlusion，其中
+5 个没有 normal。`grass-2` 与 `grass-2-small` 共 245,637 个编译实例，三张可选图都缺失。
+当前加载器仍为缺失资源绑定 1×1 fallback，Surface fragment 对每个存活 fragment 无条件采样
+normal、metallic-smoothness 与 occlusion。
+
+Galacean 内置 `BaseMaterial`/`PBRMaterial` 已使用 `MATERIAL_HAS_NORMALTEXTURE`、
+`MATERIAL_HAS_ROUGHNESS_METALLIC_TEXTURE` 和 `MATERIAL_HAS_OCCLUSION_TEXTURE` 控制同类可选
+资源；`FragmentPBR.glsl` 在宏关闭时使用常量材质值。这是本阶段直接复用的引擎内契约，不另造
+backend-specific material API。
+
+#### 本阶段实现契约
+
+1. `SurfaceMaterial` 按 manifest URL 是否存在启用上述三个已有 macro；`Surface.shader` 只在
+   对应 macro 存在时声明并采样 texture。Engine 创建、用户 API、ShaderLab source 和材质
+   参数不变，`.shaderc`/`.wgslc` 仍由同一构建脚本产出。
+2. 缺失 metallic-smoothness 时使用 `vec4(1)`，缺失 occlusion 时使用 1；这与现有
+   `WHITE_PIXEL` fallback 完全一致。缺失 normal 时保留现有 `FLAT_NORMAL_PIXEL` 的
+   `128/255 * 2 - 1` XY 偏移及相同 TBN 变换，只把 texture fetch 替换为编译期常量。
+3. 不删除 fallback texture 加载或 ShaderData binding，避免把资源生命周期改动混入 shader
+   性能切片；无用 binding 是否被 WGSL reflection 删除以实际产物为准。
+4. 这是跨后端中立 shader 优化。验收分别对父提交做 WebGL2 与 WebGPU 的固定相机、连续移动
+   ABBA，并报告 FPS、frame p50/p95、program/bind-group diagnostic；不能把 WebGL2 同样获得
+   的收益写成 WebGPU 独占提升。
+5. WebGL2 与 WebGPU 固定相机截图都须保持像素等价，Surface category/LOD/count 不变；构建
+   产物必须同时验证 runtime ShaderLab 与 `.wgslc`。任一后端无稳定收益或出现画面差异时撤销。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
