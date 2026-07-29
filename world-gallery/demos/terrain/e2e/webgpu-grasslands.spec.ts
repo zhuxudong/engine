@@ -25,6 +25,7 @@ interface ComputeCommandEncoderPrototype {
 declare global {
   interface Window {
     __webgpuComputeCounts: WebGPUComputeCounts;
+    __webgpuPassSequence: string[];
   }
 }
 
@@ -302,5 +303,101 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   expect(metrics.averageLuminance).toBeLessThan(220);
   expect(metrics.darkPixels).toBeGreaterThan(0);
   expect(metrics.brightPixels).toBeGreaterThan(0);
+  expect(diagnostics).toEqual([]);
+});
+
+test("builds conservative depth tiles between the Grasslands depth and forward passes", async ({ page }, testInfo) => {
+  test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to launch Chromium with WebGPU.");
+
+  await page.addInitScript(() => {
+    const sequence: string[] = [];
+    window.__webgpuPassSequence = sequence;
+    const constructors = globalThis as unknown as {
+      GPUCommandEncoder?: {
+        prototype: {
+          beginRenderPass(descriptor: { label?: string }): unknown;
+          beginComputePass(descriptor?: { label?: string }): unknown;
+        };
+      };
+    };
+    if (!constructors.GPUCommandEncoder) return;
+    const prototype = constructors.GPUCommandEncoder.prototype;
+    const beginRenderPass = prototype.beginRenderPass;
+    prototype.beginRenderPass = function (descriptor) {
+      sequence.push(descriptor.label ?? "render");
+      return beginRenderPass.call(this, descriptor);
+    };
+    const beginComputePass = prototype.beginComputePass;
+    prototype.beginComputePass = function (descriptor) {
+      sequence.push(descriptor?.label ?? "compute");
+      return beginComputePass.call(this, descriptor);
+    };
+  });
+
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (
+      message.type() === "error" ||
+      (message.type() === "warning" && /webgpu|gpu|validation|invalid|exceeds/i.test(text))
+    ) {
+      diagnostics.push(`${message.type()}: ${text}`);
+    }
+  });
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+
+  await page.goto("/demos/terrain/grasslands/?backend=webgpu&surfaceHiZ=depth-tiles&pose=terrain-horizon", {
+    waitUntil: "networkidle"
+  });
+  await page.waitForFunction(() => window.grasslandsDebug?.ready === true);
+  await page.evaluate(() => window.grasslandsDebug!.setScene({ animation: false }));
+  await expect
+    .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectDepthTiles()?.dispatchCount ?? 0))
+    .toBeGreaterThan(0);
+
+  const snapshot = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!;
+    return {
+      depthTiles: window.grasslandsDebug!.inspectDepthTiles()!,
+      canvas: { width: canvas.width, height: canvas.height }
+    };
+  });
+  expect(snapshot.depthTiles.width).toBe(snapshot.canvas.width);
+  expect(snapshot.depthTiles.height).toBe(snapshot.canvas.height);
+  expect(snapshot.depthTiles.tileEdge).toBeGreaterThan(0);
+  expect(snapshot.depthTiles.tilesX).toBe(Math.ceil(snapshot.canvas.width / snapshot.depthTiles.tileEdge));
+  expect(snapshot.depthTiles.tilesY).toBe(Math.ceil(snapshot.canvas.height / snapshot.depthTiles.tileEdge));
+
+  const sequence = await page.evaluate(() => window.__webgpuPassSequence);
+  expect(
+    sequence.some((name, index) => {
+      if (name !== "depth-prepass") return false;
+      const computeIndex = sequence.indexOf("compute", index + 1);
+      const forwardIndex = sequence.indexOf("forward", index + 1);
+      return computeIndex > index && forwardIndex > computeIndex;
+    })
+  ).toBe(true);
+
+  const screenshotPath = testInfo.outputPath("grasslands-depth-tiles.png");
+  const screenshot = await page.locator("#canvas").screenshot({ path: screenshotPath });
+  await testInfo.attach("grasslands-depth-tiles.png", { path: screenshotPath, contentType: "image/png" });
+  expect(screenshot.byteLength).toBeGreaterThan(10_000);
+  expect(diagnostics).toEqual([]);
+});
+
+test("reduces known depth values into conservative far-depth tiles", async ({ page }) => {
+  test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to launch Chromium with WebGPU.");
+
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error" || message.type() === "warning") {
+      diagnostics.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+
+  await page.goto("/demos/terrain/e2e/fixtures/surface-depth-tiles/", { waitUntil: "networkidle" });
+  await expect(page.locator("#result")).toContainText("PASS");
+  await expect(page.locator("#result")).toContainText("3x2 tiles");
   expect(diagnostics).toEqual([]);
 });
