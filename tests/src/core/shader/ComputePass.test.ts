@@ -1,15 +1,19 @@
 import {
+  AssetType,
   Buffer,
   BufferBindFlag,
   BufferUsage,
   ComputePass,
   Shader,
   ShaderLanguage,
+  Texture2D,
+  TextureFilterMode,
+  TextureFormat,
   WebGLGraphicDevice,
   WebGPUEngine
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 function createComputeShaderSource(name: string): string {
   return `
@@ -29,6 +33,47 @@ Shader "${name}" {
   }
 }
 `;
+}
+
+function createSampledTextureShaderSource(name: string): string {
+  return `
+Shader "${name}" {
+  SubShader "Default" {
+    Pass "ReadTexture" {
+      sampler2D inputTexture;
+      buffer vec4 outputValues[];
+
+      void readTexels() {
+        uint index = gl_GlobalInvocationID.x;
+        outputValues[index] = texelFetch(inputTexture, ivec2(int(index), 0), 0);
+      }
+
+      ComputeShader = readTexels;
+    }
+  }
+}
+`;
+}
+
+async function readStorageBuffer(device: GPUDevice, buffer: Buffer, byteLength: number): Promise<ArrayBuffer> {
+  const readback = device.createBuffer({
+    size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(
+    (buffer._platformBuffer as unknown as { _gpuBuffer: GPUBuffer })._gpuBuffer,
+    0,
+    readback,
+    0,
+    byteLength
+  );
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const data = readback.getMappedRange().slice(0);
+  readback.unmap();
+  readback.destroy();
+  return data;
 }
 
 describe("ComputePass", () => {
@@ -145,6 +190,121 @@ describe("ComputePass", () => {
     input.destroy(true);
     firstOutput.destroy(true);
     secondOutput.destroy(true);
+    engine.destroy();
+  });
+
+  it("binds sampled textures by reflection and rebuilds only changed native bindings", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const compiler = new ShaderCompiler();
+    const engine = await WebGPUEngine.create({ canvas: document.createElement("canvas"), shaderCompiler: compiler });
+    const foreignEngine = await WebGPUEngine.create({
+      canvas: document.createElement("canvas"),
+      shaderCompiler: compiler
+    });
+    const shader = Shader.create(createSampledTextureShaderSource("RHI/ComputeSampledTexture"), ShaderLanguage.WGSL);
+    const computePass = new ComputePass(engine, shader);
+    const outputByteLength = 64 * 4 * Float32Array.BYTES_PER_ELEMENT;
+    const output = new Buffer(engine, BufferBindFlag.StorageBuffer, outputByteLength, BufferUsage.Dynamic);
+    const firstPixels = Uint8Array.from({ length: 64 * 4 }, (_, index) => (index * 13 + 7) % 256);
+    const secondPixels = Uint8Array.from({ length: 64 * 4 }, (_, index) => (index * 29 + 3) % 256);
+    const firstTexture = new Texture2D(engine, 64, 1, TextureFormat.R8G8B8A8, false, false);
+    const secondTexture = new Texture2D(engine, 64, 1, TextureFormat.R8G8B8A8, false, false);
+    const foreignTexture = new Texture2D(foreignEngine, 64, 1, TextureFormat.R8G8B8A8, false, false);
+    firstTexture.setPixelBuffer(firstPixels);
+    secondTexture.setPixelBuffer(secondPixels);
+    computePass.setBuffer("outputValues", output);
+
+    expect(() => computePass.setTexture("missingTexture", firstTexture)).toThrowError(
+      'Compute shader "RHI/ComputeSampledTexture" has no sampled texture named "missingTexture".'
+    );
+    expect(() => computePass.setTexture("inputTexture", foreignTexture)).toThrowError(
+      'Compute texture "inputTexture" belongs to a different engine.'
+    );
+    expect(() => computePass.dispatch(1)).toThrowError('Compute sampled texture "inputTexture" is not bound.');
+
+    computePass.setTexture("inputTexture", firstTexture);
+    expect(firstTexture.refCount).toBe(1);
+    computePass.dispatch(1);
+    const platformProgram = (
+      computePass as unknown as {
+        _platformProgram: { _bindGroup: GPUBindGroup };
+      }
+    )._platformProgram;
+    const firstBindGroup = platformProgram._bindGroup;
+
+    computePass.setTexture("inputTexture", firstTexture);
+    computePass.dispatch(1);
+    expect(platformProgram._bindGroup).toBe(firstBindGroup);
+
+    firstTexture.filterMode = TextureFilterMode.Point;
+    computePass.dispatch(1);
+    const samplerUpdatedBindGroup = platformProgram._bindGroup;
+    expect(samplerUpdatedBindGroup).not.toBe(firstBindGroup);
+
+    computePass.setTexture("inputTexture", secondTexture);
+    expect(firstTexture.refCount).toBe(0);
+    expect(secondTexture.refCount).toBe(1);
+    computePass.dispatch(1);
+    expect(platformProgram._bindGroup).not.toBe(samplerUpdatedBindGroup);
+    engine._hardwareRenderer.flush();
+
+    const device = (engine._hardwareRenderer as { device: GPUDevice }).device;
+    const result = new Float32Array(await readStorageBuffer(device, output, outputByteLength));
+    for (let index = 0; index < secondPixels.length; index++) {
+      expect(result[index]).toBeCloseTo(secondPixels[index] / 255, 5);
+    }
+
+    computePass.destroy();
+    expect(secondTexture.refCount).toBe(0);
+    output.destroy(true);
+    firstTexture.destroy(true);
+    secondTexture.destroy(true);
+    foreignTexture.destroy(true);
+    engine.destroy();
+    foreignEngine.destroy();
+  });
+
+  it("executes sampled-texture compute from a serialized WGSL artifact", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const compiler = new ShaderCompiler();
+    const engine = await WebGPUEngine.create({ canvas: document.createElement("canvas"), shaderCompiler: compiler });
+    const source = createSampledTextureShaderSource("RHI/ComputeSampledTexturePrecompiled");
+    const artifact = JSON.parse(JSON.stringify(compiler._precompile(source, ShaderLanguage.WGSL, "shaders://root/")));
+    const request = vi.spyOn(engine.resourceManager, "_request").mockResolvedValue(artifact);
+    const shader = await engine.resourceManager.load<Shader>({
+      type: AssetType.Shader,
+      url: "/RHI/ComputeSampledTexturePrecompiled.wgslc"
+    });
+    expect(request).toHaveBeenCalledWith(
+      "/RHI/ComputeSampledTexturePrecompiled.wgslc",
+      expect.objectContaining({ type: "json" })
+    );
+    const computePass = new ComputePass(engine, shader);
+    const outputByteLength = 64 * 4 * Float32Array.BYTES_PER_ELEMENT;
+    const pixels = Uint8Array.from({ length: 64 * 4 }, (_, index) => (index * 17 + 5) % 256);
+    const texture = new Texture2D(engine, 64, 1, TextureFormat.R8G8B8A8, false, false);
+    const output = new Buffer(engine, BufferBindFlag.StorageBuffer, outputByteLength, BufferUsage.Dynamic);
+    texture.setPixelBuffer(pixels);
+    computePass.setTexture("inputTexture", texture);
+    computePass.setBuffer("outputValues", output);
+    computePass.dispatch(1);
+    engine._hardwareRenderer.flush();
+
+    const device = (engine._hardwareRenderer as { device: GPUDevice }).device;
+    const result = new Float32Array(await readStorageBuffer(device, output, outputByteLength));
+    for (let index = 0; index < pixels.length; index++) {
+      expect(result[index]).toBeCloseTo(pixels[index] / 255, 5);
+    }
+
+    computePass.destroy();
+    output.destroy(true);
+    texture.destroy(true);
     engine.destroy();
   });
 
