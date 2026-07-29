@@ -2243,6 +2243,89 @@ improvement 的 IQR 跨 0。按预先声明的保留门，runtime provider 与�
 契约已撤销；保留 viewport-aware native probe、稳定等待和 category invalidation E2E。
 该桌面 Metal 结果不代表移动真机数据。
 
+### Compute sampled texture 与 Surface Hi-Z 设计
+
+#### 当前边界与上游源码事实
+
+Grasslands 现有 6 个细筛 prototype 已经使用 6 个 Forward indirect draw，且都不投影：
+3 个草、2 个花和 1 个假树。它们的视锥 compaction 已把固定 first-person survivor 从
+64,472 降到 35,280，但仍会提交视锥内、被 terrain 或建筑完全遮挡的实例。原生命令探针在
+全部 Surface 开启与关闭时都记录到相同的 Depth prepass：19 个 direct indexed draw、41 个
+instance；因此现有 depth 只包含 terrain/architecture，可作为 Surface occluder 输入，不依赖
+被裁剪的 Surface 本身。
+
+当前中立 compute API 只反射和绑定 storage buffer：
+
+- `ComputePass` 只有 `setBuffer`。
+- `IPlatformComputeProgram` 只有 storage-buffer binding。
+- `WebGPUComputeProgram` 遇到任何 texture resource 都显式失败。
+- ShaderLab WGSL codegen 已能为 `sampler2D` 等声明生成 texture/sampler binding，并在
+  `IShaderResourceReflection` 保存名称、两个 binding、texture type 和 comparison 信息。
+
+下表只记录固定本地 commit 的实现事实：
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | compute 持有与 pipeline layout 一致的 bind groups；`BindGroup.setTexture` 只有 texture、render version 或 native impl 变化时才标 dirty |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `ComputeShader.setTexture` 通过名称绑定 texture，可选择是否同时绑定 sampler；对象或 binding type 变化才使 compute context dirty |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | render 与 compute 都通过同一 binding manager 消费 sampled texture binding；texture binding 独立跟踪版本和 generation |
+| Unity SRP Core | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `OccluderDepthPyramidKernels.compute` 从 source depth 构建 far-depth pyramid；`InstanceOcclusionCullingKernels.compute` 读取 pyramid 和 sphere bounds，写 visible indices 与 indirect count |
+
+这些实现证明 sampled texture 是 compute binding 的常规资源，且 bind group 应按资源变化失效；
+它们不证明 Galacean 当前 Grasslands 一定会从 Hi-Z 获得整帧收益。
+
+#### 方案比较
+
+| 方案 | 模块边界 | 代价 | 决策 |
+| --- | --- | --- | --- |
+| `ComputePass.setTexture(name, texture)` 复用 ShaderLab reflection | 用户仍只接触 Galacean texture；RHI 负责 native texture/sampler | 首个切片只支持 sampled texture，不含 uniform/storage texture | 采用 |
+| compute 复用完整 `ShaderData`/render program binding | 可一次覆盖 uniform 与所有资源 | 把 material/renderer property 生命周期引入 compute，扩大本阶段接口与缓存语义 | 不采用 |
+| Surface 直接取得 `GPUTexture` 并创建 raw bind group | demo 改动最少 | 绕过 RHI、ShaderLab reflection、引用计数和多后端边界 | 禁止 |
+
+#### 第一切片：sampled texture 契约
+
+1. `ComputePass.setTexture` 按 ShaderLab property name 解析已经过宏条件过滤的 resource；
+   texture 必须属于同一 engine。core 持有引用直到替换或 pass 销毁。
+2. 中立 platform 接口只传递 reflected texture binding 和 platform texture。WebGPU program
+   从构造时 reflection 取得 sampler binding、sample type、view dimension 和 comparison；
+   不让这些 WebGPU 细节泄漏到 core 或 example。
+3. pipeline layout 同时包含 sampled texture、sampler 和 storage buffer。数量必须先对照实际
+   `maxSampledTexturesPerShaderStage`、`maxSamplersPerShaderStage` 和既有 storage limit；
+   超限显式失败。
+4. bind group 只有绑定对象或 texture 的 `bindingKey` 变化时重建。相同 texture 重绑不增加
+   native bind group churn；dispatch 前缺少任何 reflected resource 仍显式失败。
+5. 本切片不支持 compute uniform、storage texture、external texture 或多个 bind group；
+   遇到这些能力继续显式报错，不加入 fallback。
+6. runtime ShaderLab 与 `.wgslc` 使用相同 reflection 和 RHI 路径。`ShaderLoader` 重新注册
+   WGSL target 时必须保留 compute instructions/workgroup size，不能把预构建 compute pass
+   降级为仅 vertex/fragment target。
+
+验收门：
+
+- ShaderLab runtime codegen 和 JSON round-trip 后的 `.wgslc` 各执行一次 sampled texture
+  compute，真实读回 storage buffer；输出必须与上传 texel 一致。
+- 覆盖未绑定 texture、跨 engine texture、同一 texture 重绑、替换 texture、缺少 storage
+  buffer 和销毁引用。
+- WebGPU shader compilation、validation 和 page error 为 0；WebGL compute 仍显式不支持。
+- 第一切片只证明 RHI 资源能力，不报告 Grasslands FPS。
+
+#### 后续 Surface Hi-Z 契约
+
+1. Depth prepass 完成后，以当前 camera depth 构建 conservative far-depth pyramid；WebGPU
+   reversed-Z、render-target origin、mip 尺寸和奇数边界必须从真实 attachment 契约派生。
+2. occlusion 只追加到现有 6 个非投影 fine-cull batch：输入为当前 35,280 个 frustum survivor，
+   输出仍写同 6 个 indirect record，不增加 Forward draw，也不触碰 tree/rock Shadow stream。
+3. bounds 使用现有 conservative world sphere；投影 rect 与 mip 选择不能写 Grasslands 专用
+   阈值。相交、near-plane 和无法证明遮挡的实例一律保留，禁止 false negative。
+4. 第一版使用同帧 depth，调度点位于 Depth prepass 与 Forward 之间；不使用上一帧历史，
+   因而不引入重投影、迟滞或 camera teleport 特例。若 render pipeline 无法提供该调度点，
+   先补中立 pass 依赖，不能从 demo 手动 flush native encoder。
+5. parent/candidate 固定相机先读取 6 个 indirect count 并截图；至少一个有遮挡视角必须减少
+   survivor，关闭 occlusion 必须恢复视锥结果，所有固定相机不得出现缺失植被轮廓。
+6. 性能继续使用交替区块和逐 pass GPU timestamp。保留要求完整场景 Forward 与 total
+   improvement 中位数为正且 IQR 不跨 0，FPS 为正，P95 不稳定退化超过 2%；失败则撤销
+   Surface consumer，只保留已独立验收的 sampled-texture RHI。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
