@@ -738,9 +738,9 @@ cascade 会重复消费主相机 stream 中的整批索引。
    GPU-driven renderer 在 shadow queue 构建时得到 cascade index，以及引擎已经计算好的最多
    10 个 `ShadowSliceData.cullPlanes`。Engine 创建方式、材质、ShaderLab 和用户渲染 API 不变。
 2. 新建等价 shadow-only renderer/primitive 的版本出现可见差异；最终实验复用原 Forward
-   renderer 及其同一个 `Primitive`，只在 shadow preparation 时重绑 cascade instance-buffer
-   offset 与 indirect-record offset，camera preparation 时恢复 Forward stream。WebGL2 保持
-   原 renderer 路径。
+   renderer 及其同一个 `Primitive`，通过每次 indirect draw 的 internal binding 覆盖选择
+   cascade instance-buffer offset 与 indirect-record offset，不修改再恢复 renderer 的共享
+   Forward stream。WebGL2 保持原 renderer 路径。
 3. CPU 仍决定 category、density、主相机 max-distance、cell LOD 与 temporal cross-fade。
    shadow command 只消费这些已选择 range 的 source prefix，因此首版不会扩大或缩小当前主
    相机可见集合；它只在每级 cascade 内按实例保守球再裁剪。
@@ -749,15 +749,15 @@ cascade 会重复消费主相机 stream 中的整批索引。
    90 个 `COLOR_0` accessor 均为 normalized `UNSIGNED_SHORT`，实际 red 最大值为 1；无
    vertex color 时 shader wind weight 也为 1。
 5. 一个 ShaderLab compute 模块执行 counter reset、最多 10 平面 workgroup compaction 和
-   indirect finalize。LOD fade 与 cell hue 使用 Forward direct-copy 相同的 packed metadata；
+   indirect finalize。同一个 workgroup 只读取一次 source instance，再分别写入最多四个
+   cascade slot；LOD fade 与 cell hue 使用 Forward direct-copy 相同的 packed metadata，
    不写原生 WGSL。
-6. shadow output 只按 cast-shadow prototype LOD 容量分配。四级 cascade 在一个大 output
-   buffer 和一个 indirect buffer 中各占固定区域，每级另有独立参数与 atomic counter buffer。
-   同一 cascade 的 planes、CPU range generation、wind 与 renderer tuning 都未改变时，复用
-   该 slot，不重复 dispatch。
-7. 参数不能靠同一 frame 内连续 `GPUQueue.writeBuffer` 覆盖同一 buffer：这些写入发生在
-   command buffer 执行前，四级 dispatch 会读到最终值。每级独立参数 buffer 是正确性约束，
-   不是性能特例。
+6. shadow output 只按 cast-shadow prototype LOD 容量分配。四级 cascade 在一个大 output、
+   parameter、counter 和 indirect buffer 中各占固定且不重叠的区域；CPU range、四级 planes、
+   wind 与 renderer tuning 都未改变时，复用全部 slot，不重复 dispatch。
+7. 参数不能靠同一 frame 内连续 `GPUQueue.writeBuffer` 覆盖同一地址：这些写入发生在
+   command buffer 执行前，多个 dispatch 会读到最终值。最终实现只上传一次包含四个不重叠
+   slice block 的 parameter buffer，并在一次 cull dispatch 中同时消费四级快照。
 8. 任一 storage binding、workgroup 数或 batch 数超过实际 device limit 时显式失败，不退回
    隐藏的 per-cell 路径。
 
@@ -835,14 +835,15 @@ API：
 2. `RenderContext` 增加 internal `shadowCascadeIndex`，非 shadow 阶段固定为 `-1`。它只标识当前
    消费的 view，不负责持有 Surface 资源。
 3. `MeshRenderer` 的默认 draw binding 保持现状；可选 internal provider 按 cascade 返回
-   `Primitive + indirect buffer/offset`。ShadowCaster 读取该 binding，Forward 继续读取现有
+   `Primitive + indirect buffer/offset + vertex-buffer binding overrides`。ShadowCaster
+   复用原 Forward `Primitive`，仅在本次 draw 替换实例 binding；Forward 继续读取现有
    primitive 与 indirect binding，不再通过“重绑后恢复”修改 renderer 的共享状态。
 4. provider 由共享它的 renderers 持有；pass 按对象 identity 去重后只调用一次
    `prepareShadowViews`。core 不知道 Surface category、range、instance layout 或 compute
    shader。
 5. Surface provider 为四级 cascade 使用四组稳定 parameter/counter/output/indirect 区域。
-   首版仍可编码四组 `reset → cull → finalize`，但它们必须全部发生在第一个 shadow render
-   之前；是否实际合并成一个 native compute pass，以 RHI instrumentation 为准。
+   一组 `reset → cull → finalize` 在第一个 shadow render 前同时产生四个 slot；RHI
+   instrumentation 必须证明三个 dispatch 合并在一个 native compute pass 中。
 6. 任一 cascade 缺少已完成的 stream 时显式报错，不复用 Forward count，不静默退回 per-cell
    renderer。
 
@@ -859,6 +860,34 @@ native `beginComputePass`、dispatch、四级 survivor、实际索引工作与 f
   固定相机、移动相机和 wind 最大 inspector 值截图对父提交；GPU/page diagnostic 为 0。
 - 性能：父提交/候选按 settled 与连续相机移动交替采样；同时报告每级 survivor、实际索引工作、
   dispatch、frame p50/p95。若整帧没有稳定收益，撤销实现并保留实验记录。
+
+#### 全级联预计算实现检查点
+
+实际实现没有新建 renderer、mesh 或 shader source。Core shadow binding 在单次 indirect draw
+上覆盖实例 vertex buffer，WebGPU RHI 使用原 Forward `Primitive` 的 vertex layout 与
+pipeline；Surface ShaderLab compute 以一次 source read 同时判定四组 plane，生成四个
+output/indirect slot。四级 shadow 更新只编码 `reset → cull → finalize` 三个 dispatch，
+固定相机、range、light、wind 强度与 scale 均不变时复用已有 slot，不再 dispatch。
+
+Chromium 147、Metal ANGLE、1280×720 CSS viewport、device scale factor 2 下，最终候选相对
+独立父提交的固定相机归一化 RGB RMSE 为 0.000270020；921,600 个像素中 8 个超过 2% 通道
+差异（0.000868%）。Surface 总数 291,069、可见数 169,199、76 个 indirect renderer batch、
+category/LOD 计数均一致，GPU/page diagnostic 为 0。WebGL2 固定相机对父提交逐像素一致。
+E2E 观察到 7 个 ShaderLab compute pipeline；多个 dispatch 共用 native compute pass，
+settled 后的额外 250 ms 没有新增 dispatch。
+
+父提交与候选按页面顺序交替采样三轮，每轮稳定后采 4.5 秒：
+
+| 场景 | 父提交 FPS 中位数 | 候选 FPS 中位数 | FPS 差值 | 父提交 P95 | 候选 P95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hero` 固定相机 | 38.97 | 39.11 | +0.38% | 41.4 ms | 41.6 ms |
+| first-person 连续前移 | 39.12 | 39.48 | +0.94% | 41.7 ms | 41.6 ms |
+
+六组配对的方向并不一致，两个中位差值都小于该环境的页面间波动，因此这里只确认当前
+Grasslands 3,078 个 shadow 候选规模没有可分辨的整帧提升，也没有观察到旧四 slot 原型的
+移动 P95 退化；不能把该结果写成性能胜出。实现作为多 view GPU stream、per-draw binding 与
+ShaderLab compute 基础能力保留，后续性能结论必须增加 shadow-caster 规模并补移动真机 GPU
+timestamp，不能用本表外推。
 
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
