@@ -70,7 +70,10 @@ await page.addInitScript(() => {
   });
   let counts = createEmptyCounts();
   const bufferIds = new WeakMap();
+  const bufferDescriptors = new WeakMap();
+  const indirectDrawTargets = new Map();
   let nextBufferId = 1;
+  let activeDevice;
   const nativeObjectIds = new WeakMap();
   let nextNativeObjectId = 1;
   const stateCommandKeys = new Set(stateCommandNames);
@@ -115,9 +118,52 @@ await page.addInitScript(() => {
   window.__webgpuRenderCommandProbe = {
     reset() {
       counts = createEmptyCounts();
+      indirectDrawTargets.clear();
     },
     snapshot() {
       return structuredClone(counts);
+    },
+    async readIndirectRecords() {
+      const targets = [...indirectDrawTargets.values()];
+      if (!activeDevice || targets.length === 0) return [];
+      const recordByteLength = 5 * Uint32Array.BYTES_PER_ELEMENT;
+      const readback = activeDevice.createBuffer({
+        label: "Grasslands indirect probe readback",
+        size: targets.length * recordByteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const encoder = activeDevice.createCommandEncoder({ label: "Grasslands indirect probe copy" });
+      for (let index = 0; index < targets.length; index++) {
+        encoder.copyBufferToBuffer(
+          targets[index].buffer,
+          targets[index].offset,
+          readback,
+          index * recordByteLength,
+          recordByteLength
+        );
+      }
+      activeDevice.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const records = targets.map((target, index) => {
+        const wordOffset = index * 5;
+        const descriptor = bufferDescriptors.get(target.buffer);
+        return {
+          pass: target.pass,
+          buffer: target.bufferId,
+          bufferLabel: descriptor?.label ?? target.buffer.label ?? "unlabeled",
+          bufferSize: descriptor?.size ?? null,
+          offset: target.offset,
+          indexCount: words[wordOffset],
+          instanceCount: words[wordOffset + 1],
+          firstIndex: words[wordOffset + 2],
+          baseVertex: words[wordOffset + 3] | 0,
+          firstInstance: words[wordOffset + 4]
+        };
+      });
+      readback.unmap();
+      readback.destroy();
+      return records;
     }
   };
 
@@ -127,6 +173,17 @@ await page.addInitScript(() => {
   }
 
   const devicePrototype = constructors.GPUDevice.prototype;
+  const createBuffer = devicePrototype.createBuffer;
+  devicePrototype.createBuffer = function (descriptor) {
+    activeDevice = this;
+    const buffer = createBuffer.call(this, descriptor);
+    bufferDescriptors.set(buffer, {
+      label: descriptor.label || "",
+      size: Number(descriptor.size),
+      usage: descriptor.usage
+    });
+    return buffer;
+  };
   const createRenderPipeline = devicePrototype.createRenderPipeline;
   devicePrototype.createRenderPipeline = function (descriptor) {
     counts.createRenderPipeline++;
@@ -203,6 +260,20 @@ await page.addInitScript(() => {
       if (typeof command !== "function") continue;
       pass[name] = (...args) => {
         incrementCommand(label, name, args);
+        if (name === "drawIndexedIndirect") {
+          let bufferId = bufferIds.get(args[0]);
+          if (bufferId === undefined) {
+            bufferId = nextBufferId++;
+            bufferIds.set(args[0], bufferId);
+          }
+          const offset = args[1] ?? 0;
+          indirectDrawTargets.set(`${label}:${bufferId}:${offset}`, {
+            pass: label,
+            buffer: args[0],
+            bufferId,
+            offset
+          });
+        }
         if (stateCommandKeys.has(name)) {
           const stateSlot = stateCommandSlot(name, args);
           const signature = stateCommandSignature(args);
@@ -273,6 +344,7 @@ const frameTimes = await page.evaluate(
 const sorted = [...frameTimes].sort((left, right) => left - right);
 const totalDuration = frameTimes.reduce((sum, value) => sum + value, 0);
 const counts = await page.evaluate(() => window.__webgpuRenderCommandProbe.snapshot());
+const indirectDrawRecords = await page.evaluate(() => window.__webgpuRenderCommandProbe.readIndirectRecords());
 const perSubmission = Object.fromEntries(
   Object.entries(counts.commands).map(([name, count]) => [name, count / counts.submissions])
 );
@@ -340,6 +412,7 @@ const report = {
     bufferWrites: summarizeBufferWrites(counts.bufferWrites, counts.submissions),
     byPass: selectPassCounts(counts.byPass)
   },
+  indirectDrawRecords,
   perSubmission: {
     createRenderPipeline: counts.createRenderPipeline / counts.submissions,
     createBindGroup: counts.createBindGroup / counts.submissions,
@@ -377,6 +450,7 @@ console.log(
             lodCounts: surface.lodCounts
           },
           gpuTiming: report.gpuTiming,
+          indirectDrawRecords: report.indirectDrawRecords,
           bufferWrites: report.totals.bufferWrites,
           perSubmission: report.perSubmission,
           diagnostics: report.diagnostics
