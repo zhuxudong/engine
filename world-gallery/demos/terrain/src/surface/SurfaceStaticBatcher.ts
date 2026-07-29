@@ -643,8 +643,8 @@ export class SurfaceStaticBatcher {
   /**
    * Applies live category tint and scale to every compacted renderer.
    * @param tint Linear RGB category multiplier.
-  * @param scale Uniform prototype scale multiplier.
-  */
+   * @param scale Uniform prototype scale multiplier.
+   */
   setTuning(tint: readonly [number, number, number], scale: number): void {
     if (this._fineCullState && this._fineCullState.runtimeScale !== scale) {
       this._fineCullState.runtimeScale = scale;
