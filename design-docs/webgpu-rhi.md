@@ -2673,6 +2673,95 @@ depth-prepass IQR 均重叠。total 一轮退化 `1.3%`、一轮改善 `19.6%`�
 attachment 与稳定 GPU 时间收益建立对应关系，因此未满足预设保留门。runtime、测试断言和
 未被其他 consumer 使用的 activation options 已全部撤销，保留本客观记录；不形成移动端结论。
 
+### Grasslands 植被风场 GPU 化筛选
+
+#### 当前工作量与实测
+
+`terrain-horizon` 的当前可见实例为 172,366：grass 139,378、flower 14,489、tree 14,878、
+rock 3,129、shrub 492。对应 manifest 总量为 grass 254,518、flower 18,052、tree 14,878、
+rock 3,129、shrub 492。实际 GLB accessor 显示三个 grass prototype 分别为
+`64/32、116/58、66/46` vertices/triangles；大型 tree LOD0 约 7,800–11,500 vertices，
+LOD2 降到约 1,000–2,000 vertices。
+
+同一 Chromium 147 / ANGLE Metal 页面、1024×576 CSS、DPR 2、WebGPU depth priming、
+`terrain-horizon`，关闭 architecture/cloud/post-process/scene animation 后，对每个 workload
+交替执行 5 轮 wind off/on，每块采 32 个 one-shot timestamp。配对块的 `wind on - off`
+中位数如下：
+
+| workload | total | Shadow | depth-prepass | Forward |
+| --- | ---: | ---: | ---: | ---: |
+| all | `+0.116 ms` | `+0.526 ms` | `-0.034 ms` | `+0.040 ms` |
+| grass + flower | `-0.852 ms` | 无独立项 | `+0.285 ms` | `+0.235 ms` |
+| grass | `-0.225 ms` | 无独立项 | `-0.448 ms` | `+0.236 ms` |
+| tree | `-1.400 ms` | `-0.618 ms` | `-0.271 ms` | `-0.527 ms` |
+
+grass Forward 是唯一多数配对轮次为正的项，但它的 total 与 depth-prepass 同时向相反方向
+变化；其他 workload 的 pass 和 total 方向也不一致。wind 会改变真实顶点位置和 alpha-test
+覆盖，当前结果无法把时间变化单独归因到 noise 算术，也不能证明把风场搬到 compute 会改善
+整帧。
+
+#### 固定上游源码与语义边界
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `WavingGrassInput.hlsl` 在每个 vertex 计算四组 wave，vertex color/root weight 决定幅度；DepthOnly 复用同一函数。SpeedTree7/8 也按 leaf/frond/branch/global wind 逐顶点计算 |
+| Unreal Engine | `7deeb413d3dc1fc034f48d1aacc0861301829d32` | `SpeedTreeCommon.ush` 使用 instance position phase 和 vertex leaf/branch 数据执行逐顶点 wind，并提供 quality tier |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | GLSL/WGSL tree 示例都以 model translation 产生实例 phase，以 vertex height 产生 root/top weight，在 vertex shader 变形 |
+| LayaAir | `722a2847902909c952257d6dd50e5e32f5b07bff` | `GrassShaderVS.vs` 在草实例 pivot 采三组 sine，再以 vertex y 作为 root weight，仍在 vertex shader 执行 |
+| Three.js / Babylon.js | `c6620cee323838ead14035b37008f401edbc2ea1` / `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | 对 core 与 examples 的限定检索没有得到可对应的内建植被风场实现；该结果不代表仓库全局不存在 |
+
+Galacean 当前 Forward、Depth 和 Shadow 使用同一 ShaderLab placement：noise 输入包含变形前
+vertex world position、time 与 instance phase，最终位移还乘以 UV/root lock/vertex color
+形成的逐顶点权重。因此每实例只预计算一个位移会改变现有画面语义；若把逐顶点结果写入
+storage，则需要每帧按 mesh vertex 扩张数据与 dispatch，且仍要在所有 draw pass 读取。
+
+该候选未通过两个实现门：没有保持现有逐顶点语义的低成本 compute 边界，也没有稳定的整帧
+收益证据。本阶段不实现 per-instance wind precompute，不据此推导移动端结论。
+
+### ShaderLab 运行时与预构建产物启动切片
+
+#### 现有代码事实
+
+1. Grasslands 当前在 engine 创建后调用 `registerTerrainShaderIncludes()`，再同步执行
+   `Shader.create(Terrain.shader)` 与 `Shader.create(Surface.shader)`；WebGL2 和 WebGPU 都走
+   runtime ShaderLab parse/codegen。
+2. `packages/loader/src/ShaderLoader.ts` 已支持 `.shaderc` 和 `.wgslc`。页面始终请求
+   `.shaderc` URL；当 engine backend 为 WebGPU 时 loader 改为同名 `.wgslc`，并校验
+   `platformTarget` 后通过 `Shader._createFromPrecompiled` 注册 reflection 和 instructions。
+3. `world-gallery` 的 `predev`、`pretypecheck:terrain` 会运行同一 bundler CLI，分别输出
+   `Terrain/Surface.shaderc` 与 `Terrain/Surface.wgslc` 到 `public/compiledShaders/terrain`。
+   当前四个产物 raw 总量为 646,412 bytes。
+4. 预构建产物只跳过 ShaderLab parse/codegen；第一次具体 macro variant 的 WebGL shader
+   compile/link 或 WebGPU shader module/pipeline 创建仍在真实 draw 时发生。因此本切片只能
+   衡量注册和页面启动，不宣称改善稳态 FPS。
+
+#### 模块边界
+
+1. 新增 terrain example 内部的 shader 注册模块。它只接受 engine、URL query 和两份 source：
+   `runtime` 调用现有 `Shader.create`；`precompiled` 用 `AssetType.Shader` 加载两份
+   `/compiledShaders/terrain/*.shaderc`。调用方不接触 `.wgslc`，后端选择继续完全由
+   `ShaderLoader` 完成。
+2. 默认模式保持 `runtime`，默认 backend 保持 WebGL2。只有显式
+   `?shaderMode=precompiled` 使用预构建产物；backend 仍由页面刷新创建新的
+   `WebGLEngine` 或 `WebGPUEngine`，不在同一 canvas 切换 context。
+3. Terrain 与 Surface 的 ShaderLab name、材质、宏、render state、reflection 和用户 API
+   不变。禁止直接 import JSON、直接创建 WGSL shader、跳过真实 draw 或为某一后端复制 shader。
+4. debug API 暴露只读启动快照：mode、backend、两份实际 artifact URL、shader registration
+   duration 和从 module boot 到 scene ready 的 duration。该探针不参与每帧路径。
+
+#### 验收门
+
+1. WebGL2 runtime/precompiled 与 WebGPU runtime/precompiled 四种页面都必须真实渲染
+   Grasslands；固定 `first-person/hero/terrain-horizon/valley-overview` 截图按现有像素门
+   比较，Surface category/LOD/instance/draw 计数一致，page/GPU diagnostic 为 0。
+2. 网络审计必须证明 runtime 模式没有请求 `.shaderc/.wgslc`；precompiled WebGL2 请求两份
+   `.shaderc`，precompiled WebGPU 从同一调用入口实际请求两份 `.wgslc`。
+3. 每种 backend 用新的 page/context 交替采 runtime/precompiled，至少 10 轮；分别报告 shader
+   registration 与 scene ready 的 median/p95。浏览器 HTTP cache 状态必须固定并单独说明，不把
+   网络下载差异伪装成 compiler 差异。
+4. 分别报告 Terrain/Surface 的 `.shaderc`、`.wgslc` raw/gzip 体积。性能结果只保留客观数据；
+   即使预构建启动更慢也不绕过 loader 或修改默认模式。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
