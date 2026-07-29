@@ -1322,6 +1322,70 @@ profiler 单测 8/8、13 个 package 类型构建、module 构建、benchmark E2
 WebGPU E2E 1/1 通过。固定页恢复 169,199 个可见实例、76 个 indirect renderer batch，截图和
 diagnostic 验证没有发现渲染回归。
 
+### 半精度实例顶点流设计
+
+#### 现有瓶颈与移动端边界
+
+逐 pass timestamp 已把 Grasslands 的稳定 category 成本定位到草地 Forward，以及树木、岩石
+Shadow。现有 finite surface 的 source、Forward output 和四级 Shadow output 都使用 64-byte
+实例记录：四个 `vec4<f32>` 分别保存位置/metadata、旋转、缩放/wind 和颜色。位置与 packed
+metadata 需要保持 f32；后三组数值分别是单位四元数、有限缩放/wind 和颜色，允许单独验证
+binary16 精度。
+
+把 Surface 加入现有 depth-prepass 不能形成 depth priming：Galacean `DepthOnlyPass` 写入独立
+depth texture，Forward 随后清理并使用 camera color target 自己的 depth attachment。Unity URP
+固定源码 `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` 也把 MSAA 列为 depth priming 的不支持条件，
+并明确 Android、iOS、Apple TV 只有 Forced 模式才执行。Grasslands 默认 4x MSAA，因此本阶段
+不增加一个无法被 Forward early depth 消费的 Surface pass。
+
+WebGPU 规范的
+[`GPUVertexFormat`](https://gpuweb.github.io/gpuweb/#enumdef-gpuvertexformat) 原生包含
+`float16x2`/`float16x4`，并允许 float vertex format 输入到同分量数的 `vecN<f32>`；不要求
+`shader-f16` optional feature。WGSL
+[`pack2x16float`](https://gpuweb.github.io/gpuweb/wgsl/#pack2x16float-builtin) 将两个 f32
+转换为一个包含 IEEE-754 binary16 位模式的 u32。固定本地上游中，Three.js
+`c6620cee323838ead14035b37008f401edbc2ea1` 的 `WebGPUAttributeUtils`、PlayCanvas
+`332a922d2dcf48bf3c774d296c999c69581d3d2c` 的 `WebgpuVertexBufferLayout` 和 Babylon.js
+`d9ae931f9eb24fc5a5c152b33923e5015311b0ad` 的 WebGPU constants 都直接映射
+`float16x2`/`float16x4`。
+
+#### 方案比较
+
+| 方案 | 模块边界 | 每实例字节 | 代价 | 决策 |
+| --- | --- | ---: | --- | --- |
+| 保持四个 f32 vec4 | 不改接口 | 64 | 继续支付完整 storage 写入和实例顶点读取 | 基线 |
+| 三组数据改成 u32 attributes，vertex shader 手动 unpack | 不新增 vertex format | 40 | Surface ShaderLab 输入改成 backend packing 细节，每个 raster pass 增加解包代码 | 不采用 |
+| 新增中立 float16 vertex format，compute 写 packed storage | ShaderLab attribute 仍为 vec4；packing 留在数据生产与 RHI layout | 40 | 旋转/缩放/颜色产生 binary16 量化 | 实验 |
+
+采用方案只增加 `Float16Vector2`、`Float16Vector4` 两个中立 vertex format。WebGPU 分别映射
+`float16x2`、`float16x4`；WebGL2 映射 `HALF_FLOAT`，WebGL1 在绑定边界显式报不支持。该
+format 不改变 ShaderLab attribute 类型或 public renderer/material API。
+
+#### 实现契约
+
+1. finite WebGPU static source atlas 继续保存 64-byte f32 authoring record，避免把编译数据、
+   CPU culling 与本阶段混在一起。compute Forward/Shadow output 改为 40 bytes：
+   `vec4<f32>` position/metadata 加三个 `vec4<f16>` vertex attribute。
+2. ShaderLab compute 通过现有 `packHalf2x16` 语义写入 `array<uint>`；WGSL codegen 必须映射为
+   `pack2x16float`。不得提交手写 WGSL。GLES artifact 和 WebGL2 direct surface 不调用该
+   compute builtin。
+3. `SurfaceInstancedMesh` 显式接收 f32 或 f16 layout。WebGL2、streamed/coverage surface 和
+   非 static renderer 继续使用原 64-byte layout；只有 WebGPU finite static compaction
+   选择 40-byte layout。Engine 初始化、example backend query、材质和 Surface ShaderLab
+   render pass 不变。
+4. position xyz、24-bit packed metadata、LOD fade 和 cell hue 保持 f32；只量化旋转、原始实例
+   scale/wind 与颜色。runtime category scale 和材质参数仍使用 uniform f32。
+5. capacity 校验分别使用 source 64-byte stride 与 output 40-byte stride。Forward 和四级
+   Shadow override 必须共享相同 packed layout；禁止依赖 `shader-f16` 或桌面专有 feature。
+6. 单元测试覆盖两个后端 format 映射、WebGL1 显式失败、WGSL pack builtin 和 40-byte storage
+   地址。`.wgslc` 必须含合法 `pack2x16float`，Grasslands runtime ShaderLab 也必须真实编译。
+7. 正确性门为 WebGL2 父提交逐像素不变；WebGPU 固定/移动/wind 最大截图、category/LOD/count、
+   四级 shadow indirect 和 diagnostic 保持一致，并单独报告量化像素差。
+8. 性能使用父提交与候选的独立页面，按 `all/no_grass/no_tree/no_rock` 读取 Forward/Shadow
+   pass timestamp，并报告 storage 预算。配对差中位数必须为正且 IQR 不跨 0，frame P95 不得
+   稳定退化超过 2%；未通过则撤销 Surface consumer，只保留有独立测试的中立 RHI format 与
+   ShaderLab codegen 能力。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
