@@ -23,7 +23,14 @@ export async function createTerrainEngine(
   const backend = resolveTerrainBackend(location.search);
   const configuration = { canvas, shaderCompiler: new ShaderCompiler() };
   const engine =
-    backend === "webgpu" ? await WebGPUEngine.create(configuration) : await WebGLEngine.create(configuration);
+    backend === "webgpu"
+      ? await WebGPUEngine.create({
+          ...configuration,
+          graphicDeviceOptions: {
+            enableGPUTiming: new URLSearchParams(location.search).get("gpuTiming") === "1"
+          }
+        })
+      : await WebGLEngine.create(configuration);
   return { engine, backend };
 }
 

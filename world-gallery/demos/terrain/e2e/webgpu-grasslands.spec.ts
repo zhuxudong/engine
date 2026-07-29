@@ -80,9 +80,15 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   });
   page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
 
-  await page.goto("/demos/terrain/grasslands/?backend=webgl2", { waitUntil: "networkidle" });
+  await page.goto("/demos/terrain/grasslands/?backend=webgl2&gpuTiming=1", { waitUntil: "networkidle" });
   await page.waitForFunction(() => window.terrainDebug?.ready === true);
   await expect(page.locator("#status")).toContainText("webgl2");
+  expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming())).toEqual({
+    supported: false,
+    enabled: false,
+    latestSample: null,
+    droppedSampleCount: 0
+  });
   await page.evaluate(() => {
     window.grasslandsDebug!.setScene({ animation: false });
   });
@@ -94,6 +100,33 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   await page.waitForFunction(() => window.terrainDebug?.ready === true);
   await expect(page.locator("#status")).toContainText("webgpu");
   expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(webglTimeOrigin);
+  const gpuTimingSupported = await page.evaluate(
+    () => window.grasslandsDebug!.inspectGPUTiming().supported
+  );
+  expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().enabled)).toBe(
+    gpuTimingSupported
+  );
+  if (gpuTimingSupported) {
+    expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample)).toBeNull();
+    expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.durationMs ?? 0)
+      )
+      .toBeGreaterThan(0);
+    expect(
+      await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample!.passCount)
+    ).toBeGreaterThan(0);
+    const initialSubmissionId = await page.evaluate(
+      () => window.grasslandsDebug!.inspectGPUTiming().latestSample!.submissionId
+    );
+    expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.submissionId ?? 0)
+      )
+      .toBeGreaterThan(initialSubmissionId);
+  }
 
   await page.evaluate(() => {
     window.grasslandsDebug!.setScene({ animation: false });

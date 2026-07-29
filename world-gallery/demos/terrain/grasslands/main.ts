@@ -118,6 +118,22 @@ declare global {
       inspectClouds(): ReturnType<GrasslandsCloudSystem["inspect"]>;
       /** Returns authored architecture placement and renderer counts. */
       inspectArchitecture(): { readonly placements: number; readonly renderers: number };
+      /** Returns optional non-blocking GPU timestamp state. */
+      inspectGPUTiming(): {
+        readonly supported: boolean;
+        readonly enabled: boolean;
+        readonly latestSample: {
+          readonly submissionId: number;
+          readonly passCount: number;
+          readonly durationMs: number;
+        } | null;
+        readonly droppedSampleCount: number;
+      };
+      /**
+       * Requests one GPU timestamp measurement for the next command submission.
+       * @returns True when a new sample was queued.
+       */
+      requestGPUTimingSample(): boolean;
       /** Returns the active first-person ground-follow state. */
       getFirstPerson(): TerrainFirstPersonSnapshot;
       /**
@@ -323,6 +339,16 @@ async function boot(): Promise<void> {
       placements: architecture.placements,
       renderers: architecture.renderers
     }),
+    inspectGPUTiming: () => {
+      const timing = engine.gpuTiming;
+      return {
+        supported: timing.supported,
+        enabled: timing.enabled,
+        latestSample: timing.latestSample ? { ...timing.latestSample } : null,
+        droppedSampleCount: timing.droppedSampleCount
+      };
+    },
+    requestGPUTimingSample: () => engine.gpuTiming.requestSample(),
     getFirstPerson: () => firstPerson.snapshot,
     setFirstPersonEyeHeight: (height) => firstPerson.setEyeHeight(height),
     setFirstPersonMoveSpeed: (speed) => firstPerson.setMoveSpeed(speed),
