@@ -920,6 +920,24 @@ backend-specific material API。
 5. WebGL2 与 WebGPU 固定相机截图都须保持像素等价，Surface category/LOD/count 不变；构建
    产物必须同时验证 runtime ShaderLab 与 `.wgslc`。任一后端无稳定收益或出现画面差异时撤销。
 
+#### 实验检查点：不保留
+
+首个实现直接复用 `MATERIAL_HAS_*` 时，included PBR shader library 也会读取这些 macro 并切换
+额外材质语义；它们不是单纯的 Surface resource-presence 开关，不能复用。改用
+`MATERIAL_SURFACE_HAS_*` 隔离语义后，三路同时专用化的 WebGPU 固定相机截图仍有 147,943 /
+921,600 像素超过 2% 阈值（16.05%）。逐路二分确认偏差只在缺失 normal texture 的分支：
+恢复现有 1×1 normal fallback 采样、只专用化 metallic-smoothness 与 occlusion 后，WebGPU
+截图仅 5 个像素超过 2%（normalized RMSE 0.000143），WebGL2 为 0 个像素超过 2%
+（normalized RMSE 0.00000236）。该结果只定位到 normal specialization 边界；尚无证据区分
+常量 normal 与 texture sample 的数值语义差异、以及条件资源布局差异，不能把任一项写成根因。
+
+在只专用化 metallic-smoothness 与 occlusion 的画面等价版本上，WebGPU 固定相机 3 轮 ABBA
+候选/父提交中位 FPS 为 43.92/43.78（+0.33%），P95 为 33.4/33.7 ms；连续移动 2 轮 ABBA
+中位 FPS 为 37.93/36.91（+2.76%），但 P95 为 40.5/34.9 ms（+16.05%）。所有页面
+diagnostic 为 0，实例、category、LOD 与 renderer batch 计数一致。固定场景收益低于波动且移动
+尾延迟恶化，未通过性能门；实现代码全部撤销，仅保留本检查点。因为 WebGPU 已失败，不再把
+WebGL2 性能测量误写成通过依据。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
