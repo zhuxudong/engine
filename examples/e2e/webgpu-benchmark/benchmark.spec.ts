@@ -52,6 +52,17 @@ test("the same candidate workload renders on WebGL2 and WebGPU", async (
   expect(webGPU.errors).toEqual([]);
   expect(webGPU.snapshot.candidates).toBe(webGL2.snapshot.candidates);
   expect(webGPU.snapshot.candidates).toBe(comparisonCandidates);
+  expect(webGL2.snapshot.gpuTimingSupported).toBe(false);
+  if (webGPU.snapshot.gpuTimingSupported) {
+    expect(webGPU.snapshot.gpuSampleCount).toBeGreaterThanOrEqual(5);
+    expect(webGPU.snapshot.gpuFrameTimeMedian).toBeGreaterThan(0);
+    expect(webGPU.snapshot.gpuFrameTimeP95).toBeGreaterThan(0);
+    expect(webGPU.snapshot.gpuPassCount).toBeGreaterThan(0);
+  } else {
+    expect(webGPU.snapshot.gpuSampleCount).toBe(0);
+    expect(webGPU.snapshot.gpuFrameTimeMedian).toBeNull();
+    expect(webGPU.snapshot.gpuFrameTimeP95).toBeNull();
+  }
 
   await attachBackendScreenshot(testInfo, "webgl2", webGL2.screenshot);
   await attachBackendScreenshot(testInfo, "webgpu", webGPU.screenshot);
@@ -115,6 +126,27 @@ async function waitUntilReady(page: Page): Promise<void> {
   await expect
     .poll(() => page.evaluate(() => window.webgpuBenchmark!.inspect().sampleCount))
     .toBeGreaterThanOrEqual(30);
+  const gpuTimingSupported = await page.evaluate(
+    () => window.webgpuBenchmark!.inspect().gpuTimingSupported
+  );
+  if (gpuTimingSupported) {
+    await collectGPUTimingSamples(page, 5);
+  }
+}
+
+async function collectGPUTimingSamples(page: Page, targetCount: number): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate((target) => {
+        const benchmark = window.webgpuBenchmark!;
+        const sampleCount = benchmark.inspect().gpuSampleCount;
+        if (sampleCount < target) {
+          benchmark.requestGPUTimingSample();
+        }
+        return sampleCount;
+      }, targetCount)
+    )
+    .toBeGreaterThanOrEqual(targetCount);
 }
 
 async function captureBackend(

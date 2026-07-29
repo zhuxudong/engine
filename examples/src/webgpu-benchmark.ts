@@ -34,6 +34,18 @@ export interface WebGPUBenchmarkSnapshot {
   readonly frameTimeP95: number;
   /** Number of frame-time samples currently available. */
   readonly sampleCount: number;
+  /** Whether the selected adapter exposes WebGPU timestamp queries. */
+  readonly gpuTimingSupported: boolean;
+  /** Median GPU command-submission span in milliseconds, or null when unavailable. */
+  readonly gpuFrameTimeMedian: number | null;
+  /** 95th-percentile GPU command-submission span in milliseconds, or null when unavailable. */
+  readonly gpuFrameTimeP95: number | null;
+  /** Number of distinct asynchronous GPU timing samples currently available. */
+  readonly gpuSampleCount: number;
+  /** Native render and compute passes covered by the latest GPU timing sample. */
+  readonly gpuPassCount: number;
+  /** GPU timing samples skipped rather than blocking on readback. */
+  readonly gpuDroppedSampleCount: number;
 }
 
 /** Runtime API used by deterministic benchmark automation. */
@@ -47,6 +59,11 @@ export interface WebGPUBenchmarkApi {
   setCandidates(candidates: number): void;
   /** Clears the rolling frame-time window. */
   resetSamples(): void;
+  /**
+   * Requests one GPU timestamp measurement for the next command submission.
+   * @returns True when a new sample was queued.
+   */
+  requestGPUTimingSample(): boolean;
   /**
    * Returns the current backend, workload, and timing distribution.
    * @returns Current benchmark snapshot.
@@ -130,7 +147,10 @@ async function boot(): Promise<void> {
   const configuration = { canvas: "canvas", shaderCompiler: new ShaderCompiler() };
   const engine =
     backend === "webgpu"
-      ? await WebGPUEngine.create(configuration)
+      ? await WebGPUEngine.create({
+          ...configuration,
+          graphicDeviceOptions: { enableGPUTiming: true }
+        })
       : await WebGLEngine.create(configuration);
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
@@ -150,7 +170,9 @@ async function boot(): Promise<void> {
   renderer.setMaterial(new Material(engine, Shader.create(shaderSource)));
 
   const frameTimes: number[] = [];
+  const gpuFrameTimes: number[] = [];
   let lastFrameTime = performance.now();
+  let lastGpuSubmissionId = 0;
   const api: WebGPUBenchmarkApi = {
     ready: true,
     setCandidates(candidates) {
@@ -161,17 +183,29 @@ async function boot(): Promise<void> {
     },
     resetSamples() {
       frameTimes.length = 0;
+      gpuFrameTimes.length = 0;
       lastFrameTime = performance.now();
+      lastGpuSubmissionId = engine.gpuTiming.latestSample?.submissionId ?? 0;
+      engine.gpuTiming.requestSample();
     },
+    requestGPUTimingSample: () => engine.gpuTiming.requestSample(),
     inspect() {
       const sorted = [...frameTimes].sort((left, right) => left - right);
+      const sortedGpu = [...gpuFrameTimes].sort((left, right) => left - right);
       const medianFrameTime = percentile(sorted, 0.5);
+      const latestGpuSample = engine.gpuTiming.latestSample;
       return {
         backend,
         candidates: mesh.instanceCount,
         fpsMedian: medianFrameTime > 0 ? 1000 / medianFrameTime : 0,
         frameTimeP95: percentile(sorted, 0.95),
-        sampleCount: sorted.length
+        sampleCount: sorted.length,
+        gpuTimingSupported: engine.gpuTiming.supported,
+        gpuFrameTimeMedian: sortedGpu.length > 0 ? percentile(sortedGpu, 0.5) : null,
+        gpuFrameTimeP95: sortedGpu.length > 0 ? percentile(sortedGpu, 0.95) : null,
+        gpuSampleCount: sortedGpu.length,
+        gpuPassCount: latestGpuSample?.passCount ?? 0,
+        gpuDroppedSampleCount: engine.gpuTiming.droppedSampleCount
       };
     }
   };
@@ -196,6 +230,14 @@ async function boot(): Promise<void> {
       frameTimes.shift();
     }
     lastFrameTime = now;
+    const gpuSample = engine.gpuTiming.latestSample;
+    if (gpuSample && gpuSample.submissionId !== lastGpuSubmissionId) {
+      lastGpuSubmissionId = gpuSample.submissionId;
+      gpuFrameTimes.push(gpuSample.durationMs);
+      if (gpuFrameTimes.length > sampleWindowSize) {
+        gpuFrameTimes.shift();
+      }
+    }
     requestAnimationFrame(sampleFrames);
   };
   requestAnimationFrame(sampleFrames);
