@@ -664,20 +664,14 @@ export class SurfaceWorld {
           frustumContainment = intersectsCameraFrustum ? ContainmentType.Contains : ContainmentType.Disjoint;
         }
       }
-      const visibleInstanceCount = batch.activeLod >= 0 && intersectsCameraFrustum ? batch.instanceCount : 0;
-      const shadowInstanceCount = batch.activeLod >= 0 ? batch.instanceCount : 0;
+      const visibleInstanceCount =
+        batch.activeLod >= 0 && intersectsCameraFrustum ? batch.instanceCount : 0;
       const fineCulling =
         visibleInstanceCount > 0 &&
         (frustumContainment === ContainmentType.Intersects ||
           centreDistance + batch.placementRadius + batch.fineCullRadius * batch.maxInstanceScale * runtimeScale >
             batch.prototype.maxDistance * this._tuning.lod.distanceScale);
-      setStaticBatchLodState(
-        batch,
-        visibleInstanceCount,
-        shadowInstanceCount,
-        this._manifest.lodCrossfadeDuration,
-        fineCulling
-      );
+      setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration, fineCulling);
     }
     this._staticBatchGroup?.flush();
     this._coverageStreamer?.update(this._tuning);
@@ -852,7 +846,6 @@ function updateBatchLod(
 function setStaticBatchLodState(
   batch: SurfaceBatch,
   visibleInstanceCount: number,
-  shadowInstanceCount: number,
   duration: number,
   fineCulling: boolean
 ): void {
@@ -860,38 +853,21 @@ function setStaticBatchLodState(
   const remaining = transition && duration > 0 ? 1 - transition.elapsed / duration : 0;
   for (const batcher of batch.staticBatchers) {
     let instanceCount = 0;
-    let shadowCount = 0;
     let lodFade = 1;
-    if (transition) {
-      if (batcher.lodIndex === transition.from) {
-        lodFade = remaining;
-      } else if (batcher.lodIndex === transition.to) {
-        lodFade = -remaining;
-      }
-    }
     if (visibleInstanceCount > 0) {
       if (transition) {
         if (batcher.lodIndex === transition.from) {
           instanceCount = visibleInstanceCount;
+          lodFade = remaining;
         } else if (batcher.lodIndex === transition.to) {
           instanceCount = visibleInstanceCount;
+          lodFade = -remaining;
         }
       } else if (batcher.lodIndex === batch.activeLod) {
         instanceCount = visibleInstanceCount;
       }
     }
-    if (shadowInstanceCount > 0) {
-      if (transition) {
-        if (batcher.lodIndex === transition.from) {
-          shadowCount = shadowInstanceCount;
-        } else if (batcher.lodIndex === transition.to) {
-          shadowCount = shadowInstanceCount;
-        }
-      } else if (batcher.lodIndex === batch.activeLod) {
-        shadowCount = shadowInstanceCount;
-      }
-    }
-    batcher.setRangeVisibleCounts(batch.range.offset, instanceCount, shadowCount, lodFade, fineCulling);
+    batcher.setRangeVisibleCount(batch.range.offset, instanceCount, lodFade, fineCulling);
   }
 }
 

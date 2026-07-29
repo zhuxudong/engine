@@ -5,19 +5,14 @@ import {
   BufferBindFlag,
   BufferMesh,
   BufferUsage,
-  CollisionUtil,
   Engine,
   Entity,
   FrustumFace,
   GLTFResource,
   MeshRenderer,
   ModelMesh,
-  PlaneIntersectionType,
-  Primitive,
-  Vector3,
-  VertexBufferBinding
+  Vector3
 } from "@galacean/engine";
-import type { MeshRendererShadowViewBinding, MeshRendererShadowViewProvider, Plane } from "@galacean/engine";
 import type { SurfaceCategory, SurfaceCellRange } from "./SurfaceContract";
 import {
   createSurfaceInstancedMesh,
@@ -55,9 +50,7 @@ export interface SurfaceStaticBatcherRange {
 interface SurfaceStaticRangeState {
   readonly range: SurfaceCellRange;
   readonly sourceInstanceOffset: number;
-  readonly shadowBounds: BoundingBox | null;
   visibleCount: number;
-  shadowVisibleCount: number;
   lodFade: number;
   fineCulling: boolean;
 }
@@ -91,32 +84,7 @@ interface SurfaceFineCullBatchState {
 
 interface InternalIndirectDrawRenderer extends MeshRenderer {
   _setIndirectDrawBuffer(subMeshIndex: number, buffer: Buffer | null, offset?: number): void;
-  _setShadowViewProvider(provider: MeshRendererShadowViewProvider | null): void;
 }
-
-interface InternalBufferMesh extends BufferMesh {
-  readonly _primitive: Primitive;
-}
-
-interface SurfaceShadowSlice {
-  readonly cullPlaneCount: number;
-  readonly cullPlanes: readonly Plane[];
-}
-
-interface SurfaceShadowBatch {
-  readonly plan: SurfaceStaticBatchPlan;
-  readonly batcher: SurfaceStaticBatcher;
-  readonly outputInstanceOffset: number;
-  readonly indirectWordOffset: number;
-  readonly indirectRecordCount: number;
-}
-
-interface SurfaceShadowRendererBinding {
-  readonly batchIndex: number;
-  readonly cascades: readonly (readonly MeshRendererShadowViewBinding[])[];
-}
-
-const SURFACE_SHADOW_CASCADE_CAPACITY = 4;
 
 /**
  * Owns one storage atlas and one compute dispatch for all finite prototype LOD batches.
@@ -132,7 +100,6 @@ export class SurfaceStaticBatchGroup {
   private readonly _fineCullParameters = new Float32Array(SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT * 4);
   private readonly _compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>;
   private readonly _batchers: readonly SurfaceStaticBatcher[];
-  private readonly _shadowViewProvider: SurfaceStaticShadowViewProvider | null;
   private _fineCullParametersInitialized = false;
 
   private constructor(
@@ -142,8 +109,7 @@ export class SurfaceStaticBatchGroup {
     fineCullBatchData: Float32Array,
     fineCullParameterBuffer: Buffer,
     compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>,
-    batchers: readonly SurfaceStaticBatcher[],
-    shadowViewProvider: SurfaceStaticShadowViewProvider | null
+    batchers: readonly SurfaceStaticBatcher[]
   ) {
     this._commandBuffer = commandBuffer;
     this._commands = commands;
@@ -152,7 +118,6 @@ export class SurfaceStaticBatchGroup {
     this._fineCullParameterBuffer = fineCullParameterBuffer;
     this._compactionPasses = compactionPasses;
     this._batchers = batchers;
-    this._shadowViewProvider = shadowViewProvider;
   }
 
   /**
@@ -335,13 +300,6 @@ export class SurfaceStaticBatchGroup {
         plan.fineCulling ? fineCullStates[plan.fineCullBatchIndex] : null
       )
     );
-    const shadowViewProvider = SurfaceStaticShadowViewProvider.create(
-      engine,
-      sourceBuffer,
-      plans,
-      batchers,
-      compactionPasses
-    );
     return new SurfaceStaticBatchGroup(
       commandBuffer,
       commands,
@@ -349,8 +307,7 @@ export class SurfaceStaticBatchGroup {
       fineCullBatchData,
       fineCullParameterBuffer,
       compactionPasses,
-      batchers,
-      shadowViewProvider
+      batchers
     );
   }
 
@@ -454,259 +411,6 @@ export class SurfaceStaticBatchGroup {
 }
 
 /**
- * Builds cascade-specific instance streams from the same range AABBs used by the WebGL2 renderers.
- *
- * @internal
- */
-class SurfaceStaticShadowViewProvider implements MeshRendererShadowViewProvider {
-  private readonly _commandBuffer: Buffer;
-  private readonly _commands: Uint32Array;
-  private readonly _commandSnapshot: Uint32Array;
-  private readonly _outputBuffer: Buffer;
-  private readonly _indirectBuffer: Buffer;
-  private readonly _shadowBatches: readonly SurfaceShadowBatch[];
-  private readonly _bindings = new Map<MeshRenderer, SurfaceShadowRendererBinding>();
-  private readonly _viewInstanceCounts: Uint32Array;
-  private readonly _copyPass: ReturnType<typeof createSurfaceStaticCompactionPasses>["shadowCopy"];
-  private readonly _outputInstanceCapacity: number;
-  private readonly _indirectWordCapacity: number;
-  private _commandWordCount = 0;
-  private _prepared = false;
-
-  /**
-   * Creates a provider only when at least one compacted renderer casts directional shadows.
-   * @param engine Engine owning the caster-only cascade resources.
-   * @param sourceBuffer Immutable finite-surface instance atlas.
-   * @param plans Static prototype LOD plans.
-   * @param batchers Runtime range state aligned with `plans`.
-   * @param compactionPasses Shared ShaderLab compute passes.
-   * @returns Configured provider, or null when no static renderer casts shadows.
-   */
-  static create(
-    engine: Engine,
-    sourceBuffer: Buffer,
-    plans: readonly SurfaceStaticBatchPlan[],
-    batchers: readonly SurfaceStaticBatcher[],
-    compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>
-  ): SurfaceStaticShadowViewProvider | null {
-    return plans.some((plan) => plan.renderSources.some((source) => source.rendererSpec.castShadows))
-      ? new SurfaceStaticShadowViewProvider(engine, sourceBuffer, plans, batchers, compactionPasses)
-      : null;
-  }
-
-  private constructor(
-    engine: Engine,
-    sourceBuffer: Buffer,
-    plans: readonly SurfaceStaticBatchPlan[],
-    batchers: readonly SurfaceStaticBatcher[],
-    compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>
-  ) {
-    const shadowBatches: SurfaceShadowBatch[] = [];
-    let outputInstanceCapacity = 0;
-    let indirectRecordCapacity = 0;
-    let copyCommandCapacity = 0;
-    for (let index = 0; index < plans.length; index++) {
-      const plan = plans[index];
-      const casterSources = plan.renderSources.filter((source) => source.rendererSpec.castShadows);
-      if (casterSources.length === 0) continue;
-      const batchCapacity = plan.ranges.reduce((count, item) => count + item.range.count, 0);
-      const batchIndirectRecordCount = casterSources.reduce(
-        (count, source) => count + source.sourceMesh.subMeshes.length,
-        0
-      );
-      shadowBatches.push({
-        plan,
-        batcher: batchers[index],
-        outputInstanceOffset: outputInstanceCapacity,
-        indirectWordOffset: indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
-        indirectRecordCount: batchIndirectRecordCount
-      });
-      outputInstanceCapacity += batchCapacity;
-      indirectRecordCapacity += batchIndirectRecordCount;
-      copyCommandCapacity += plan.ranges.length * SURFACE_SHADOW_CASCADE_CAPACITY;
-    }
-
-    const batchViewCapacity = shadowBatches.length * SURFACE_SHADOW_CASCADE_CAPACITY;
-    validateShadowCapacity(
-      engine,
-      outputInstanceCapacity,
-      indirectRecordCapacity,
-      batchViewCapacity,
-      copyCommandCapacity
-    );
-
-    this._shadowBatches = shadowBatches;
-    this._outputInstanceCapacity = outputInstanceCapacity;
-    this._indirectWordCapacity = indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
-    this._commands = new Uint32Array(
-      (1 + batchViewCapacity + copyCommandCapacity) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE
-    );
-    this._commandSnapshot = new Uint32Array(this._commands.length);
-    this._commandBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, this._commands, BufferUsage.Dynamic);
-    this._outputBuffer = new Buffer(
-      engine,
-      BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
-      outputInstanceCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_INSTANCE_STRIDE,
-      BufferUsage.Dynamic
-    );
-
-    const indirectArguments = new Uint32Array(
-      indirectRecordCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE
-    );
-    for (let cascadeIndex = 0; cascadeIndex < SURFACE_SHADOW_CASCADE_CAPACITY; cascadeIndex++) {
-      for (const batch of shadowBatches) {
-        let wordOffset = cascadeIndex * this._indirectWordCapacity + batch.indirectWordOffset;
-        for (const source of batch.plan.renderSources) {
-          if (!source.rendererSpec.castShadows) continue;
-          for (const subMesh of source.sourceMesh.subMeshes) {
-            indirectArguments[wordOffset] = subMesh.count;
-            indirectArguments[wordOffset + 2] = subMesh.start;
-            wordOffset += SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
-          }
-        }
-      }
-    }
-    this._indirectBuffer = new Buffer(
-      engine,
-      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
-      indirectArguments,
-      BufferUsage.Dynamic
-    );
-    this._viewInstanceCounts = new Uint32Array(batchViewCapacity);
-    this._copyPass = compactionPasses.shadowCopy;
-    this._copyPass.setBuffer("sourceInstances", sourceBuffer);
-    this._copyPass.setBuffer("compactionCommands", this._commandBuffer);
-    this._copyPass.setBuffer("outputInstances", this._outputBuffer);
-    this._copyPass.setBuffer("indirectArguments", this._indirectBuffer);
-    this._createRendererBindings();
-  }
-
-  /** @inheritdoc */
-  prepareShadowViews(_context: unknown, shadowSlices: unknown, shadowSliceCount: number): void {
-    if (shadowSliceCount > SURFACE_SHADOW_CASCADE_CAPACITY) {
-      throw new RangeError(
-        `[SurfaceStaticShadowViewProvider] ${shadowSliceCount} cascades exceed ` +
-          `${SURFACE_SHADOW_CASCADE_CAPACITY} prepared streams.`
-      );
-    }
-
-    const slices = shadowSlices as readonly SurfaceShadowSlice[];
-    const batches = this._shadowBatches;
-    const batchCount = batches.length;
-    const batchViewCount = batchCount * shadowSliceCount;
-    const commands = this._commands;
-    const commandStart = 1 + batchViewCount;
-    const viewInstanceCounts = this._viewInstanceCounts;
-    viewInstanceCounts.fill(0);
-    let copyCommandCount = 0;
-    for (let cascadeIndex = 0; cascadeIndex < shadowSliceCount; cascadeIndex++) {
-      const slice = slices[cascadeIndex];
-      for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
-        const batch = batches[batchIndex];
-        const viewIndex = cascadeIndex * batchCount + batchIndex;
-        const batchWordOffset = (1 + viewIndex) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
-        const copyWordOffset = (commandStart + copyCommandCount) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
-        const writtenCommandCount = batch.batcher._writeShadowCopyCommands(
-          commands,
-          copyWordOffset,
-          cascadeIndex * this._outputInstanceCapacity + batch.outputInstanceOffset,
-          slice
-        );
-        let instanceCount = 0;
-        for (let commandIndex = 0; commandIndex < writtenCommandCount; commandIndex++) {
-          instanceCount += commands[copyWordOffset + commandIndex * SURFACE_COMPACTION_COMMAND_WORD_STRIDE + 2];
-        }
-        commands[batchWordOffset] = cascadeIndex * this._indirectWordCapacity + batch.indirectWordOffset;
-        commands[batchWordOffset + 1] = batch.indirectRecordCount;
-        commands[batchWordOffset + 2] = instanceCount;
-        commands[batchWordOffset + 3] = 0;
-        viewInstanceCounts[viewIndex] = instanceCount;
-        copyCommandCount += writtenCommandCount;
-      }
-    }
-    commands[0] = batchViewCount;
-    commands[1] = copyCommandCount;
-    commands[2] = 0;
-    commands[3] = batchViewCount;
-
-    const usedWordCount = (commandStart + copyCommandCount) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
-    let changed = !this._prepared || usedWordCount !== this._commandWordCount;
-    if (!changed) {
-      const snapshot = this._commandSnapshot;
-      for (let index = 0; index < usedWordCount; index++) {
-        if (commands[index] !== snapshot[index]) {
-          changed = true;
-          break;
-        }
-      }
-    }
-    if (!changed) return;
-
-    this._commandSnapshot.set(commands.subarray(0, usedWordCount));
-    this._commandBuffer.setData(commands, 0, 0, usedWordCount);
-    this._commandWordCount = usedWordCount;
-    this._copyPass.dispatch(Math.max(batchViewCount, copyCommandCount));
-    this._prepared = true;
-  }
-
-  /** @inheritdoc */
-  getShadowViewBinding(
-    renderer: MeshRenderer,
-    shadowCascadeIndex: number,
-    subMeshIndex: number
-  ): MeshRendererShadowViewBinding | null {
-    const rendererBinding = this._bindings.get(renderer);
-    if (!rendererBinding) {
-      throw new Error("[SurfaceStaticShadowViewProvider] renderer is not registered.");
-    }
-    const viewIndex = shadowCascadeIndex * this._shadowBatches.length + rendererBinding.batchIndex;
-    if (this._viewInstanceCounts[viewIndex] === 0) return null;
-    const binding = rendererBinding.cascades[shadowCascadeIndex]?.[subMeshIndex];
-    if (!binding) {
-      throw new Error(
-        `[SurfaceStaticShadowViewProvider] missing cascade ${shadowCascadeIndex}, sub-mesh ${subMeshIndex} binding.`
-      );
-    }
-    binding.primitive.instanceCount = this._viewInstanceCounts[viewIndex];
-    return binding;
-  }
-
-  private _createRendererBindings(): void {
-    for (let batchIndex = 0; batchIndex < this._shadowBatches.length; batchIndex++) {
-      const batch = this._shadowBatches[batchIndex];
-      const renderers = batch.batcher._getRenderers();
-      for (let sourceIndex = 0; sourceIndex < batch.plan.renderSources.length; sourceIndex++) {
-        const source = batch.plan.renderSources[sourceIndex];
-        if (!source.rendererSpec.castShadows) continue;
-        const renderer = renderers[sourceIndex] as InternalIndirectDrawRenderer;
-        const forwardMesh = renderer.mesh as InternalBufferMesh;
-        const instanceBindingIndex = forwardMesh.vertexBufferBindings.length - 1;
-        const cascadeBindings: MeshRendererShadowViewBinding[][] = [];
-        for (let cascadeIndex = 0; cascadeIndex < SURFACE_SHADOW_CASCADE_CAPACITY; cascadeIndex++) {
-          const primitive = createShadowPrimitive(
-            renderer.engine,
-            forwardMesh._primitive,
-            instanceBindingIndex,
-            new VertexBufferBinding(
-              this._outputBuffer,
-              SURFACE_INSTANCE_STRIDE,
-              (cascadeIndex * this._outputInstanceCapacity + batch.outputInstanceOffset) * SURFACE_INSTANCE_STRIDE
-            )
-          );
-          cascadeBindings.push(
-            source.sourceMesh.subMeshes.map(() => ({
-              primitive
-            }))
-          );
-        }
-        this._bindings.set(renderer, { batchIndex, cascades: cascadeBindings });
-        renderer._setShadowViewProvider(this);
-      }
-    }
-  }
-}
-
-/**
  * Retains visibility and renderer state for one prototype LOD inside a shared compaction group.
  *
  * @internal
@@ -799,17 +503,15 @@ export class SurfaceStaticBatcher {
   }
 
   /**
-   * Updates one cell's retained Forward and Shadow density prefixes.
+   * Updates one cell's retained density prefix.
    * @param rangeOffset Stable source offset identifying the manifest range.
-   * @param visibleCount Number of sorted source records retained for Forward rendering.
-   * @param shadowVisibleCount Number retained before independent light-view culling.
+   * @param visibleCount Number of sorted source records retained for rendering.
    * @param lodFade Signed LOD cross-fade factor shared by the retained records.
    * @param fineCulling Whether this range crosses the camera-distance boundary.
    */
-  setRangeVisibleCounts(
+  setRangeVisibleCount(
     rangeOffset: number,
     visibleCount: number,
-    shadowVisibleCount: number,
     lodFade: number = 1,
     fineCulling: boolean = false
   ): void {
@@ -818,30 +520,17 @@ export class SurfaceStaticBatcher {
     if (!Number.isInteger(visibleCount) || visibleCount < 0 || visibleCount > state.range.count) {
       throw new RangeError(`[SurfaceStaticBatcher] invalid visible count ${visibleCount} for range ${rangeOffset}`);
     }
-    if (!Number.isInteger(shadowVisibleCount) || shadowVisibleCount < 0 || shadowVisibleCount > state.range.count) {
-      throw new RangeError(
-        `[SurfaceStaticBatcher] invalid shadow visible count ${shadowVisibleCount} for range ${rangeOffset}`
-      );
-    }
     if (!Number.isFinite(lodFade) || lodFade < -1 || lodFade > 1) {
       throw new RangeError(`[SurfaceStaticBatcher] invalid LOD fade ${lodFade} for range ${rangeOffset}`);
     }
     const nextFineCulling = this.fineCulling && visibleCount > 0 && fineCulling;
-    if (
-      state.visibleCount === visibleCount &&
-      state.shadowVisibleCount === shadowVisibleCount &&
-      state.lodFade === lodFade &&
-      state.fineCulling === nextFineCulling
-    ) {
+    if (state.visibleCount === visibleCount && state.lodFade === lodFade && state.fineCulling === nextFineCulling) {
       return;
     }
-    const forwardChanged =
-      state.visibleCount !== visibleCount || state.lodFade !== lodFade || state.fineCulling !== nextFineCulling;
     state.visibleCount = visibleCount;
-    state.shadowVisibleCount = shadowVisibleCount;
     state.lodFade = lodFade;
     state.fineCulling = nextFineCulling;
-    if (forwardChanged) this._dirty = true;
+    this._dirty = true;
   }
 
   /** @internal */
@@ -870,45 +559,6 @@ export class SurfaceStaticBatcher {
     if (this._fineCullState) {
       writeFineCullBatchData(output, [this._fineCullState]);
     }
-  }
-
-  /** @internal */
-  _getRenderers(): readonly MeshRenderer[] {
-    return this._renderers;
-  }
-
-  /**
-   * Writes contiguous copy commands for ranges visible to one directional shadow slice.
-   * @param commands Shared u32 command array.
-   * @param wordOffset First word available for range-copy commands.
-   * @param outputInstanceOffset First output instance reserved for this cascade batch.
-   * @param slice Existing core shadow slice whose planes define WebGL2 range visibility.
-   * @returns Number of copy commands written.
-   * @internal
-   */
-  _writeShadowCopyCommands(
-    commands: Uint32Array,
-    wordOffset: number,
-    outputInstanceOffset: number,
-    slice: SurfaceShadowSlice
-  ): number {
-    let commandCount = 0;
-    let instanceCount = 0;
-    for (const state of this._ranges.values()) {
-      const count = state.shadowVisibleCount;
-      const bounds = state.shadowBounds;
-      if (count === 0 || !bounds || !isSurfaceShadowRangeVisible(bounds, slice.cullPlaneCount, slice.cullPlanes)) {
-        continue;
-      }
-      const commandOffset = wordOffset + commandCount * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
-      commands[commandOffset] = state.sourceInstanceOffset;
-      commands[commandOffset + 1] = outputInstanceOffset + instanceCount;
-      commands[commandOffset + 2] = count;
-      commands[commandOffset + 3] = this._packedMetadata ? encodeLodFade(state.lodFade) + 1 : 0;
-      instanceCount += count;
-      commandCount++;
-    }
-    return commandCount;
   }
 
   /**
@@ -1018,27 +668,12 @@ function createBatcher(
   fineCullState: SurfaceFineCullBatchState | null
 ): SurfaceStaticBatcher {
   const { prototype, lod, ranges, renderSources } = plan;
-  const casterPrototypeRadius = renderSources.reduce(
-    (radius, source) =>
-      source.rendererSpec.castShadows
-        ? Math.max(radius, boundsRadius(transformSurfaceBounds(source.sourceMesh.bounds, source.rendererSpec)))
-        : radius,
-    -1
-  );
   const states = new Map<number, SurfaceStaticRangeState>();
   for (const item of ranges) {
     states.set(item.range.offset, {
       range: item.range,
       sourceInstanceOffset: sourceOffsets.get(item.range.offset)!,
-      shadowBounds:
-        casterPrototypeRadius >= 0
-          ? expandRangeBoundsByRadius(
-              item.range.bounds,
-              casterPrototypeRadius * item.maxScale * SURFACE_RUNTIME_SCALE_MAX
-            )
-          : null,
       visibleCount: 0,
-      shadowVisibleCount: 0,
       lodFade: 1,
       fineCulling: false
     });
@@ -1174,91 +809,6 @@ function validateGroupCapacity(
   }
 }
 
-function validateShadowCapacity(
-  engine: Engine,
-  outputInstanceCapacity: number,
-  indirectRecordCapacity: number,
-  batchViewCapacity: number,
-  copyCommandCapacity: number
-): void {
-  const limits = engine.computeCapabilities;
-  const storageBindings = [
-    ["shadow output instance", outputInstanceCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_INSTANCE_STRIDE],
-    [
-      "shadow indirect argument",
-      indirectRecordCapacity *
-        SURFACE_SHADOW_CASCADE_CAPACITY *
-        SURFACE_COMPACTION_INDIRECT_WORD_STRIDE *
-        Uint32Array.BYTES_PER_ELEMENT
-    ],
-    [
-      "shadow compaction command",
-      (1 + batchViewCapacity + copyCommandCapacity) *
-        SURFACE_COMPACTION_COMMAND_WORD_STRIDE *
-        Uint32Array.BYTES_PER_ELEMENT
-    ]
-  ] as const;
-  for (const [name, byteLength] of storageBindings) {
-    if (byteLength > limits.maxStorageBufferBindingSize) {
-      throw new RangeError(
-        `[SurfaceStaticShadowViewProvider] ${name} storage requires ${byteLength} bytes, exceeding ` +
-          `${limits.maxStorageBufferBindingSize}.`
-      );
-    }
-  }
-  const dispatchWorkgroups = Math.max(batchViewCapacity, copyCommandCapacity);
-  if (dispatchWorkgroups > limits.maxWorkgroupsPerDimension) {
-    throw new RangeError(
-      `[SurfaceStaticShadowViewProvider] compaction requires ${dispatchWorkgroups} workgroups, exceeding ` +
-        `${limits.maxWorkgroupsPerDimension}.`
-    );
-  }
-}
-
-/**
- * Tests a range AABB against the exact plane-side convention used by core directional shadows.
- * @param bounds Complete world-space range bounds.
- * @param cullPlaneCount Number of active planes at the beginning of `cullPlanes`.
- * @param cullPlanes Core-provided directional shadow culling planes.
- * @returns True when the range may contribute to the shadow slice.
- * @internal
- */
-export function isSurfaceShadowRangeVisible(
-  bounds: BoundingBox,
-  cullPlaneCount: number,
-  cullPlanes: readonly Plane[]
-): boolean {
-  for (let planeIndex = 0; planeIndex < cullPlaneCount; planeIndex++) {
-    if (CollisionUtil.intersectsPlaneAndBox(cullPlanes[planeIndex], bounds) === PlaneIntersectionType.Back) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function createShadowPrimitive(
-  engine: Engine,
-  source: Primitive,
-  instanceBindingIndex: number,
-  instanceBinding: VertexBufferBinding
-): Primitive {
-  const primitive = new Primitive(engine);
-  primitive.enableVAO = source.enableVAO;
-  const vertexElements = source.vertexElements;
-  for (let index = 0; index < vertexElements.length; index++) {
-    primitive.setVertexElement(index, vertexElements[index]);
-  }
-  const vertexBufferBindings = source.vertexBufferBindings;
-  for (let index = 0; index < vertexBufferBindings.length; index++) {
-    primitive.setVertexBufferBinding(
-      index,
-      index === instanceBindingIndex ? instanceBinding : vertexBufferBindings[index]
-    );
-  }
-  primitive.setIndexBufferBinding(source.indexBufferBinding);
-  return primitive;
-}
-
 function mergedRangeBounds(ranges: readonly SurfaceStaticBatcherRange[], prototypeBounds: BoundingBox): BoundingBox {
   const minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
   const maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
@@ -1272,13 +822,6 @@ function mergedRangeBounds(ranges: readonly SurfaceStaticBatcherRange[], prototy
     maximum.z = Math.max(maximum.z, bounds.max.z);
   }
   return new BoundingBox(minimum, maximum);
-}
-
-function expandRangeBoundsByRadius(bounds: SurfaceCellRange["bounds"], radius: number): BoundingBox {
-  return new BoundingBox(
-    new Vector3(bounds[0] - radius, bounds[1] - radius, bounds[2] - radius),
-    new Vector3(bounds[3] + radius, bounds[4] + radius, bounds[5] + radius)
-  );
 }
 
 function boundsRadius(bounds: BoundingBox): number {
