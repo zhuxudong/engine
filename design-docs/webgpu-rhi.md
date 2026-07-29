@@ -1217,6 +1217,65 @@ WebGPU 父提交与候选使用独立页面，交替执行 10 个配对区块。
 现有证据不能证明提前 alpha-test 在该 Metal/Chromium 设备的 Grasslands Forward pass 上带来
 可分辨收益，也不能外推其他移动 GPU。
 
+### One-shot per-pass GPU timing 设计
+
+#### 当前缺口与规范边界
+
+现有 `WebGPUTimingProfiler` 只创建两个 timestamp query：首个 native pass 写 begin，所有后续
+pass 重写同一个 end，因此 `GPUTimingSample` 只有 submission span 和 pass count。它可以比较
+整个 Surface 开关，却不能区分 shadow、depth prepass、forward、final blit 或 compute；前述
+alpha-test 实验的 +0.013 ms 配对差也无法定位到 Forward。
+
+[WebGPU 规范](https://gpuweb.github.io/gpuweb/#dom-gpurenderpassdescriptor-timestampwrites) 为每个
+render/compute pass descriptor 提供一个可选 begin index 和一个可选 end index，timestamp 值以
+纳秒表示但其确定方式由实现定义。当前规范要求 index 小于 query-set count，并限制一个 query
+set 最多 4096 项。规范没有保证连续 pass 不重叠，因此 pass duration 之和不能替代 submission
+span。
+
+#### 业界源码事实
+
+| 实现 | 本地版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `WebgpuGpuProfiler` 为最多 1024 个命名 slot 各分配 begin/end pair；异步读取每个 duration，同时用全部 pair 的最早与最晚 timestamp 计算 frame span，明确不累加可能重叠的 pass |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | render/compute 各有 `WebGPUTimestampQueryPool`，默认 2048 个 query；每个 render context 分配一对 index，批量 resolve 后异步 map |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `WebGPUDurationMeasure` 默认创建 2000 个 query；前两个用于 frame，后续按 pass 分配 begin/end pair，并把结果写入对应 performance counter |
+| webgpu-samples | `4181da1b8d4e3d4fe5ea52fc1150fe5200b87515` | `timestampQuery` 展示 feature gate、pass pair、resolve、copy 与异步 map 的完整最小链路，不提供引擎 pass 命名层 |
+
+这些实现证明 per-pass pair、异步批量读取与独立 frame span 是现成结构；固定容量、持续采样和
+自动聚合同名 pass 并不是 Galacean 首版必须照搬的策略。
+
+#### Galacean 契约
+
+1. `GPUTimingSample` 保留 `submissionId`、`passCount` 与 `durationMs`，新增只读
+   `passes: readonly GPUTimingPassSample[]`。每项包含 backend-neutral `name`、`kind`（render
+   或 compute）和 `durationMs`；用户渲染 API、材质、ShaderLab 与 backend 选择不变。
+2. core 在现有 `RenderContext.setRenderTarget` 调用点附带内部诊断名：`shadow`、
+   `depth-prepass`、`forward`、`ui` 与具体 blit 名。WebGL2 忽略该名称；WebGPU 只把它写入
+   native descriptor label 和 timing metadata，不能据此改变 pass 合并、load/store 或 draw。
+3. 连续 compute dispatch 继续共享当前 native compute pass，统一报告为 `compute`。首版不为
+   每个 ShaderLab compute program 强制结束 pass，否则测量会改变待测调度结构。
+4. 一次 one-shot 最多记录 64 个 native pass，即 128 个 query、1 KiB resolve 数据。超过容量
+   时丢弃整份 measurement 并增加 `droppedSampleCount`；禁止返回缺少尾部 pass 的 span。
+5. 每个 pass 使用独立 begin/end pair。`durationMs` 取全部合法 timestamp 的最早值到最晚值，
+   不累加 pass duration；单个 end 不大于 begin 时该 pass duration 为 0，整份 span 非正时不发布
+   sample。
+6. metadata 在 resolve 时快照，异步 map 完成后冻结 sample、passes 数组和每个 pass item；
+   staging pool 仍最多 3 个。没有显式 `requestSample()` 时不分配 metadata、不写 query、不
+   resolve，也不增加每帧工作。
+
+#### 验收与保留门槛
+
+- 单元测试覆盖 render/compute 名称与 query pair、span 不等于 pass 求和、无效 pair、64-pass
+  overflow、staging 饱和、one-shot 重置和 destroy。
+- design/core/WebGL/WebGPU 类型构建通过；WebGL2 的 `latestSample` 仍为 null。
+- WebGPU benchmark 与 Grasslands E2E 要求 `passes.length === passCount`、每项名称非空、
+  duration 非负，且 sample span 大于等于每个单 pass duration。
+- Grasslands 固定 hero 页面分别切换阴影、DepthTextureMode 和 Surface category，使用 pass
+  名称验证对应 native pass 的存在与消失；页面、Shader 与 GPU diagnostic 必须为 0。
+- profiler 空闲状态不得改变现有渲染与帧时间。逐 pass sampling 只用于显式 one-shot 诊断，
+  不把采样帧本身当作正常运行性能；若空闲仍有固定开销或采样结果无法稳定映射到真实 pass，
+  撤销实现并保留检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
