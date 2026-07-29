@@ -42,6 +42,7 @@ import { WebGPUShaderProgram } from "./WebGPUShaderProgram";
 import { WebGPUTexture2D } from "./WebGPUTexture2D";
 import { WebGPUTexture2DArray } from "./WebGPUTexture2DArray";
 import { WebGPUTextureCube } from "./WebGPUTextureCube";
+import { WebGPUTimingProfiler } from "./WebGPUTimingProfiler";
 
 /**
  * Options used to request and configure a WebGPU device.
@@ -55,6 +56,8 @@ export interface WebGPUGraphicDeviceOptions {
   requiredFeatures?: GPUFeatureName[];
   /** Required WebGPU limits. */
   requiredLimits?: Record<string, GPUSize64>;
+  /** Request optional non-blocking GPU timestamp collection. */
+  enableGPUTiming?: boolean;
   /** Canvas alpha compositing mode. */
   alphaMode?: GPUCanvasAlphaMode;
   /** Canvas color space. */
@@ -99,6 +102,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly computeCapabilities: ComputeCapabilities;
   /** Adapter description exposed for diagnostics. */
   readonly renderer: string;
+  /** Optional GPU timestamp collection state. */
+  readonly gpuTiming: WebGPUTimingProfiler;
 
   /** @internal */
   _currentBindShaderProgram: unknown;
@@ -124,6 +129,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     customStates?: Record<number, any>;
   };
   private readonly _mipmapGenerator: WebGPUMipmapGenerator;
+  private readonly _gpuTimingProfiler: WebGPUTimingProfiler;
   private readonly _defaultVertexBuffer: GPUBuffer;
   private readonly _usedPrograms = new Set<WebGPUShaderProgram>();
   private readonly _computePipelines = new Map<string, WebGPUComputePipelineState>();
@@ -155,6 +161,12 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this.canvasFormat = format;
     this.capability = new WebGPUCapability(device);
     this._mipmapGenerator = new WebGPUMipmapGenerator(device);
+    this._gpuTimingProfiler = new WebGPUTimingProfiler(
+      device,
+      adapter.features.has("timestamp-query"),
+      options.enableGPUTiming ?? false
+    );
+    this.gpuTiming = this._gpuTimingProfiler;
     const defaultVertexData = new ArrayBuffer(48);
     new Float32Array(defaultVertexData, 0, 4)[3] = 1;
     new Int32Array(defaultVertexData, 16, 4)[3] = 1;
@@ -232,6 +244,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       if (adapter.features.has(feature)) {
         requestedFeatures.add(feature);
       }
+    }
+    if (options.enableGPUTiming && adapter.features.has("timestamp-query")) {
+      requestedFeatures.add("timestamp-query");
     }
     const device = await adapter.requestDevice({
       requiredFeatures: Array.from(requestedFeatures),
@@ -468,7 +483,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
     this._endCurrentPass();
     if (this._commandEncoder) {
+      const timingReadback = this._gpuTimingProfiler.resolve(this._commandEncoder);
       this.device.queue.submit([this._commandEncoder.finish()]);
+      this._gpuTimingProfiler.readAfterSubmit(timingReadback);
       this._commandEncoder = null;
     }
     for (const program of this._usedPrograms) {
@@ -509,6 +526,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._destroyed = true;
       this._endCurrentPass();
       this._computePipelines.clear();
+      this._gpuTimingProfiler.destroy();
       this._mainDepthTexture?.destroy();
       this._defaultVertexBuffer.destroy();
       for (const buffer of this._retiredBuffers) {
@@ -603,6 +621,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     const descriptor = this._currentRenderTarget
       ? this._currentRenderTarget.createDescriptor(this._pendingClearFlags, this._pendingClearColor)
       : this._createMainRenderPassDescriptor();
+    this._gpuTimingProfiler.addTimestampWrites(descriptor);
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
@@ -621,9 +640,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._commandEncoder ??= this.device.createCommandEncoder({
       label: "Galacean WebGPU frame"
     });
-    return (this._computePass = this._commandEncoder.beginComputePass({
+    const descriptor: GPUComputePassDescriptor = {
       label: "Galacean compute pass"
-    }));
+    };
+    this._gpuTimingProfiler.addTimestampWrites(descriptor);
+    return (this._computePass = this._commandEncoder.beginComputePass(descriptor));
   }
 
   /**

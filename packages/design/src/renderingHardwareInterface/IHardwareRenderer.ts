@@ -32,6 +32,37 @@ export interface ComputeCapabilities {
 }
 
 /**
+ * Completed GPU timestamp measurement for one command submission.
+ */
+export interface GPUTimingSample {
+  /** Monotonic submission identifier assigned by the active backend. */
+  readonly submissionId: number;
+  /** Number of render and compute passes covered by the measurement. */
+  readonly passCount: number;
+  /** GPU span from the first pass beginning to the last pass ending, in milliseconds. */
+  readonly durationMs: number;
+}
+
+/**
+ * Backend-neutral GPU timestamp state.
+ */
+export interface GPUTiming {
+  /** Whether the adapter can expose timestamp queries. */
+  readonly supported: boolean;
+  /** Whether timestamp collection was enabled when the engine was created. */
+  readonly enabled: boolean;
+  /** Most recent asynchronously completed measurement. */
+  readonly latestSample: GPUTimingSample | null;
+  /** Measurements skipped because asynchronous readback capacity was exhausted. */
+  readonly droppedSampleCount: number;
+  /**
+   * Request one timestamp measurement for the next command submission.
+   * @returns True when a new sample was queued.
+   */
+  requestSample(): boolean;
+}
+
+/**
  * Hardware graphics API renderer.
  */
 export interface IHardwareRenderer {
@@ -43,6 +74,8 @@ export interface IHardwareRenderer {
   readonly maxUniformBlockSize: number;
   /** Compute support and device limits. */
   readonly computeCapabilities: ComputeCapabilities;
+  /** Optional GPU timestamp collection state. */
+  readonly gpuTiming: GPUTiming;
 
   /**
    * Create a backend compute program.

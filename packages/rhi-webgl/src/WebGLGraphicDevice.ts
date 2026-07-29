@@ -26,6 +26,7 @@ import {
 } from "@galacean/engine-core";
 import type {
   ComputeCapabilities,
+  GPUTiming,
   IHardwareRenderer,
   IPlatformComputeProgram,
   IPlatformPrimitive,
@@ -110,6 +111,14 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     maxStorageBufferBindingSize: 0,
     maxStorageBuffersPerStage: 0,
     recommendedWorkgroupSizeX: 1
+  };
+  /** Timestamp collection is not implemented by the WebGL backend. */
+  readonly gpuTiming: GPUTiming = {
+    supported: false,
+    enabled: false,
+    latestSample: null,
+    droppedSampleCount: 0,
+    requestSample: () => false
   };
 
   maxUniformBlockSize: number;
