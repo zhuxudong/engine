@@ -2029,7 +2029,7 @@ survivor count，不能再用来代替 indirect arguments 的真实值。
 | --- | --- | --- | --- |
 | vertex shader 把视锥外实例移出 clip space | 所有实例仍执行 vertex shader | 不减少草地 vertex/attribute 带宽 | 不采用 |
 | 引入 depth pyramid 与上一帧 Hi-Z occlusion | 可继续剔除遮挡实例 | 新增深度历史、重投影、迟滞与 false-negative 合同 | 后续独立阶段 |
-| 扩展现有 fine-cull compute，range 相交时执行 sphere-frustum test | 只增加 6 个 plane dot tests，并减少 output/Forward 实例 | 保持 coarse AABB 与 conservative sphere 两级边界 | 候选 |
+| 扩展现有 fine-cull compute，range 相交时执行 sphere-frustum test | 只增加 6 个 plane dot tests，并减少 output/Forward 实例 | 保持 coarse AABB 与 conservative sphere 两级边界 | 保留 |
 
 #### 候选契约
 
@@ -2060,6 +2060,52 @@ survivor count，不能再用来代替 indirect arguments 的真实值。
   P95 不得稳定退化超过 2%。category ablation 只用于归因，不能覆盖完整 workload 失败。
 - 若 survivor 没有下降、出现可见像素缺失或性能门失败，撤销 Surface consumer，只保留
   indirect readback probe 与客观检查点。
+
+#### 实现检查点：保留
+
+实现没有增加 pass、draw、indirect record 或 public API。`SurfaceWorld` 把与视锥相交但未完全
+包含的 finite range 送入现有 fine-cull dispatch；ShaderLab compute 同时执行距离球体和六平面
+球体测试。camera plane、距离倍率或 runtime scale 没有变化时不重新上传参数，也不重复 dispatch。
+
+固定 first-person 页面的真实 indirect arguments：
+
+| category | 基线 survivor | 视锥细筛 survivor | 差异 |
+| --- | ---: | ---: | ---: |
+| grass | 52,068 | 27,398 | -24,670（-47.4%） |
+| flower | 8,506 | 5,144 | -3,362（-39.5%） |
+| tree（无阴影 LOD） | 3,898 | 2,738 | -1,160（-29.8%） |
+| 合计 | 64,472 | 35,280 | -29,192（-45.3%） |
+
+同一 probe 在三个额外固定相机验证了视角变化后的重新 compaction：
+
+| camera pose | 基线 survivor | 视锥细筛 survivor | 差异 |
+| --- | ---: | ---: | ---: |
+| hero | 64,490 | 35,409 | -45.1% |
+| valley overview | 56,342 | 31,611 | -43.9% |
+| terrain horizon | 54,847 | 33,986 | -38.0% |
+
+first-person 和 hero 的独立父提交/候选截图归一化 RGB RMSE 分别为 0.000477、0.000344，非零
+像素分别为 77、88；差异是分散的亚像素级值，没有形成缺失植被轮廓。命令仍为 443 个 direct
+indexed draw、6 个 indirect draw，category/LOD、169,199 个 coarse visible instance 和 Shadow
+路径均不变，页面/GPU diagnostic 为 0。WebGPU E2E 进一步移动真实相机、把 grass runtime scale
+增到上限 4、验证 compute 只在状态变化后重新 dispatch，再恢复原场景；测试通过。
+
+性能使用 Chromium 140 / ANGLE Metal、1280×720 CSS、DPR 2、同一 browser context。每个
+workload 轮换 10 个区块，每端每区块先取 7 个 one-shot GPU 样本中位数，再取 3 秒稳态 frame
+窗口；`Forward/total improvement` 为父提交减候选，正数表示候选更快：
+
+| workload | FPS 配对变化中位数 | 正向区块 | Forward improvement 中位数与 IQR | total improvement 中位数与 IQR | frame P95 中位数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | +4.35% | 10/10 | +0.589 ms，+0.525～+0.701 | +0.530 ms，+0.422～+0.626 | 16.95 → 17.00 ms |
+| no grass | -0.003% | 5/10 | -0.083 ms，-0.213～+0.043 | -0.047 ms，-0.261～+0.056 | 9.45 → 9.55 ms |
+| no flower | +2.98% | 7/10 | -0.065 ms，-0.197～+0.434 | +0.140 ms，-0.296～+0.509 | 16.90 → 17.00 ms |
+| no tree | +4.60% | 10/10 | +0.541 ms，+0.516～+0.822 | +0.693 ms，+0.378～+1.012 | 16.80 → 16.80 ms |
+
+完整场景的 Forward 和 total improvement 在 10 个区块中全部为正，IQR 不跨 0；FPS 从
+87.30 提升到 90.97，中位数配对改善 4.35%。P95 增加 0.05 ms，约 0.3%，低于 2% 退化线。
+`no grass` 完全失去收益而 `no tree` 保持完整方向，证据把本实现的收益归因到草地 Forward，
+不能宣称它解决了树木或岩石 Shadow 成本。该 Metal/Chromium 结果满足本阶段保留门；移动真机
+性能仍需单独测量。
 
 ### 移动端约束与验收
 
