@@ -1347,6 +1347,10 @@ ${assignments.join("\n")}
       case "intBitsToFloat":
       case "uintBitsToFloat":
         return "bitcast";
+      case "packHalf2x16":
+        return "pack2x16float";
+      case "unpackHalf2x16":
+        return "unpack2x16float";
       case "lessThan":
       case "lessThanEqual":
       case "greaterThan":

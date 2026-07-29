@@ -124,6 +124,25 @@ Shader "WGSL/ComputeWorkgroupAtomicAppend" {
 }
 `;
 
+const halfPackingComputeShader = `
+Shader "WGSL/ComputeHalfPacking" {
+  SubShader "Default" {
+    Pass "Pack" {
+      readonly buffer vec4 inputValues[];
+      buffer uint outputValues[];
+
+      void packValues() {
+        uint index = gl_GlobalInvocationID.x;
+        outputValues[index * 2u] = packHalf2x16(inputValues[index].xy);
+        outputValues[index * 2u + 1u] = packHalf2x16(inputValues[index].zw);
+      }
+
+      ComputeShader = packValues;
+    }
+  }
+}
+`;
+
 function generateWGSL(): { vertex: string; fragment: string } {
   return generateWGSLFromSource(basicShader);
 }
@@ -286,6 +305,65 @@ describe("ShaderCompiler WGSL codegen", () => {
     const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
 
     expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+  });
+
+  it("lowers and executes half-float storage packing", async () => {
+    const { compute } = generateWGSLCompute(
+      halfPackingComputeShader,
+      new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1"]])
+    );
+
+    expect(compute).toContain("pack2x16float(inputValues[index].xy)");
+    expect(compute).not.toContain("packHalf2x16");
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const module = device.createShaderModule({ code: compute });
+    const info = await module.getCompilationInfo();
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "main" }
+    });
+    const input = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    const output = device.createBuffer({
+      size: 8,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+      size: 8,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    device.queue.writeBuffer(input, 0, new Float32Array([1, -2, 0.5, 65504]));
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: input } },
+        { binding: 1, resource: { buffer: output } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(output, 0, readback, 0, 8);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    expect(new Uint32Array(readback.getMappedRange().slice(0))).toEqual(
+      new Uint32Array([0xc0003c00, 0x7bff3800])
+    );
+    readback.unmap();
   });
 
   it("executes the generated compute artifact and copies storage-buffer data", async () => {
