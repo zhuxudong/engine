@@ -2648,6 +2648,31 @@ codegen 改写无返回值入口。ShaderLab 现有 color output 在空 `targets
 5. 任一 attachment validation、像素门失败，或 depth-prepass/total 没有稳定收益，撤销 runtime
    consumer；保留与否由实测决定，不把“空 attachment 理论上更省”写成移动端结论。
 
+#### 桌面 Chromium/Metal 实验检查点：撤销 runtime consumer
+
+候选曾按上述边界实现并通过功能门：native capture 得到
+`depth-prepass.colorAttachments.length=0`、6 个 Surface indirect pipeline 的
+`fragment.targets.length=0`；Forward 仍保留 HDR color attachment，两个 pass 继续共享同一
+depth texture。四相机 normalized RMSE 为 `0.004323 / 0.004004 / 0.003012 / 0.004175`，超过
+5/255 的像素为 `878 / 838 / 442 / 782`，页面与 WebGPU validation error 为 0。
+
+性能用两个独立 worktree 轮换测试：`93799910e` 为 shared-color，`a87f05fbf` 为 colorless；
+Chrome/Metal、1024×576、`terrain-horizon`、关闭云动画和 Surface wind。每轮每个 workload
+各采 20 个 one-shot GPU timestamp。完整场景的两组相邻配对如下：
+
+| 轮次 | 实现 | total median / IQR | depth-prepass median / IQR | Forward median / IQR |
+| --- | --- | --- | --- | --- |
+| A | shared-color | `8.115 / 6.576–9.241 ms` | `1.122 / 1.079–1.610 ms` | `3.071 / 2.577–4.006 ms` |
+| A | colorless | `8.219 / 7.576–9.154 ms` | `1.291 / 1.126–1.718 ms` | `3.506 / 2.740–4.891 ms` |
+| B | shared-color | `9.149 / 8.100–9.607 ms` | `1.215 / 1.106–1.554 ms` | `4.460 / 3.052–6.060 ms` |
+| B | colorless | `7.356 / 6.176–8.289 ms` | `1.189 / 1.154–1.647 ms` | `3.101 / 2.536–3.842 ms` |
+
+轮次 A 的 colorless depth-prepass 中位数退化 `15.1%`，轮次 B 只改善 `2.1%`；两轮
+depth-prepass IQR 均重叠。total 一轮退化 `1.3%`、一轮改善 `19.6%`，IQR 同样重叠；
+`no_grass/no_tree/no_rock` 的 total 与 depth-prepass 方向也不一致。实验没有把减少 color
+attachment 与稳定 GPU 时间收益建立对应关系，因此未满足预设保留门。runtime、测试断言和
+未被其他 consumer 使用的 activation options 已全部撤销，保留本客观记录；不形成移动端结论。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
