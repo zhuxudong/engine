@@ -818,6 +818,35 @@ per-cascade compute/pass 提交成本，并保持四组参数在同一 command b
 
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
+### Opaque Surface shadow-caster specialization 设计
+
+#### 本地源码与资产事实
+
+`BaseMaterial._setAlphaCutoff` 已按 `alphaCutoff != 0` 启用
+`MATERIAL_IS_ALPHA_CUTOFF`，并同步维护 Forward、ShadowCaster 和 DepthOnly queue。引擎内置
+`Shaders/Pipeline/ShadowCaster.shader` 只在该 macro 存在时读取 base texture alpha 和
+discard；这说明 macro 同时表达材质语义与 shadow queue 契约，不是只为某个 backend 定义的
+资源开关。
+
+`Terrain/Surface` 的 ShadowCaster pass 尚未使用该契约：所有材质都声明
+`material_Albedo`、向 fragment 传递 UV，并无条件采样 alpha。Grasslands 38 个投影
+prototype 共 4,132 个实例，使用 20 个材质；其中 15 个材质的 `alphaCutoff` 为 0，覆盖所有
+岩石材质以及树干 bark 材质。不透明 fragment 的纹理采样和 discard 判定不影响深度结果。
+
+#### 本阶段实现契约
+
+1. 只修改同一份 `Surface.shader`：ShadowCaster pass 在
+   `MATERIAL_IS_ALPHA_CUTOFF` 存在时才声明 albedo sampler、输出 UV、采样 alpha 和 discard。
+   vertex position、wind、shadow bias、LOD dither、render queue、材质和用户 API 均不变。
+2. 不删除材质的 albedo texture 资源或 ShaderData binding，不修改 Forward pass，避免把资源
+   生命周期或主相机 shading 混入该切片；`.shaderc` 与 `.wgslc` 仍由同一构建脚本产出。
+3. WebGL2 与 WebGPU 都使用相同 macro 语义；性能结果分别报告，不能把跨后端 shader
+   specialization 写成 WebGPU 独占能力。移动端价值只描述为减少不透明 shadow fragment 的
+   texture/interpolator 工作，是否转化为整帧收益以真机后续复测为准。
+4. 验收要求两个后端的固定相机截图、Surface category/LOD/count 与 GPU/page diagnostic
+   保持一致；WebGPU 对父提交执行固定相机和连续移动 ABBA。任一画面差异或 WebGPU 整帧没有
+   稳定收益时撤销实现，只保留检查点。
+
 ### Alpha-test vegetation range ordering 设计
 
 #### Grasslands 上限与现状
