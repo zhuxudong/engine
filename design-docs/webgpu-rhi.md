@@ -2584,6 +2584,70 @@ native capture 同时证明：
 baseline/candidate 的 rAF 中位数都是 `16.7 ms`，这是 vsync 上限，不是 FPS 提升证据。当前只保留
 默认关闭的桌面实验能力；移动端结论仍等待真机。
 
+### WebGPU 无颜色附件 depth priming 候选
+
+#### 当前实现的待测成本
+
+现有 opt-in depth priming 已禁止颜色写入，但 prepass 仍沿用 Forward 的 HDR color target。
+因此 WebGPU render pass descriptor 仍包含 color attachment，pipeline 仍包含对应 color target；
+`ColorWriteMask.None` 只能禁止 shader 写入，不能证明后端没有建立、load/store 或处理该
+attachment。当前完整场景的 depth-prepass GPU timestamp 中位数为 `1.821 ms`，该项是候选要
+独立压缩的成本，不把已有 Forward early-depth 收益重复计入。
+
+#### 固定上游源码与规范事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| WebGPU Samples | `4181da1b8d4e3d4fe5ea52fc1150fe5200b87515` | `shadowMapping/main.ts` 和 `reversedZ/main.ts` 的 depth pass 都使用 `colorAttachments: []`；对应 depth pipeline 省略 fragment stage |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `RenderTarget` 可只传 `depthBuffer`；WebGPU render target 由实际 color buffer 数生成 attachment，0 个 color buffer 时得到空数组；render pipeline 仍保留 fragment module，但 `targets` 从 attachment 数生成并保持为空。PCF shadow 走该 depth-only target，材质 alpha-test 仍在 fragment shader 中执行 `discard` |
+| WebGPU 规范 | Living Standard | `GPURenderPassDescriptor.colorAttachments` 定义本 pass 实际输出到的 color attachment；`GPUFragmentState.targets` 可以为空，规范明确允许 fragment shader 输出多于 pipeline 使用的值，未使用输出被忽略 |
+
+本候选直接复用现有 ShaderLab depth fragment。Terrain/Surface 的 alpha cutoff、LOD dither 和
+`discard` 仍在 fragment stage 执行；不删除 fragment stage，不新增 raw WGSL，也不要求 WGSL
+codegen 改写无返回值入口。ShaderLab 现有 color output 在空 `targets` pipeline 中按规范被忽略。
+
+上游与规范位置：
+
+- `webgpu-samples/sample/shadowMapping/main.ts`
+- `webgpu-samples/sample/reversedZ/main.ts`
+- `playcanvas-current/src/platform/graphics/render-target.js`
+- `playcanvas-current/src/platform/graphics/webgpu/webgpu-render-target.js`
+- `playcanvas-current/src/platform/graphics/webgpu/webgpu-render-pipeline.js`
+- `playcanvas-current/src/scene/renderer/shadow-map.js`
+- <https://gpuweb.github.io/gpuweb/#dom-gpurenderpassdescriptor-colorattachments>
+- <https://gpuweb.github.io/gpuweb/#dom-gpufragmentstate-targets>
+
+#### 模块边界
+
+1. 用后端中立的 `RenderTargetActivationOptions` 取代继续追加位置 boolean：
+   `depthReadOnly` 控制 depth aspect，`colorAttachments` 控制本次 pass 是否包含 render target
+   已配置的 color attachments。默认值分别为 `false`、`true`，现有调用行为不变。
+2. `RenderContext` 只转发 activation options，不判断 WebGPU。`DepthOnlyPass` 在现有
+   `depthPrimingEnabled` 路径请求 `colorAttachments=false`；Forward 请求
+   `depthReadOnly=true`。用户材质、ShaderLab source 和 example API 不感知。
+3. WebGPU render target 在 activation 时记录本 pass 的 color attachment 可见性；
+   render-pass descriptor 与 attachment-state/pipeline key 必须从同一状态生成。关闭时前者为
+   `colorAttachments: []`，后者为 `colorFormats: []`，杜绝 pass/pipeline layout 不一致。
+4. WebGL2 后端接受同一 options 合同。默认路径不传该选项；若内部 pass 请求关闭颜色附件，
+   则在绑定 FBO 后设置空 draw buffers，并在下一次普通 activation 时恢复原 attachment 列表。
+   本候选的 `depthPrimingEnabled` 仍只由 WebGPU 初始化开启，WebGL2 默认渲染不增加 pass。
+5. 只改通用 render-target activation 和已有 depth-priming consumer；不新增公开材质开关、
+   Surface category 特例、第二套 shader 或 query 参数。
+
+#### 验收与保留门
+
+1. native capture 必须证明候选 `depth-prepass.colorAttachments.length === 0`、对应 pipeline
+   `fragment.targets.length === 0`；Forward 仍保留 HDR color attachment/target。
+2. depth-prepass 与 Forward 继续共享同一 depth texture；前者 clear/store，后者
+   `depthReadOnly=true` 且省略 depth load/store；两边 Surface indirect record 数保持 6。
+3. 默认 WebGPU、WebGL2 和 depth priming opt-in 的现有四相机截图、page/GPU diagnostic、
+   category/LOD/wind 压力门全部重跑。固定截图门不因本优化放宽。
+4. 性能只比较同一 `9309eefa3` shared-color baseline 与 depth-only candidate。每边至少 20 个
+   one-shot GPU timestamp，报告完整场景及 `no_grass/no_tree/no_rock`；重点比较
+   depth-prepass 与 total，中位数必须同时为正向且 IQR 不跨 0，Forward 不应系统性变化。
+5. 任一 attachment validation、像素门失败，或 depth-prepass/total 没有稳定收益，撤销 runtime
+   consumer；保留与否由实测决定，不把“空 attachment 理论上更省”写成移动端结论。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
