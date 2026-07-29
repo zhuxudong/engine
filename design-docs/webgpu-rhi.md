@@ -945,10 +945,11 @@ rock、shrub 的两组配对分别为 65.31 到 89.66（+37.29%）、39.56 到 5
 作为整层成本上限，不归因为某一种 shader、vertex、fragment 或 shadow 工作。
 
 Grasslands 的三个 grass prototype 共 136,466 个当前可见实例，均为单 LOD、不投影，材质
-`alphaCutoff` 为 0.15 或 0.3，使用双面 vegetation pass。Forward fragment 先采 albedo 并
-discard，再为存活 fragment 采 normal/metallic/occlusion 并执行直接光、IBL 和阴影接收。
-WebGPU static atlas 已按 prototype LOD 合并为 indirect instanced draw，但 direct-copy command
-仍按 manifest range 顺序写 output stream，batch 内没有相机相关的 near-to-far 顺序。
+`alphaCutoff` 为 0.15 或 0.3，使用双面 vegetation pass。Forward fragment 依次采 albedo、
+metallic-smoothness、occlusion，执行可选颜色噪声后才 discard；normal、直接光、IBL 和阴影接收
+位于 discard 之后。WebGPU static atlas 已按 prototype LOD 合并为 indirect instanced draw，但
+direct-copy command 仍按 manifest range 顺序写 output stream，batch 内没有相机相关的
+near-to-far 顺序。
 
 #### 业界源码边界
 
@@ -1145,6 +1146,49 @@ no_grass` 为 3.25 ms，10 组中 6 组为正，IQR 为 -0.18–7.62 ms；`all -
 10 组中 7 组为正，IQR 为 -0.43–3.49 ms；`all - no_rock` 为 -0.29 ms，正负各 5 组。所有页面
 diagnostic 为 0。只有整体 Surface pass 形成较一致方向；单 category 的区间仍跨 0，因此本检查点
 不裁定草、树、岩石的 GPU 成本排序，也不据此提交某个 category 特例。
+
+### Alpha-test early rejection ordering 设计
+
+#### 当前源码与资产事实
+
+`Terrain/Surface` Forward fragment 先采样 albedo、metallic-smoothness 和 occlusion，再执行可选
+2D/3D color variation，随后构造 `baseColor` 并按 `material_AlphaCutoff` discard。当前
+`baseColor.a` 只来自 `textureColor.a`，不受颜色变化、实例颜色或材质参数影响，因此把同一
+alpha 判定移到 albedo sample 后不会改变当前材质语义。LOD cross-fade discard 仍保持在 fragment
+入口，不与本切片合并。
+
+Grasslands 实际加载的 `data/grasslands/surface-manifest.json` 有 25 个材质。10 个材质的
+`alphaCutoff` 大于 0：1 个 impostor、9 个 vegetation，覆盖 grass、flower、shrub、tree leaf
+和 branch；其中 7 个同时启用 color variation。其余 15 个 PBR 材质的 cutoff 为 0，覆盖全部
+岩石与树干，可作为不透明负对照。
+
+#### 业界源码边界
+
+| 引擎 | 本地版本 | 客观实现 |
+| --- | --- | --- |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `LitInput.hlsl` 的 `InitializeStandardLitSurfaceData` 先采 albedo 并通过 `Alpha` 调用 `AlphaDiscard`，之后才采 metallic/specular、normal 与 occlusion |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `meshphysical.glsl.js` 的 main 依次执行 map/color/alpha-map、alpha-test，再执行 roughness、metalness、normal、lighting 与 AO |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | GLSL/WGSL `stdFrontEnd.js` 都在 `evaluateFrontend` 起始处执行 opacity 与 alpha-test，之后才进入 parallax、albedo、normal、metalness、gloss、AO 与 emission |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | WGSL PBR 的 albedo/opacity block 内执行 alpha-test；main 取得该 block 结果后才采 ambient occlusion 与 reflectivity。block 内仍可能先执行 detail/decal/opacity 组合，不能等同为只采一次 albedo |
+
+这些源码证明提前 alpha-test 是现有跨 API shader 排序方式，但不证明 Grasslands 在当前 GPU
+上的收益；WebGPU 仍可能受 discard、tile rendering、纹理 cache 和 early depth 行为影响。
+
+#### 本阶段实现契约
+
+1. 只调整同一份 `Surface.shader` Forward fragment：albedo sample 后立即按
+   `textureColor.a < material_AlphaCutoff` discard，再执行 metallic-smoothness、occlusion、
+   color variation、normal 与 lighting。不得增加 category、backend 或 demo 特例。
+2. `applyLodCrossfade`、alpha cutoff 数值、材质 render queue、双面状态、资源声明与 binding、
+   ShaderLab API、`.shaderc`/`.wgslc` 生成方式均不变。
+3. 预编译产物必须证明 GLES 与 WGSL 都把 alpha discard 放在 metallic-smoothness、occlusion
+   和颜色噪声之前；不能只验证运行时源码路径。
+4. WebGL2 与 WebGPU 固定相机截图、Surface category/LOD/实例/renderer count 和 diagnostic
+   必须与父提交一致。WebGPU 另做 alpha-test 植被负载与不透明负对照；不得用关闭阴影、降低
+   画质或改变候选数制造收益。
+5. 性能比较使用父提交与候选提交的独立页面、相同 hero 相机和查询参数。rAF frame time 与
+   one-shot GPU submission span 分开采集，按交替顺序配对；GPU 配对差中位数必须为正且四分位
+   区间不跨 0，frame P50/P95 不得出现超过 2% 的稳定退化。未通过时撤销实现，只保留检查点。
 
 ### 移动端约束与验收
 
