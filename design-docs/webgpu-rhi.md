@@ -1190,6 +1190,33 @@ Grasslands 实际加载的 `data/grasslands/surface-manifest.json` 有 25 个材
    one-shot GPU submission span 分开采集，按交替顺序配对；GPU 配对差中位数必须为正且四分位
    区间不跨 0，frame P50/P95 不得出现超过 2% 的稳定退化。未通过时撤销实现，只保留检查点。
 
+#### 实验检查点：不保留
+
+候选只把 Forward 的 alpha discard 从 metallic-smoothness、occlusion 与 color variation 之后
+移动到 albedo sample 之后。预构建 `.shaderc` 和 `.wgslc` 都确认两种目标语言使用该顺序；
+WebGL2 与 WebGPU 运行时的 Surface category、LOD、可见实例和 renderer count 均与父提交一致，
+所有 Shader/GPU/page diagnostic 为 0。
+
+固定 hero 相机关闭建筑、云、云影、雾、后处理、风和场景动画，保留方向光、阴影、环境光、
+天空、地形与地表。WebGPU 候选对父提交的 normalized RGB RMSE 为 0.000163，3,686,400 个像素
+中 18 个超过 2% 通道差异；WebGL2 逐像素一致。
+
+WebGPU 父提交与候选使用独立页面，交替执行 10 个配对区块。每个区块分别为 alpha-test 植被
+和纯岩石负对照取 7 个 one-shot GPU 样本，并在区块内以样本中位数配对：
+
+| 负载 | 父提交 GPU span 中位数 | 候选 GPU span 中位数 | 配对差中位数 | 配对差 IQR | 正向区块 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| grass/flower/shrub/tree | 8.903 ms | 8.896 ms | +0.013 ms | -0.062～+0.064 ms | 6/10 |
+| rock only | 6.475 ms | 6.520 ms | -0.029 ms | -0.101～+0.018 ms | 5/10 |
+
+两种负载均为 3 个 native pass，所有页面 diagnostic 为 0。植被负载的区间跨 0，且没有与不透明
+负对照形成可区分的收益。另以 3 组交替页面、每页 180 个稳态 rAF frame 验证植被负载：父提交
+与候选的 P50 中位数均为 8.4 ms，P95 中位数均约 16.8 ms；三组方向一负、一平、一正。
+
+该实现未通过预先定义的 GPU 配对门槛，代码撤销，仅保留源码事实、双目标正确性和测量结果。
+现有证据不能证明提前 alpha-test 在该 Metal/Chromium 设备的 Grasslands Forward pass 上带来
+可分辨收益，也不能外推其他移动 GPU。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
