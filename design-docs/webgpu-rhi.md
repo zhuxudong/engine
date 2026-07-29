@@ -1504,6 +1504,43 @@ Galacean Grasslands 在当前浏览器和移动 GPU 上一定更快。
   Shadow GPU time 不得稳定退化超过 2%。若 CPU 改善在 frame time 中不可分辨，或 bundle
   cache/execute 开销抵消编码收益，撤销实现并只保留本检查点。
 
+#### 实验检查点：Render Bundle consumer 未保留
+
+真实命令探针首先发现了与 bundle 无关的 indirect 路由缺陷：`RenderQueue` 传给
+`WebGPUGraphicDevice` 的对象是 core `Primitive`，但 WebGPU device 把它当成
+`WebGPUPrimitive` 调用带六个参数的 `draw`。core `Primitive.draw` 只接收两个参数，JavaScript
+静默丢弃了 indirect buffer、offset 和 override vertex binding。修复前页面虽然报告 76 个
+indirect renderer batch，native render pass 实际每次提交有 451 个 `drawIndexed`，没有
+`drawIndexedIndirect`。
+
+修复增加中立 `IPlatformPrimitive.drawIndirect` 契约，由 core `Primitive` 显式转发到 platform
+primitive。修复后相同 Grasslands 状态每次提交有 353 个 `drawIndexedIndirect`，其中 Shadow
+277 个、Forward 76 个；另外 98 个非 Surface draw 继续使用 `drawIndexed`。这项修复不改变
+renderer、material、ShaderLab 或 example API。
+
+Render Bundle 候选在 warm-up 期间录制 1,167 次 bundle；稳态没有再次调用
+`createRenderBundleEncoder`，并把每次提交的 `setPipeline` 从 454 降到 101、
+`setBindGroup` 从 496 降到 143、`setVertexBuffer` 从 2,813 降到 277，同时以 9 次
+`executeBundles` 执行缓存的 indirect draw。真实 Chromium/ANGLE Metal 页面没有 GPU
+validation、console error 或 page error，说明缓存与失效路径在该固定场景下可运行。
+
+相同浏览器上下文、关闭 scene animation、等待 LOD 稳定后，按无 bundle→bundle、
+bundle→无 bundle、无 bundle→bundle 交替执行三轮，每页采样 3 秒。两端每轮都保持
+291,069 个实例、169,199 个可见实例、76 个 indirect renderer batch；category、LOD 和
+diagnostic 相同。
+
+| 轮次 | indirect 无 bundle FPS | Render Bundle FPS | bundle 相对差值 | 两端 frame P50 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 20.110 | 19.942 | -0.8% | 50.0 ms |
+| 2 | 20.551 | 19.945 | -2.9% | 50.0 ms |
+| 3 | 20.165 | 20.306 | +0.7% | 50.0 ms |
+| 中位数 | 20.165 | 19.945 | -1.1% | 50.0 ms |
+
+候选减少了 JavaScript 到 native 的编码调用，但 frame P50 没有正改善，FPS 中位数更低，三轮
+方向也不一致。开启 GPU timestamp 的单次页面还受到明显探针扰动，因此不把该组 GPU duration
+用于保留判断。实验未通过“frame time 可重复正改善”门槛，已撤销 Render Bundle runtime
+consumer；保留本设计检查点、真实命令探针和中立 indirect 路由修复。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
