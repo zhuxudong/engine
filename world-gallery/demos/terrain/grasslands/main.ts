@@ -117,6 +117,8 @@ declare global {
       inspectSurface(): ReturnType<SurfaceWorld["inspect"]>;
       /** Returns conservative same-frame depth-tile diagnostics when the candidate is enabled. */
       inspectDepthTiles(): SurfaceDepthTileSnapshot | null;
+      /** Returns isolated after-depth Surface output diagnostics when the candidate is enabled. */
+      inspectDepthTileOcclusion(): ReturnType<SurfaceWorld["inspectDepthTileOcclusion"]>;
       /** Returns deterministic cloud batches and animation time. */
       inspectClouds(): ReturnType<GrasslandsCloudSystem["inspect"]>;
       /** Returns authored architecture placement and renderer counts. */
@@ -209,6 +211,7 @@ async function boot(): Promise<void> {
   const sceneLayoutUrl = new URL("../data/grasslands/scene-layout.json", import.meta.url);
   const sceneLayout = await loadJson<GrasslandsSceneLayout>(sceneLayoutUrl);
   const query = new URLSearchParams(location.search);
+  const surfaceHiZMode = query.get("surfaceHiZ");
   camera.fieldOfView = sceneLayout.camera.fieldOfView;
   camera.nearClipPlane = sceneLayout.camera.nearClip;
   camera.farClipPlane = sceneLayout.camera.farClip;
@@ -261,9 +264,17 @@ async function boot(): Promise<void> {
   );
 
   setStatus("loading 291,069 deterministic surface instances");
-  const surfaceWorld = await SurfaceWorld.create(engine, root.createChild("surface-world"), camera, surfaceManifestUrl);
   const surfaceDepthTiles =
-    backend === "webgpu" && query.get("surfaceHiZ") === "depth-tiles" ? new SurfaceDepthTiles(engine, camera) : null;
+    backend === "webgpu" && (surfaceHiZMode === "depth-tiles" || surfaceHiZMode === "copy-survivors")
+      ? new SurfaceDepthTiles(engine, camera)
+      : null;
+  const surfaceWorld = await SurfaceWorld.create(
+    engine,
+    root.createChild("surface-world"),
+    camera,
+    surfaceManifestUrl,
+    surfaceHiZMode === "copy-survivors" ? { depthTiles: surfaceDepthTiles! } : undefined
+  );
   performancePanel.setSceneMetricsProvider(() => {
     const surface = surfaceWorld.inspect();
     return {
@@ -345,6 +356,7 @@ async function boot(): Promise<void> {
     ready: true,
     inspectSurface: () => surfaceWorld.inspect(),
     inspectDepthTiles: () => surfaceDepthTiles?.inspect() ?? null,
+    inspectDepthTileOcclusion: () => surfaceWorld.inspectDepthTileOcclusion(),
     inspectClouds: () => clouds.inspect(),
     inspectArchitecture: () => ({
       placements: architecture.placements,

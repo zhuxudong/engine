@@ -18,10 +18,17 @@ import {
   createSurfaceInstancedMesh,
   expandSurfaceBounds,
   findSurfaceModelMeshes,
+  rebindSurfaceInstanceBuffer,
   SURFACE_INSTANCE_STRIDE,
   transformSurfaceBounds
 } from "./SurfaceInstancedMesh";
 import { SurfaceMaterial } from "./SurfaceMaterial";
+import {
+  SurfaceDepthTileOcclusion,
+  type SurfaceDepthTileOcclusionBatch,
+  type SurfaceDepthTileOcclusionSnapshot
+} from "./SurfaceDepthTileOcclusion";
+import type { SurfaceDepthTiles } from "./SurfaceDepthTiles";
 import {
   createSurfaceStaticCompactionPasses,
   SURFACE_COMPACTION_COMMAND_WORD_STRIDE,
@@ -67,12 +74,15 @@ interface SurfaceStaticBatchPlan {
   readonly lod: SurfacePrototypeLodSpec;
   readonly ranges: readonly SurfaceStaticBatcherRange[];
   readonly renderSources: readonly SurfaceStaticRenderSource[];
+  readonly instanceCapacity: number;
   readonly outputInstanceOffset: number;
   readonly indirectRecordOffset: number;
   readonly indirectRecordCount: number;
   readonly fineCulling: boolean;
   readonly fineCullBatchIndex: number;
   readonly fineCullRadius: number;
+  readonly occlusionOutputInstanceOffset: number;
+  readonly occlusionIndirectRecordOffset: number;
 }
 
 interface SurfaceFineCullBatchState {
@@ -100,6 +110,7 @@ export class SurfaceStaticBatchGroup {
   private readonly _fineCullParameters = new Float32Array(SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT * 4);
   private readonly _compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>;
   private readonly _batchers: readonly SurfaceStaticBatcher[];
+  private readonly _depthTileOcclusion: SurfaceDepthTileOcclusion | null;
   private _fineCullParametersInitialized = false;
 
   private constructor(
@@ -109,7 +120,8 @@ export class SurfaceStaticBatchGroup {
     fineCullBatchData: Float32Array,
     fineCullParameterBuffer: Buffer,
     compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>,
-    batchers: readonly SurfaceStaticBatcher[]
+    batchers: readonly SurfaceStaticBatcher[],
+    depthTileOcclusion: SurfaceDepthTileOcclusion | null
   ) {
     this._commandBuffer = commandBuffer;
     this._commands = commands;
@@ -118,6 +130,7 @@ export class SurfaceStaticBatchGroup {
     this._fineCullParameterBuffer = fineCullParameterBuffer;
     this._compactionPasses = compactionPasses;
     this._batchers = batchers;
+    this._depthTileOcclusion = depthTileOcclusion;
   }
 
   /**
@@ -129,6 +142,7 @@ export class SurfaceStaticBatchGroup {
    * @param models Loaded model resources keyed by absolute URL.
    * @param materials Shared surface materials keyed by manifest material id.
    * @param manifestUrl URL used to resolve prototype model references.
+   * @param depthTiles Optional same-frame tile producer for isolated Forward output.
    * @returns Shared compaction group and its prototype LOD batchers.
    * @throws If a required storage binding or dispatch dimension exceeds the active device limits.
    */
@@ -139,7 +153,8 @@ export class SurfaceStaticBatchGroup {
     prototypes: ReadonlyMap<string, SurfacePrototypeSpec>,
     models: ReadonlyMap<string, GLTFResource>,
     materials: ReadonlyMap<string, SurfaceMaterial>,
-    manifestUrl: string
+    manifestUrl: string,
+    depthTiles?: SurfaceDepthTiles
   ): SurfaceStaticBatchGroup {
     const sourceOffsetsByPrototype = new Map<string, ReadonlyMap<number, number>>();
     let sourceInstanceCapacity = 0;
@@ -156,6 +171,8 @@ export class SurfaceStaticBatchGroup {
     let outputInstanceCapacity = 0;
     let copyCommandCapacity = 0;
     let indirectRecordCapacity = 0;
+    let occlusionInstanceCapacity = 0;
+    let occlusionIndirectRecordCapacity = 0;
     const fineCullWorkgroupSize = engine.computeCapabilities.recommendedWorkgroupSizeX;
     for (const [prototypeId, ranges] of sourcesByPrototype) {
       const prototype = prototypes.get(prototypeId);
@@ -173,6 +190,7 @@ export class SurfaceStaticBatchGroup {
           lod,
           ranges,
           renderSources,
+          instanceCapacity: batchCapacity,
           outputInstanceOffset: outputInstanceCapacity,
           indirectRecordOffset: indirectRecordCapacity,
           indirectRecordCount,
@@ -183,15 +201,21 @@ export class SurfaceStaticBatchGroup {
               Math.max(
                 radius,
                 boundsSphereRadius(transformSurfaceBounds(source.sourceMesh.bounds, source.rendererSpec))
-              ),
+            ),
             0
-          )
+          ),
+          occlusionOutputInstanceOffset: fineCulling ? occlusionInstanceCapacity : -1,
+          occlusionIndirectRecordOffset: fineCulling ? occlusionIndirectRecordCapacity : -1
         });
         outputInstanceCapacity += batchCapacity;
         copyCommandCapacity += fineCulling
           ? ranges.reduce((count, item) => count + Math.ceil(item.range.count / fineCullWorkgroupSize), 0)
           : ranges.length;
         indirectRecordCapacity += indirectRecordCount;
+        if (fineCulling) {
+          occlusionInstanceCapacity += batchCapacity;
+          occlusionIndirectRecordCapacity += indirectRecordCount;
+        }
       }
     }
 
@@ -300,6 +324,54 @@ export class SurfaceStaticBatchGroup {
         plan.fineCulling ? fineCullStates[plan.fineCullBatchIndex] : null
       )
     );
+    let depthTileOcclusion: SurfaceDepthTileOcclusion | null = null;
+    if (depthTiles && occlusionInstanceCapacity > 0) {
+      const occlusionIndirectArguments = new Uint32Array(
+        occlusionIndirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE
+      );
+      const occlusionBatches: SurfaceDepthTileOcclusionBatch[] = [];
+      for (let planIndex = 0; planIndex < plans.length; planIndex++) {
+        const plan = plans[planIndex];
+        if (!plan.fineCulling) continue;
+
+        let recordIndex = plan.occlusionIndirectRecordOffset;
+        for (const source of plan.renderSources) {
+          for (const subMesh of source.sourceMesh.subMeshes) {
+            const wordOffset = recordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
+            occlusionIndirectArguments[wordOffset] = subMesh.count;
+            occlusionIndirectArguments[wordOffset + 2] = subMesh.start;
+            recordIndex++;
+          }
+        }
+        occlusionBatches.push({
+          inputInstanceOffset: plan.outputInstanceOffset,
+          outputInstanceOffset: plan.occlusionOutputInstanceOffset,
+          inputIndirectWordOffset: plan.indirectRecordOffset * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
+          outputIndirectWordOffset:
+            plan.occlusionIndirectRecordOffset * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
+          indirectRecordCount: plan.indirectRecordCount
+        });
+      }
+      depthTileOcclusion = new SurfaceDepthTileOcclusion(
+        engine,
+        depthTiles,
+        outputBuffer,
+        indirectBuffer,
+        occlusionBatches,
+        occlusionInstanceCapacity,
+        occlusionIndirectArguments
+      );
+      for (let planIndex = 0; planIndex < plans.length; planIndex++) {
+        const plan = plans[planIndex];
+        if (!plan.fineCulling) continue;
+        batchers[planIndex]._bindDepthTileOutput(
+          depthTileOcclusion.outputInstanceBuffer,
+          plan.occlusionOutputInstanceOffset,
+          depthTileOcclusion.outputIndirectBuffer,
+          plan.occlusionIndirectRecordOffset
+        );
+      }
+    }
     return new SurfaceStaticBatchGroup(
       commandBuffer,
       commands,
@@ -307,7 +379,8 @@ export class SurfaceStaticBatchGroup {
       fineCullBatchData,
       fineCullParameterBuffer,
       compactionPasses,
-      batchers
+      batchers,
+      depthTileOcclusion
     );
   }
 
@@ -317,6 +390,14 @@ export class SurfaceStaticBatchGroup {
    */
   get batchers(): readonly SurfaceStaticBatcher[] {
     return this._batchers;
+  }
+
+  /**
+   * Return the isolated after-depth output state when enabled.
+   * @returns Current diagnostics, or null when no tile consumer is attached.
+   */
+  inspectDepthTileOcclusion(): SurfaceDepthTileOcclusionSnapshot | null {
+    return this._depthTileOcclusion?.inspect() ?? null;
   }
 
   /**
@@ -500,6 +581,41 @@ export class SurfaceStaticBatcher {
   /** Number of active renderer batches whose instance count is produced by compute. */
   get activeIndirectRendererBatchCount(): number {
     return this.fineCulling && this._instanceCount > 0 ? this._renderers.length : 0;
+  }
+
+  /**
+   * Rebind eligible Forward renderers to an isolated after-depth output slice.
+   * @param instanceBuffer Isolated instance atlas.
+   * @param instanceOffset First instance record owned by this batch.
+   * @param indirectBuffer Isolated indexed-indirect atlas.
+   * @param indirectRecordOffset First indexed-indirect record owned by this batch.
+   * @internal
+   */
+  _bindDepthTileOutput(
+    instanceBuffer: Buffer,
+    instanceOffset: number,
+    indirectBuffer: Buffer,
+    indirectRecordOffset: number
+  ): void {
+    if (!this.fineCulling) {
+      throw new Error("Only fine-culling Surface batches can consume depth-tile output.");
+    }
+    let recordIndex = indirectRecordOffset;
+    for (const renderer of this._renderers) {
+      const mesh = renderer.mesh as BufferMesh;
+      rebindSurfaceInstanceBuffer(mesh, instanceBuffer, instanceOffset * SURFACE_INSTANCE_STRIDE);
+      for (let subMeshIndex = 0; subMeshIndex < mesh.subMeshes.length; subMeshIndex++) {
+        (renderer as InternalIndirectDrawRenderer)._setIndirectDrawBuffer(
+          subMeshIndex,
+          indirectBuffer,
+          recordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
+        );
+        recordIndex++;
+      }
+    }
+    if (recordIndex !== indirectRecordOffset + this._indirectRecordCount) {
+      throw new Error("Surface depth-tile output record count does not match its renderer sub-meshes.");
+    }
   }
 
   /**

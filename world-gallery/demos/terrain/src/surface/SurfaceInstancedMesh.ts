@@ -64,12 +64,17 @@ export function createSurfaceInstancedMesh(
  * Rebinds the growable instance stream while preserving shared prototype geometry.
  * @param mesh Instanced surface mesh created by `createSurfaceInstancedMesh`.
  * @param instanceBuffer Replacement interleaved instance buffer.
+ * @param instanceBufferOffset Replacement byte offset, or the existing offset when omitted.
  */
-export function rebindSurfaceInstanceBuffer(mesh: BufferMesh, instanceBuffer: Buffer): void {
+export function rebindSurfaceInstanceBuffer(
+  mesh: BufferMesh,
+  instanceBuffer: Buffer,
+  instanceBufferOffset?: number
+): void {
   const bindingIndex = mesh.vertexBufferBindings.length - 1;
   const previousBinding = mesh.vertexBufferBindings[bindingIndex];
   mesh.setVertexBufferBinding(
-    new VertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, previousBinding.offset),
+    new VertexBufferBinding(instanceBuffer, SURFACE_INSTANCE_STRIDE, instanceBufferOffset ?? previousBinding.offset),
     bindingIndex
   );
 }

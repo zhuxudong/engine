@@ -77,6 +77,25 @@ export interface SurfaceDepthTileSnapshot {
   readonly dispatchCount: number;
 }
 
+/** Same-frame far-depth tile resource delivered after its reduction dispatch is encoded. */
+export interface SurfaceDepthTileFrame {
+  /** Storage buffer containing one normal-Z far-depth bit pattern per tile. */
+  readonly farDepthBits: Buffer;
+  /** Source depth width in physical pixels. */
+  readonly width: number;
+  /** Source depth height in physical pixels. */
+  readonly height: number;
+  /** Square tile edge in physical pixels. */
+  readonly tileEdge: number;
+  /** Number of horizontal tiles. */
+  readonly tilesX: number;
+  /** Number of vertical tiles. */
+  readonly tilesY: number;
+}
+
+/** Consumer encoded after the far-depth reduction and before Forward rendering. */
+export type SurfaceDepthTileConsumer = (frame: SurfaceDepthTileFrame) => void;
+
 /**
  * Builds one conservative far-depth value per screen tile after the camera depth prepass.
  */
@@ -85,6 +104,7 @@ export class SurfaceDepthTiles {
   private readonly _pipeline: AfterDepthPrepassPipeline;
   private readonly _pass: ComputePass;
   private readonly _parameterBuffer: Buffer;
+  private readonly _consumers = new Set<SurfaceDepthTileConsumer>();
   private readonly _afterDepthPrepass = (depthTexture: Texture): void => this._build(depthTexture);
   private _outputBuffer: Buffer | null = null;
   private _width = 0;
@@ -134,10 +154,27 @@ export class SurfaceDepthTiles {
   }
 
   /**
+   * Subscribe work that must consume the same-frame tile buffer before Forward rendering.
+   * @param consumer - Consumer invoked in registration order after each reduction dispatch.
+   */
+  addConsumer(consumer: SurfaceDepthTileConsumer): void {
+    this._consumers.add(consumer);
+  }
+
+  /**
+   * Remove a previously registered tile consumer.
+   * @param consumer - Callback passed to `addConsumer`.
+   */
+  removeConsumer(consumer: SurfaceDepthTileConsumer): void {
+    this._consumers.delete(consumer);
+  }
+
+  /**
    * Stop depth-prepass dispatches and release owned compute resources.
    */
   destroy(): void {
     this._pipeline._removeAfterDepthPrepassConsumer(this._afterDepthPrepass);
+    this._consumers.clear();
     this._pass.destroy();
     this._parameterBuffer.destroy(true);
     this._outputBuffer?.destroy(true);
@@ -153,6 +190,17 @@ export class SurfaceDepthTiles {
     this._pass.setTexture("camera_DepthTexture", depthTexture);
     this._pass.dispatch(this._tilesX, this._tilesY);
     this._dispatchCount++;
+    const frame: SurfaceDepthTileFrame = {
+      farDepthBits: this._outputBuffer!,
+      width: this._width,
+      height: this._height,
+      tileEdge: this._tileEdge,
+      tilesX: this._tilesX,
+      tilesY: this._tilesY
+    };
+    for (const consumer of this._consumers) {
+      consumer(frame);
+    }
   }
 
   private _resize(width: number, height: number): void {

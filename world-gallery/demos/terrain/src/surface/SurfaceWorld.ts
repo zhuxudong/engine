@@ -47,11 +47,15 @@ import type {
   SurfaceRuntimeTuningUpdate
 } from "./SurfaceRuntimeContract";
 import { WorldSurfaceStreamer } from "./WorldSurfaceStreamer";
+import type { SurfaceDepthTileOcclusionSnapshot } from "./SurfaceDepthTileOcclusion";
+import type { SurfaceDepthTiles } from "./SurfaceDepthTiles";
 
 /** Optional terrain continuation inputs used only when the manifest declares streamed world rules. */
 export interface SurfaceWorldCreateOptions {
   readonly terrain?: TerrainData;
   readonly worldNoise?: TerrainWorldNoiseSpec;
+  /** Same-frame depth tiles used to build an isolated Forward stream for eligible batches. */
+  readonly depthTiles?: SurfaceDepthTiles;
 }
 
 const CATEGORIES: readonly SurfaceCategory[] = ["grass", "flower", "shrub", "tree", "rock", "cliff"];
@@ -164,6 +168,7 @@ export class SurfaceWorld {
    * @param root Identity-transform entity receiving one child per renderer batch.
    * @param camera Camera used for LOD and distance culling.
    * @param manifestUrl Absolute surface manifest URL.
+   * @param options Optional terrain continuation and depth-tile resources.
    * @returns Ready-to-render surface world.
    */
   static async create(
@@ -220,7 +225,16 @@ export class SurfaceWorld {
     }
     const staticBatchGroup =
       staticSources.size > 0
-        ? SurfaceStaticBatchGroup.create(engine, root, staticSources, prototypes, models, materials, manifestUrl)
+        ? SurfaceStaticBatchGroup.create(
+            engine,
+            root,
+            staticSources,
+            prototypes,
+            models,
+            materials,
+            manifestUrl,
+            options.depthTiles
+          )
         : null;
     const staticBatchers = staticBatchGroup?.batchers ?? [];
     const mutableStaticBatchersByPrototype = new Map<string, SurfaceStaticBatcher[]>();
@@ -608,6 +622,14 @@ export class SurfaceWorld {
       coverageFingerprint: coverage.fingerprint,
       tuning: this.getTuning()
     };
+  }
+
+  /**
+   * Captures the isolated after-depth output state when enabled.
+   * @returns Current allocation and dispatch diagnostics, or null when disabled.
+   */
+  inspectDepthTileOcclusion(): SurfaceDepthTileOcclusionSnapshot | null {
+    return this._staticBatchGroup?.inspectDepthTileOcclusion() ?? null;
   }
 
   /** @internal Advances wind and selects one LOD per visible cell. */
