@@ -88,7 +88,7 @@ declare global {
 }
 
 const minimumExponent = 14;
-const maximumExponent = 24;
+const maximumExponent = 26;
 const defaultCandidates = 2 ** 20;
 const sampleWindowSize = 120;
 const shaderSource = `

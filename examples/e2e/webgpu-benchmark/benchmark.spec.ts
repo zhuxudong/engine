@@ -1,7 +1,7 @@
 import { expect, test, type Browser, type Page, type TestInfo } from "@playwright/test";
 
 const comparisonCandidates = 2 ** 20;
-const maximumCandidates = 2 ** 24;
+const maximumCandidates = 2 ** 26;
 
 test("backend selector reloads the document and preserves candidates", async ({ page }) => {
   const errors = collectRuntimeErrors(page);

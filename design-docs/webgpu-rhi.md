@@ -1314,6 +1314,10 @@ post-process 后两个 post-process pass 消失；再关闭使用内置 PBR 的�
 关闭时 P50 为 8.55/8.40/8.40 ms、P95 为 16.80/16.70/16.71 ms；开启时 P50 均为 8.40 ms、
 P95 为 16.71/16.70/16.80 ms，所有页面 `latestSample` 仍为 null，未出现固定方向变化。
 
+最终重跑时，benchmark 原 2^24 个 candidates 上限仍出现 59.88 FPS，没有放宽低帧率断言。
+滑块上限扩到 2^26 后，同一 WebGL2 页面 60 帧窗口实测 P50 为 14.90 FPS、frame P95 为
+75.40 ms，页面仍可交互且 diagnostic 为 0；随后 benchmark E2E 3/3 重新通过。
+
 profiler 单测 8/8、13 个 package 类型构建、module 构建、benchmark E2E 3/3 和 Grasslands
 WebGPU E2E 1/1 通过。固定页恢复 169,199 个可见实例、76 个 indirect renderer batch，截图和
 diagnostic 验证没有发现渲染回归。
