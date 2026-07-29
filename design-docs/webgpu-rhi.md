@@ -2193,6 +2193,56 @@ stream 被重复提交。
   improvement 中位数为正且 IQR 不跨 0，FPS 配对变化中位数为正，frame P95 不稳定退化超过
   2%；未通过则撤销 runtime provider，只保留可独立复用的测试探针。
 
+#### 实验检查点：range-level provider 未保留
+
+候选按上述契约实现了 range AABB 对 cascade plane 的 CPU 判定，再复用 ShaderLab `Compact`
+pass 生成独立 light-view instance stream。第一版由 compute 写 indirect count；第二版使用
+CPU 已知 count 直接提交，减少 indirect 参数读取。两版都没有修改 Forward stream、材质、
+ShaderLab source、manifest 或 public API。
+
+固定默认相机的 native command probe 结果如下：
+
+| 变体 | Forward indirect / instance | Shadow draw | Shadow instance |
+| --- | ---: | ---: | ---: |
+| 父提交 | 6 / 35,280 | 323 direct | 13,739 |
+| range stream，indirect count | 6 / 35,280 | 267 indirect + 46 direct | 10,680 |
+| range stream，CPU 已知 count | 6 / 35,280 | 313 direct | 10,680 |
+
+indirect 版本的四级 range stream 分别为 65 / 896、70 / 3,534、67 / 3,139 和
+65 / 3,024 个 record / instance。逐 category 关闭后的配对差为 tree 168 record /
+1,888 instance、rock 87 / 7,854、grass 0 / 0。该结果证明 range 判定改变了 light-view
+workload；它不等同于 GPU 实际 vertex invocation。
+
+四个固定相机执行父提交/候选截图：
+
+| 相机 | 绝对差像素 | 归一化 RMSE | 客观边界 |
+| --- | ---: | ---: | --- |
+| default | 95 | 0.000460 | 父提交自重复为 110 / 0.000509 |
+| hero | 72 | 0.000359 | 未高于 default 的自重复噪声 |
+| valley-overview | 69 | 0.000370 | 未高于 default 的自重复噪声 |
+| terrain-horizon | 5,998 | 0.009500 | 候选增加了父提交 Forward-derived stream 未包含的视锥外 caster |
+
+`terrain-horizon` 另与 WebGL2 shadow on/off effect mask 比较。1%、3%、5% 阈值下，父提交差异
+像素分别为 18,483、13,279、11,314，候选为 16,751、12,720、11,139；灰度 effect RMSE
+则由 0.011296 增至 0.011930。位置 mask 更接近、强度误差略增，结果不能证明完整等价。
+
+所有性能测试使用 Chromium 140 / ANGLE Metal、1280×720 CSS、DPR 2、同一 browser context，
+并交替父提交与候选顺序。表中的 pass/total 数字均为 `baseline - candidate`，正值代表候选
+耗时更低：
+
+| workload / 变体 | FPS 配对变化 | Shadow improvement | total improvement | P95 |
+| --- | ---: | ---: | ---: | ---: |
+| all / indirect warm，10×7 | +0.970%，-0.186～+1.690 | +0.536 ms，+0.335～+0.743 | +0.469 ms，-0.043～+0.940 | 未作为最终裁决 |
+| no tree / indirect，10×7 | +0.307%，+0.196～+0.509 | +0.280 ms，+0.257～+0.287 | +0.067 ms，-0.056～+0.098 | 未作为最终裁决 |
+| no rock / indirect，10×7 | +0.551%，+0.371～+0.685 | +0.013 ms，-0.002～+0.057 | +0.315 ms，+0.016～+0.344 | 未作为最终裁决 |
+| no grass / indirect，10×7 | +1.896%，+1.757～+1.984 | +0.130 ms，-0.018～+0.169 | +0.088 ms，-0.014～+0.142 | 未作为最终裁决 |
+| all / direct，10×31 | +1.270%，+1.195～+1.534 | +0.236 ms，+0.059～+0.365 | +0.097 ms，-0.148～+0.383 | 25.70 → 25.30 ms |
+
+最终 10×31 样本中，FPS、P95 和 Shadow improvement 的 IQR 均为正向，但完整场景 total
+improvement 的 IQR 跨 0。按预先声明的保留门，runtime provider 与为其扩展的 core binding
+契约已撤销；保留 viewport-aware native probe、稳定等待和 category invalidation E2E。
+该桌面 Metal 结果不代表移动真机数据。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
