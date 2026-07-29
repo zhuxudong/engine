@@ -139,8 +139,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _globalDepthBias = 0;
   private _globalSlopeScaledDepthBias = 0;
   private _renderPassLabel = "render";
-  private _currentRenderPipelinePass: GPURenderPassEncoder | null = null;
-  private _currentRenderPipeline: GPURenderPipeline | null = null;
 
   /**
    * Whether the texture-based joint path is available.
@@ -730,15 +728,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   }
 
   /** @internal */
-  _setRenderPipeline(pass: GPURenderPassEncoder, pipeline: GPURenderPipeline): void {
-    if (this._currentRenderPipelinePass !== pass || this._currentRenderPipeline !== pipeline) {
-      pass.setPipeline(pipeline);
-      this._currentRenderPipelinePass = pass;
-      this._currentRenderPipeline = pipeline;
-    }
-  }
-
-  /** @internal */
   _useProgram(program: WebGPUShaderProgram): void {
     this._usedPrograms.add(program);
   }
@@ -820,8 +809,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     if (this._renderPass) {
       this._renderPass.end();
       this._renderPass = null;
-      this._currentRenderPipelinePass = null;
-      this._currentRenderPipeline = null;
     }
   }
 
