@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const webgpuEnabled = process.env.TERRAIN_E2E_WEBGPU === "1";
 
@@ -22,11 +22,213 @@ interface ComputeCommandEncoderPrototype {
   beginComputePass(descriptor?: unknown): ComputePassPrototype;
 }
 
+interface CapturedIndirectRecord {
+  readonly indexCount: number;
+  readonly instanceCount: number;
+  readonly firstIndex: number;
+  readonly baseVertex: number;
+  readonly firstInstance: number;
+}
+
+interface SurfaceIndirectCapture {
+  reset(): void;
+  readForwardRecords(): Promise<CapturedIndirectRecord[]>;
+}
+
+interface NativeGPUBuffer {
+  getMappedRange(): ArrayBuffer;
+  mapAsync(mode: number): Promise<void>;
+  unmap(): void;
+  destroy(): void;
+}
+
+interface NativeGPUCommandEncoder {
+  copyBufferToBuffer(
+    source: NativeGPUBuffer,
+    sourceOffset: number,
+    destination: NativeGPUBuffer,
+    destinationOffset: number,
+    size: number
+  ): void;
+  finish(): unknown;
+}
+
+interface NativeGPUDevice {
+  readonly queue: { submit(commands: unknown[]): void };
+  createBuffer(descriptor: { size: number; usage: number }): NativeGPUBuffer;
+  createCommandEncoder(): NativeGPUCommandEncoder;
+}
+
+interface NativeRenderPass {
+  drawIndexedIndirect(buffer: NativeGPUBuffer, offset: number): void;
+}
+
+interface NativeComputePass {
+  dispatchWorkgroups(x: number, y?: number, z?: number): void;
+}
+
 declare global {
   interface Window {
     __webgpuComputeCounts: WebGPUComputeCounts;
     __webgpuPassSequence: string[];
+    __surfaceIndirectCapture: SurfaceIndirectCapture;
   }
+}
+
+async function installSurfaceIndirectCapture(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let device: NativeGPUDevice | null = null;
+    let forwardCalls: Array<{ readonly buffer: NativeGPUBuffer; readonly offset: number }> = [];
+    const sequence: string[] = [];
+    window.__webgpuPassSequence = sequence;
+
+    const constructors = globalThis as unknown as {
+      GPUBufferUsage: { readonly COPY_DST: number; readonly MAP_READ: number };
+      GPUMapMode: { readonly READ: number };
+      GPUAdapter?: {
+        prototype: {
+          requestDevice(descriptor?: unknown): Promise<NativeGPUDevice>;
+        };
+      };
+      GPUCommandEncoder?: {
+        prototype: {
+          beginRenderPass(descriptor: { readonly label?: string }): NativeRenderPass;
+          beginComputePass(descriptor?: { readonly label?: string }): NativeComputePass;
+        };
+      };
+    };
+    if (!constructors.GPUAdapter || !constructors.GPUCommandEncoder) {
+      throw new Error("WebGPU constructors are unavailable.");
+    }
+
+    const adapterPrototype = constructors.GPUAdapter.prototype;
+    const requestDevice = adapterPrototype.requestDevice;
+    adapterPrototype.requestDevice = async function (descriptor) {
+      device = await requestDevice.call(this, descriptor);
+      return device;
+    };
+
+    const encoderPrototype = constructors.GPUCommandEncoder.prototype;
+    const beginRenderPass = encoderPrototype.beginRenderPass;
+    encoderPrototype.beginRenderPass = function (descriptor) {
+      const label = descriptor.label ?? "render";
+      sequence.push(label);
+      const pass = beginRenderPass.call(this, descriptor);
+      if (label === "forward") {
+        const drawIndexedIndirect = pass.drawIndexedIndirect.bind(pass);
+        pass.drawIndexedIndirect = (buffer, offset) => {
+          forwardCalls.push({ buffer, offset });
+          drawIndexedIndirect(buffer, offset);
+        };
+      }
+      return pass;
+    };
+    const beginComputePass = encoderPrototype.beginComputePass;
+    encoderPrototype.beginComputePass = function (descriptor) {
+      sequence.push(descriptor?.label ?? "compute");
+      const pass = beginComputePass.call(this, descriptor);
+      const dispatchWorkgroups = pass.dispatchWorkgroups.bind(pass);
+      pass.dispatchWorkgroups = (workgroupCountX, workgroupCountY, workgroupCountZ) => {
+        sequence.push("dispatch");
+        dispatchWorkgroups(workgroupCountX, workgroupCountY, workgroupCountZ);
+      };
+      return pass;
+    };
+
+    window.__surfaceIndirectCapture = {
+      reset(): void {
+        forwardCalls = [];
+        sequence.length = 0;
+      },
+      async readForwardRecords(): Promise<CapturedIndirectRecord[]> {
+        if (!device) throw new Error("No WebGPU device was captured.");
+        const unique: Array<{ readonly buffer: NativeGPUBuffer; readonly offset: number }> = [];
+        for (const call of forwardCalls) {
+          if (!unique.some((candidate) => candidate.buffer === call.buffer && candidate.offset === call.offset)) {
+            unique.push(call);
+          }
+        }
+        const recordByteLength = Uint32Array.BYTES_PER_ELEMENT * 5;
+        const readback = device.createBuffer({
+          size: Math.max(recordByteLength, unique.length * recordByteLength),
+          usage: constructors.GPUBufferUsage.COPY_DST | constructors.GPUBufferUsage.MAP_READ
+        });
+        const encoder = device.createCommandEncoder();
+        for (let index = 0; index < unique.length; index++) {
+          const call = unique[index];
+          encoder.copyBufferToBuffer(call.buffer, call.offset, readback, index * recordByteLength, recordByteLength);
+        }
+        device.queue.submit([encoder.finish()]);
+        await readback.mapAsync(constructors.GPUMapMode.READ);
+        const bytes = readback.getMappedRange().slice(0);
+        const uints = new Uint32Array(bytes);
+        const ints = new Int32Array(bytes);
+        const records = unique.map((_, index) => {
+          const offset = index * 5;
+          return {
+            indexCount: uints[offset],
+            instanceCount: uints[offset + 1],
+            firstIndex: uints[offset + 2],
+            baseVertex: ints[offset + 3],
+            firstInstance: uints[offset + 4]
+          };
+        });
+        readback.unmap();
+        readback.destroy();
+        return records;
+      }
+    };
+  });
+}
+
+async function compareScreenshots(
+  page: Page,
+  baseline: Buffer,
+  candidate: Buffer
+): Promise<{ readonly normalizedRmse: number; readonly changedPixels: number }> {
+  return page.evaluate(
+    async ({ baselineBase64, candidateBase64 }) => {
+      const decode = async (base64: string): Promise<ImageBitmap> =>
+        createImageBitmap(await (await fetch(`data:image/png;base64,${base64}`)).blob());
+      const baselineImage = await decode(baselineBase64);
+      const candidateImage = await decode(candidateBase64);
+      if (
+        baselineImage.width !== candidateImage.width ||
+        baselineImage.height !== candidateImage.height
+      ) {
+        throw new Error("Screenshot dimensions differ.");
+      }
+      const canvas = new OffscreenCanvas(baselineImage.width, baselineImage.height);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(baselineImage, 0, 0);
+      const baselinePixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(candidateImage, 0, 0);
+      const candidatePixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      baselineImage.close();
+      candidateImage.close();
+
+      let squaredError = 0;
+      let changedPixels = 0;
+      for (let offset = 0; offset < baselinePixels.length; offset += 4) {
+        let changed = false;
+        for (let channel = 0; channel < 3; channel++) {
+          const delta = baselinePixels[offset + channel] - candidatePixels[offset + channel];
+          squaredError += delta * delta;
+          changed ||= Math.abs(delta) > 5;
+        }
+        changedPixels += Number(changed);
+      }
+      return {
+        normalizedRmse: Math.sqrt(squaredError / ((baselinePixels.length / 4) * 3)) / 255,
+        changedPixels
+      };
+    },
+    {
+      baselineBase64: baseline.toString("base64"),
+      candidateBase64: candidate.toString("base64")
+    }
+  );
 }
 
 test("Grasslands reloads into WebGPU and renders terrain surface categories", async ({ page }, testInfo) => {
@@ -382,6 +584,103 @@ test("builds conservative depth tiles between the Grasslands depth and forward p
   const screenshot = await page.locator("#canvas").screenshot({ path: screenshotPath });
   await testInfo.attach("grasslands-depth-tiles.png", { path: screenshotPath, contentType: "image/png" });
   expect(screenshot.byteLength).toBeGreaterThan(10_000);
+  expect(diagnostics).toEqual([]);
+});
+
+test("copies six fine-cull batches into an equivalent after-depth Forward stream", async ({ page }, testInfo) => {
+  test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to launch Chromium with WebGPU.");
+  await installSurfaceIndirectCapture(page);
+
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (
+      message.type() === "error" ||
+      (message.type() === "warning" && /webgpu|gpu|validation|invalid|exceeds/i.test(text))
+    ) {
+      diagnostics.push(`${message.type()}: ${text}`);
+    }
+  });
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+
+  const configureStableSurface = async (): Promise<void> => {
+    await page.waitForFunction(() => window.grasslandsDebug?.ready === true);
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: false });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+    });
+    await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+    await page.evaluate(() => window.__surfaceIndirectCapture.reset());
+    await page.waitForTimeout(250);
+  };
+
+  await page.goto(
+    "/demos/terrain/grasslands/?backend=webgpu&surfaceHiZ=depth-tiles&pose=terrain-horizon",
+    { waitUntil: "networkidle" }
+  );
+  await configureStableSurface();
+  const baselineSurface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
+  const baselineRecords = await page.evaluate(() => window.__surfaceIndirectCapture.readForwardRecords());
+  const baselineScreenshot = await page.locator("#canvas").screenshot();
+
+  await page.goto(
+    "/demos/terrain/grasslands/?backend=webgpu&surfaceHiZ=copy-survivors&pose=terrain-horizon",
+    { waitUntil: "networkidle" }
+  );
+  await configureStableSurface();
+  const candidateSurface = await page.evaluate(() => window.grasslandsDebug!.inspectSurface());
+  const candidateOutput = await page.evaluate(() => window.grasslandsDebug!.inspectDepthTileOcclusion());
+  const candidateRecords = await page.evaluate(() => window.__surfaceIndirectCapture.readForwardRecords());
+  const candidateSequence = await page.evaluate(() => window.__webgpuPassSequence);
+  const candidateScreenshot = await page.locator("#canvas").screenshot();
+  const screenshotComparison = await compareScreenshots(page, baselineScreenshot, candidateScreenshot);
+
+  await testInfo.attach("surface-output-identity.json", {
+    body: Buffer.from(
+      JSON.stringify(
+        {
+          baselineRecords,
+          candidateRecords,
+          candidateOutput,
+          screenshotComparison
+        },
+        null,
+        2
+      )
+    ),
+    contentType: "application/json"
+  });
+  await testInfo.attach("surface-output-baseline.png", {
+    body: baselineScreenshot,
+    contentType: "image/png"
+  });
+  await testInfo.attach("surface-output-candidate.png", {
+    body: candidateScreenshot,
+    contentType: "image/png"
+  });
+
+  expect(baselineRecords).toHaveLength(6);
+  expect(candidateRecords).toEqual(baselineRecords);
+  expect(candidateRecords.every((record) => record.instanceCount > 0)).toBe(true);
+  expect(candidateOutput).toMatchObject({
+    batchCount: 6,
+    indirectRecordCount: 6
+  });
+  expect(candidateOutput!.instanceCapacity).toBeGreaterThan(
+    candidateRecords.reduce((count, record) => count + record.instanceCount, 0)
+  );
+  expect(candidateOutput!.dispatchCount).toBeGreaterThan(0);
+  expect(candidateSurface).toEqual(baselineSurface);
+  expect(
+    candidateSequence.some((name, index) => {
+      if (name !== "depth-prepass") return false;
+      const forwardIndex = candidateSequence.indexOf("forward", index + 1);
+      if (forwardIndex < 0) return false;
+      return candidateSequence.slice(index + 1, forwardIndex).filter((entry) => entry === "dispatch").length >= 2;
+    })
+  ).toBe(true);
+  expect(screenshotComparison.normalizedRmse).toBeLessThan(0.002);
+  expect(screenshotComparison.changedPixels).toBeLessThan(2_000);
   expect(diagnostics).toEqual([]);
 });
 
