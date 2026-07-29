@@ -2366,6 +2366,25 @@ RHI 对照 `maxWorkgroupsPerDimension`。不写 Grasslands 分辨率、实例数
 5. 只有 tile 正确后才新增独立 occlusion output atlas，把现有视锥 survivor 作为输入。关闭
    occlusion 必须恢复现有 atlas 与 indirect records，避免通过 copy 或清零伪造基线。
 
+#### 第零阶段实现与实测结果
+
+本阶段实现由 `surfaceHiZ=depth-tiles` 显式开启，默认 WebGL2 和默认 WebGPU Grasslands 都不
+创建 depth-tile consumer。当前 far-depth buffer 尚未被 renderer 或 indirect arguments
+消费，因此以下结果只证明基础数据链路，不构成遮挡剔除或性能收益结论。
+
+| 验证项 | 实际结果 | 边界 |
+| --- | --- | --- |
+| ShaderLab shared `atomicMax` | Chromium/Metal native workgroup 读回 `196`，与 64 个 invocation 的 `localIndex * 3 + 7` 最大值一致 | 证明归约原语，不证明整屏采样成本 |
+| compute depth lowering | 64 个 `texelFetch(camera_DepthTexture, ...)` 读回均为 `0.625`；reflection 为 `texture_depth_2d` | 初次隐式 `textureSample` 被 native validation 拒绝；最终统一 lowering 覆盖 `textureLoad` 与 `textureSampleLevel` |
+| edge tile reduction | `3×2` tile fixture 包含右侧和底部残 tile，六个 far depth 均读回 `0.625`，最大误差为 0 | 非均匀最大值由独立 `atomicMax` 测试覆盖 |
+| pipeline 顺序 | E2E 原生命令序列存在 `depth-prepass → compute → forward` | 只在真实 Depth prepass 后回调 |
+| Grasslands 画面 | `terrain-horizon` 截图通过，page/GPU diagnostic 为 0 | output 尚未改变可见实例 |
+| 默认回归 | WebGL2 reload、默认 WebGPU Surface/LOD/indirect 与新增两项测试共 3 项通过 | 桌面 Chromium/Metal，不外推移动真机 |
+
+第一个 native probe 还确认 compute stage 不能使用依赖隐式导数的 `textureSample`。该失败没有
+通过 raw WGSL 绕过；`ShaderFactory.lowerWGSLDepthTextures` 继续保持 ShaderLab sampler 的
+`vec4` 语义，并为显式 LOD 与 texel load 分别生成 depth helper。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
