@@ -1907,6 +1907,55 @@ WebGPU RHI 精确测试 19/19、package 类型检查、完整 module build 和 G
 和对应测试已撤销；四种动态状态继续逐 draw 编码。本检查点只保留命令边界和失败数据，不把
 native command 减少包装成移动端性能提升。
 
+### Render-pass pipeline identity 去重设计
+
+#### 固定源码与命令事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| WebGPU 标准接口 | [`GPURenderPassEncoder`](https://gpuweb.github.io/types/interfaces/GPURenderPassEncoder.html) | `setPipeline` 设置后续 draw 使用的 current render pipeline；新 pass 没有继承状态，`executeBundles` 后 pipeline/bind-group/vertex/index 状态会被清空 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | draw 取得 immutable pipeline 后，仅当 `this.pipeline !== pipeline` 才调用 `passEncoder.setPipeline`；draw group 结束时清空 cache |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | 每个 render context 持有 `currentSets.pipeline`，仅在 GPU pipeline identity 变化时编码；pass 创建或恢复时重新初始化 `currentSets` |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | clear、texture 和 compute 路径直接设置各自 pipeline；所查固定目录没有提供与 draw path 等价的通用 identity cache 证据 |
+
+扩展后的 native probe 按 pass、状态 slot、GPU object identity、offset 和 format 记录等值重发。
+固定 Grasslands 的基线结果：
+
+| 命令 | 总数 | 等值重发 | 等值比例 |
+| --- | ---: | ---: | ---: |
+| `setPipeline` | 450 | 336 | 74.7% |
+| `setBindGroup` | 492 | 0 | 0% |
+| `setVertexBuffer` | 2,807 | 96 | 3.4% |
+| `setIndexBuffer` | 449 | 20 | 4.5% |
+
+pipeline 的等值重发按 pass 分为 Shadow 248、Depth prepass 11、Forward 77；buffer state 的可跳过
+比例远低于 pipeline，bind group 还包含逐 draw dynamic offset，因此本阶段不实现通用 binding
+cache。
+
+#### 方案比较
+
+| 方案 | 状态所有者 | 问题 | 决策 |
+| --- | --- | --- | --- |
+| `WebGPUShaderProgram` 保存最后 pipeline | shader program | 同一 pass 会在多个 program 间切换；program-local 值不能代表 native pass 的 current pipeline | 不采用 |
+| core 重排 draw 以减少 pipeline transition | render queue | 当前排序已经形成大量相邻等值 pipeline；改变透明、priority、material 与 shadow 顺序超出本实验 | 不采用 |
+| native pass + pipeline identity | `WebGPUGraphicDevice` | 需要在 pass 结束时清空两个引用；未来增加 `executeBundles` 时必须同步 invalidation | 候选 |
+
+候选新增一个 internal pipeline binding 方法，由 `WebGPUShaderProgram.draw` 调用。方法只比较当前
+`GPURenderPassEncoder` 与 `GPURenderPipeline` identity；新 pass 的第一次调用必定编码，等值
+pipeline 才跳过。mipmap 独立 pass、compute pass、pipeline cache key、bind group、buffer、
+draw 顺序、ShaderLab、WebGL2 和所有 public API 不变。
+
+#### 验收与保留门槛
+
+- fake pass 测试覆盖首次编码、同 pass 等值跳过、pipeline 切换、切回旧 pipeline 和新 pass
+  重新编码；pass 结束后不得保留引用。
+- native probe 预期 `setPipeline` 从 450 降到 114，其中 Shadow 75、Depth 8、Forward 30、
+  Final 1；其他 command、实例、category 和 LOD 计数必须不变。
+- 固定候选与父提交截图执行像素差；Grasslands backend reload、Shadow/Depth/Forward/Final、
+  LOD transition、compute 和零 diagnostic E2E 必须通过。
+- 独立父提交与候选按 `all/no_grass/no_tree/no_rock` 交替三轮。完整场景 FPS 配对变化中位数
+  必须为正、至少两轮同向且 P95 中位数不退化；category ablation 只用于归因。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
