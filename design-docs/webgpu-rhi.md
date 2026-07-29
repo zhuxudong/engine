@@ -1541,6 +1541,83 @@ diagnostic 相同。
 用于保留判断。实验未通过“frame time 可重复正改善”门槛，已撤销 Render Bundle runtime
 consumer；保留本设计检查点、真实命令探针和中立 indirect 路由修复。
 
+### WebGPU draw-uniform 合并上传设计
+
+#### 当前源码与实测边界
+
+`WebGPUShaderProgram` 当前为每次 draw 分配一个按
+`minUniformBufferOffsetAlignment` 对齐的 dynamic offset，打包一份 draw uniform，并立即调用
+`GPUQueue.writeBuffer`。renderer-instance uniform 和 core constant buffer 也各自立即上传。
+
+固定 Grasslands hero 相机、关闭 scene animation、等待 LOD 稳定后的真实命令探针显示，每次
+submission 有 538 次 `writeBuffer`、509,392 bytes：
+
+| 来源 | 调用数 | 说明 |
+| --- | ---: | --- |
+| draw uniform | 454 | 与 454 次 pipeline/draw 编码一一对应 |
+| renderer-instance uniform | 42 | 只在需要 automatic instancing 数据的 program 上传 |
+| core constant buffer | 42 | 保持现有 `WebGPUBuffer.setData` 路径 |
+
+稳态写入分布在 43 个 GPU buffer。若简单把每个 buffer 的最小到最大 offset 整段上传，调用数可
+降到 43，但由于 dynamic-offset padding，传输量会从 509,392 增至 2,769,104 bytes，约为
+5.4 倍；其中 renderer-instance ring 的 block stride 远大于实际有效数据。该方案不符合移动端
+带宽优先约束。
+
+[WebGPU Explainer](https://gpuweb.github.io/gpuweb/explainer/) 说明浏览器通常把 WebGPU 对象和
+校验放在 GPU process，JavaScript 调用需要跨进程转发；同时 mappable GPU buffer 需要额外的
+ownership transfer 或 staging。调用数和传输字节必须一起度量，不能只减少 API 次数。
+
+#### 固定上游源码对照
+
+| 引擎 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `DynamicBuffers` 用对齐 bump allocator 写入 mapped staging buffer；提交前编码 `copyBufferToBuffer` 到 GPU uniform buffer，提交后异步 remap 并复用 staging buffer |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `UniformsGroup.update` 逐值比较，只在真实变化时由 `Bindings` 调用 WebGPU backend 的整 buffer `writeBuffer` |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `UniformBuffer` 用 `_needSync` 和 CPU buffer 比较跳过未变化上传；实际 WebGPU buffer 更新仍由 `WebGPUBufferManager` 直接调用 `queue.writeBuffer` |
+| LayaAir | `722a2847902909c952257d6dd50e5e32f5b07bff` | `WebGPUBuffer.setData/setDataEx` 直接调用 `queue.writeBuffer`；固定版本未发现 draw-uniform ring 的合并提交层 |
+
+这些源码证明 mapped staging、值变化过滤和直接 `writeBuffer` 都是现存策略，不证明任一种在
+Grasslands/移动端一定更快。
+
+#### 方案比较
+
+| 方案 | 调用数 | 传输与同步 | 结论 |
+| --- | ---: | --- | --- |
+| 所有 43 个 buffer 按覆盖范围整段上传 | 约 43 | 约 2.77 MB/submission，renderer-instance padding 占主导 | 不采用 |
+| PlayCanvas 式 mapped staging + GPU copy | 少量 submit/copy | 需要 staging 生命周期、mapAsync 和额外 copy；按当前 layout 仍会复制 padding | 不作为首个切片 |
+| 只合并 per-program draw-uniform ring | 约 120 | 预计约 561 KB；instance/constant 继续紧凑上传 | 实验 |
+| 按 ShaderData/version 跳过或复用相同 uniform | 取决于值变化 | 需要 core 提供跨 scene/camera/renderer/material 的中立版本契约 | 后续独立设计 |
+
+第三种方案直接命中 454 次 draw-uniform 上传，同时避免 renderer-instance stride 的大块空洞。
+它只改变 WebGPU RHI 内部提交时机，不改变 WebGL2、renderer、material、ShaderLab 或用户 API。
+
+#### 本阶段实现契约
+
+1. `WebGPUShaderProgram` 为当前 draw-uniform GPU ring 持有等容量 CPU staging
+   `ArrayBuffer`；uniform pack 直接写入对应 dynamic offset，不再为每 draw 创建临时
+   `ArrayBuffer`。
+2. 每个被使用的 program 在 `GPUQueue.submit` 前最多执行一次 draw-uniform
+   `writeBuffer`。上传范围从 0 到最后一个有效 uniform 结束，允许包含 alignment padding。
+3. renderer-instance uniform、core constant/storage/vertex/index buffer 保持原上传路径，避免
+   用调用数换取大块 padding 带宽。
+4. ring 在 submission 内扩容时，先把旧 ring 的 pending staging 上传到旧 GPU buffer，再创建
+   新 ring 并从 offset 0 继续分配；旧 buffer 继续按现有 submitted-work 生命周期退休。
+5. program 未编码 draw 时不上传；提交完成后只重置 cursor/pending range，不清空已分配
+   staging。program destroy 释放 GPU buffer，CPU staging 交给 GC。
+6. 不增加 runtime threshold、category 特例、example 开关或 public API。WebGL2 仍为默认后端。
+
+#### 验收与性能门
+
+- fake GPU 单元测试覆盖同 program 多 draw 只上传一次、多个 program 独立上传、连续
+  submission、submission 内扩容先上传旧 ring，以及无 draw 不上传。
+- 真实命令探针报告调用数、字节数和目标 buffer；目标是 `writeBuffer` 从 538 降到约 120，
+  总字节不得超过父提交 15%。
+- Grasslands WebGPU E2E 必须保持 291,069 个实例、169,199 个可见实例、76 个 indirect
+  renderer batch、category/LOD、四级 shadow、固定相机截图和零 GPU/page diagnostic。
+- 无注入 A/B 按 `all/no_grass/no_tree/no_rock` 交替采样。只有 frame-time 配对差中位数为正、
+  IQR 不跨 0，且 P95 没有超过 2% 的稳定退化才保留 runtime consumer；否则撤销实现并只保留
+  本设计与探针检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
