@@ -1618,6 +1618,37 @@ Grasslands/移动端一定更快。
   IQR 不跨 0，且 P95 没有超过 2% 的稳定退化才保留 runtime consumer；否则撤销实现并只保留
   本设计与探针检查点。
 
+#### 实验检查点：consumer 未保留
+
+候选实现把 draw-uniform 上传合并到每个 program、每次 submission 一次。固定命令探针对比：
+
+| 指标 | 基线 | 候选 | 差异 |
+| --- | ---: | ---: | ---: |
+| `queue.writeBuffer` 调用 | 538 | 119 | -77.9% |
+| 写入字节 | 509,392 | 562,224 | +10.4% |
+| 总实例 | 291,069 | 291,069 | 0 |
+| 可见实例 | 169,199 | 169,199 | 0 |
+| indirect renderer batch | 76 | 76 | 0 |
+| native `drawIndexedIndirect` | 353 | 353 | 0 |
+| GPU/page diagnostic | 0 | 0 | 0 |
+
+候选 checkout 的真实 WebGPU Grasslands E2E 通过，页面由 WebGL2 reload 到 WebGPU 后保持可见
+terrain/surface 渲染、category/LOD、四级 shadow、compute culling 和零 diagnostic。
+
+同机、同页面、同 hero 相机的无探针短采样结果如下。每个单元格为
+`基线 FPS → 候选 FPS（变化）`：
+
+| 场景 | 第 1 轮 | 第 2 轮 | 第 3 轮 | 配对变化中位数 |
+| --- | --- | --- | --- | ---: |
+| all | 18.512 → 18.462（-0.27%） | 19.173 → 18.563（-3.18%） | 14.795 → 16.203（+9.52%） | -0.27% |
+| no_grass | 18.969 → 19.292（+1.70%） | 10.437 → 12.300（+17.85%） | 20.501 → 20.610（+0.54%） | +1.70% |
+| no_tree | 37.123 → 36.037（-2.93%） | 36.464 → 36.465（+0.00%） | 36.333 → 35.802（-1.46%） | -1.46% |
+| no_rock | 27.770 → 21.139（-23.88%） | 29.333 → 18.232（-37.85%） | 30.581 → 31.405（+2.69%） | -23.88% |
+
+`all` 三轮方向不一致，`no_tree` 和 `no_rock` 的配对变化中位数为负，且 P95 未形成稳定正向
+证据。实验没有通过预先定义的保留门槛，runtime consumer 已撤销；直接紧凑
+`queue.writeBuffer` 路径保持不变。
+
 ### Surface hybrid direct/indirect 提交设计
 
 #### 正确 indirect 后的基线
