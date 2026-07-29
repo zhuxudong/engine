@@ -1704,7 +1704,7 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 | 全部 compute + indirect | GPU copy/fine-cull 后 76 indirect | 自定义四级 per-instance compaction 后 277 indirect | 移动端驱动需处理 353 个 record，且 Shadow 与 WebGL2 结果不一致 | 错误基线 |
 | 全部 conservative direct | CPU 已知 batch count 直接提交 | Forward stream 在四级 cascade 重复 direct | 不需要 GPU-only count，但草失去已有 distance fine-cull | 不采用 |
 | CPU 已知 count direct，GPU-only count indirect | tree/rock 等 legacy copy 走 direct，grass 等 fine-cull 继续 indirect | 保留自定义 per-cascade compaction | Forward 减少 70 个 indirect，但继承错误 Shadow 结果 | 中间检查点 |
-| 上述 Forward hybrid + default direct Shadow | 同上 | caster 使用已 compact 的 Forward stream 和 CPU count | Shadow 由既有 cascade raster clipping；与 WebGL2 shadow effect 等价 | 实验 |
+| 上述 Forward hybrid + default direct Shadow | 同上 | caster 使用已 compact 的 Forward stream 和 CPU count | Shadow 由既有 cascade raster clipping；与 WebGL2 shadow effect 等价 | 保留 |
 | 先做跨 mesh/material mega-batch | 合并 geometry/material 后再提交 | 同步重做 shadow geometry | 资产 attributes、alpha clip、材质贴图和 bounds 语义同时变化，无法单独定位 indirect 成本 | 后续独立实验 |
 
 #### 模块与正确性契约
@@ -1729,7 +1729,7 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 - E2E 覆盖 legacy batch 不绑定 indirect、fine-cull batch 仍绑定、debug count 与 renderer
   active/LOD transition 状态；RHI indirect 路由测试继续通过。
 - 真实命令探针预期 Forward 只剩 GPU fine-cull 的 6 个 indirect，Shadow 为 0 indirect，
-  总计 6；direct draw 为 445。不得以减少逻辑计数代替 native prototype 观测。
+  总计 6；`drawIndexed` 为 443。不得以减少逻辑计数代替 native prototype 观测。
 - 固定 wind/animation/camera 后，必须以 WebGL2 为裁判比对 tree、rock、grass、四级 shadow、
   category/LOD/count 和截图；旧 WebGPU provider 结果不是正确性基线。移动相机、LOD churn、
   阴影开关与 category 开关必须无 validation、console error、page error 或 device lost。
@@ -1793,7 +1793,35 @@ direct 没有增加旧 WebGPU 基线内的差异，不能证明旧 provider 的 
 default direct 没有增加 WebGL2/WebGPU 的既有差异；custom provider 把 Surface shadow effect
 放大到 WebGL2 的约 3.5 倍。根因边界落在 `SurfaceStaticShadowViewProvider` 自建的
 per-cascade instance/count stream，而不是通用 Shadow、场景光照或 WebGPU alpha-clip
-codegen。下一候选删除整条 provider/compute 旁路，再做独立性能与 E2E 保留判断。
+codegen。
+
+#### 实验检查点：移除 custom Shadow provider
+
+候选删除 provider、四级 shadow instance/counter/indirect buffer 和三个专用 compute pass；
+default renderer 直接复用 Forward compact stream。独立 worktree 的 native probe：
+
+| 每 submission 命令 | custom provider | default direct | 差异 |
+| --- | ---: | ---: | ---: |
+| `drawIndexedIndirect` | 283 | 6 | -277 |
+| `drawIndexed` | 166 | 443 | +277 |
+| 可见实例 | 169,199 | 169,199 | 0 |
+| Forward indirect renderer | 6 | 6 | 0 |
+| GPU/page diagnostic | 0 | 0 | 0 |
+
+同一父提交、Chromium 140、ANGLE Metal、固定 hero 相机、关闭 wind/cloud/cloud shadow/fog/
+post-process 后交替三轮。下表为各自三轮中位数：
+
+| workload | custom provider FPS | default direct FPS | baseline P50 → candidate P50 | baseline P95 → candidate P95 |
+| --- | ---: | ---: | ---: | ---: |
+| all | 14.90 | 46.32 | 66.6 → 24.5 ms | 82.9 → 33.3 ms |
+| no_grass | 19.11 | 62.79 | 50.1 → 16.5 ms | 67.1 → 25.3 ms |
+| no_tree | 24.60 | 53.65 | 41.4 → 16.8 ms | 50.5 → 32.9 ms |
+| no_rock | 22.99 | 57.14 | 41.9 → 16.7 ms | 56.9 → 25.9 ms |
+
+完整场景和三个 category ablation 的三轮 FPS 均同向改善，P50/P95 没有退化。真实 WebGPU
+Grasslands E2E 通过 backend reload、相机移动、LOD transition、阴影开关、compute 计数、
+category/LOD/count、可见像素和零 diagnostic。结合 WebGL2 shadow 对照，candidate 同时通过
+正确性与性能门，正式移除 custom provider；通用 core Shadow 和 WebGPU indirect RHI 保持不变。
 
 ### 移动端约束与验收
 
