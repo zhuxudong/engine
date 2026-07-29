@@ -203,6 +203,8 @@ Shader "${SHADER_NAME}" {
 export interface SurfaceStaticCompactionPasses {
   /** Copies ranges that retain CPU visibility and LOD selection. */
   readonly copy: ComputePass;
+  /** Copies range-level light-view survivors into cascade-specific instance streams. */
+  readonly shadowCopy: ComputePass;
   /** Clears fine-cull counters in command order on the GPU timeline. */
   readonly resetFineCullCounters: ComputePass;
   /** Applies instance-distance culling and workgroup-aggregated compaction. */
@@ -220,6 +222,7 @@ export function createSurfaceStaticCompactionPasses(engine: Engine): SurfaceStat
   const shader = Shader.find(SHADER_NAME) ?? Shader.create(SHADER_SOURCE, ShaderLanguage.WGSL);
   return {
     copy: new ComputePass(engine, shader, 0, 0),
+    shadowCopy: new ComputePass(engine, shader, 0, 0),
     resetFineCullCounters: new ComputePass(engine, shader, 0, 1),
     fineCull: new ComputePass(engine, shader, 0, 2),
     finalizeFineCull: new ComputePass(engine, shader, 0, 3)
