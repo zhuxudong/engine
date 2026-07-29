@@ -109,7 +109,10 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   /** @internal */
   get view(): GPUTextureView {
-    return (this._view ??= this._gpuTexture.createView({ dimension: this._viewDimension }));
+    return (this._view ??= this._gpuTexture.createView({
+      dimension: this._viewDimension,
+      aspect: this._format === "depth24plus-stencil8" || this._format === "depth32float-stencil8" ? "depth-only" : "all"
+    }));
   }
 
   /** @internal */

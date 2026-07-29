@@ -318,6 +318,10 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     }
     const depth = renderState.state.depthState;
     const depthEnabled = renderState.customStates?.[RenderStateElementKey.DepthStateEnabled] ?? depth.enabled;
+    const depthWriteEnabled =
+      renderState.customStates?.[RenderStateElementKey.DepthStateWriteEnabled] ?? depth.writeEnabled;
+    const depthCompareFunction =
+      renderState.customStates?.[RenderStateElementKey.DepthStateCompareFunction] ?? depth.compareFunction;
     const stencil = renderState.state.stencilState;
     const stencilEnabled = renderState.customStates?.[RenderStateElementKey.StencilStateEnabled] ?? stencil.enabled;
     const hasStencil = format.includes("stencil");
@@ -328,8 +332,8 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     const globalDepthBias = this._graphicDevice._getGlobalDepthBias();
     const descriptor: GPUDepthStencilState = {
       format,
-      depthWriteEnabled: depthEnabled && depth.writeEnabled,
-      depthCompare: depthEnabled ? WebGPUShaderProgram._compareFunction(depth.compareFunction) : "always",
+      depthWriteEnabled: depthEnabled && depthWriteEnabled,
+      depthCompare: depthEnabled ? WebGPUShaderProgram._compareFunction(depthCompareFunction) : "always",
       depthBias: Math.trunc(globalDepthBias.enabled ? globalDepthBias.bias : renderState.state.rasterState.depthBias),
       depthBiasSlopeScale: globalDepthBias.enabled
         ? globalDepthBias.slopeBias

@@ -1,4 +1,5 @@
 import { MathUtil, Matrix } from "@galacean/engine-math";
+import type { RenderStateElementMap } from "../BasicResources";
 import { RenderContext } from "../RenderPipeline/RenderContext";
 import { Logger } from "../base/Logger";
 import { Mesh } from "../graphic/Mesh";
@@ -58,7 +59,7 @@ export class Sky {
   /**
    * @internal
    */
-  _render(context: RenderContext): void {
+  _render(context: RenderContext, customRenderStates?: RenderStateElementMap): void {
     const { material, mesh } = this;
     if (!material) {
       Logger.warn("The material of sky is not defined.");
@@ -124,7 +125,7 @@ export class Sky {
     program.uploadAll(program.materialUniformBlock, materialShaderData);
     program.uploadUnGroupTextures();
 
-    pass._renderState._applyStates(engine, false, pass._renderStateDataMap, materialShaderData);
+    pass._renderState._applyStates(engine, false, pass._renderStateDataMap, materialShaderData, customRenderStates);
     rhi.drawPrimitive(mesh._primitive, mesh.subMesh, program);
     cameraShaderData.setMatrix(RenderContext.vpMatrixProperty, originViewProjMatrix);
   }

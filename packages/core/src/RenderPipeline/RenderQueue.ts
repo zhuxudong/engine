@@ -47,12 +47,18 @@ export class RenderQueue {
     batcherManager.batch(this.elements, this.batchedElements);
   }
 
+  _hasAnyPipelineStage(pipelineStageTagValues: readonly string[]): boolean {
+    const pipelineStageKey = RenderContext.pipelineStageKey;
+    return this.batchedElements.every((element) =>
+      element.subShader.passes.some((pass) => pipelineStageTagValues.includes(pass.getTagValue(pipelineStageKey)))
+    );
+  }
+
   render(
     context: RenderContext,
     pipelineStageTagValue: string,
     maskType: RenderQueueMaskType = RenderQueueMaskType.No,
-    customRenderStates?: RenderStateElementMap,
-    customRenderStatesRequiredStage?: string
+    customRenderStates?: RenderStateElementMap
   ): void {
     const batchedElements = this.batchedElements;
     const length = batchedElements.length;
@@ -73,14 +79,6 @@ export class RenderQueue {
       const { component, material } = curElement;
       const isInstanced = curElement.instancedRenderers.length > 0;
       const shaderPasses = curElement.subShader.passes;
-      const elementCustomRenderStates =
-        customRenderStates &&
-        customRenderStatesRequiredStage &&
-        !shaderPasses.some(
-          (pass) => pass.getTagValue(RenderContext.pipelineStageKey) === customRenderStatesRequiredStage
-        )
-          ? undefined
-          : customRenderStates;
 
       // Update transform shader data
       // Instancing packs per-renderer transforms into the instance UBO at draw time, so skip here
@@ -95,7 +93,7 @@ export class RenderQueue {
       // Resolve mask render states
       const maskInteraction = component._maskInteraction;
       const needMaskInteraction = maskInteraction !== SpriteMaskInteraction.None;
-      let customStates = elementCustomRenderStates;
+      let customStates = customRenderStates;
 
       if (needMaskType) {
         const maskStates = BasicResources.getMaskTypeRenderStates(maskType);

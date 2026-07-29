@@ -22,6 +22,7 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
   private readonly _ownedDepth: GPUTexture;
   private _mipLevel = 0;
   private _faceIndex?: TextureCubeFace;
+  private _depthReadOnly = false;
 
   constructor(device: WebGPUGraphicDevice, target: RenderTarget) {
     this._device = device;
@@ -63,9 +64,10 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
     }
   }
 
-  activeRenderTarget(mipLevel: number = 0, faceIndex?: TextureCubeFace): void {
+  activeRenderTarget(mipLevel: number = 0, faceIndex?: TextureCubeFace, depthReadOnly: boolean = false): void {
     this._mipLevel = mipLevel;
     this._faceIndex = faceIndex;
+    this._depthReadOnly = depthReadOnly;
     this._device._setRenderTarget(this);
   }
 
@@ -148,9 +150,10 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
         depthFormat === TextureFormat.Depth32Stencil8;
       depthStencilAttachment = {
         view,
-        depthClearValue: clearDepth ? 1 : undefined,
-        depthLoadOp: clearDepth ? "clear" : "load",
-        depthStoreOp: "store",
+        depthReadOnly: this._depthReadOnly,
+        depthClearValue: !this._depthReadOnly && clearDepth ? 1 : undefined,
+        depthLoadOp: this._depthReadOnly ? undefined : clearDepth ? "clear" : "load",
+        depthStoreOp: this._depthReadOnly ? undefined : "store",
         stencilClearValue: clearStencil ? 0 : undefined,
         stencilLoadOp: hasStencil ? (clearStencil ? "clear" : "load") : undefined,
         stencilStoreOp: hasStencil ? "store" : undefined

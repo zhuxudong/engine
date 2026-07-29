@@ -446,14 +446,15 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     _isFlipProjection?: boolean,
     mipLevel: number = 0,
     faceIndex?: number,
-    gpuTimingLabel?: string
+    gpuTimingLabel?: string,
+    depthReadOnly?: boolean
   ): void {
     this._endCurrentPass();
     this._renderPassLabel = gpuTimingLabel || (renderTarget ? "offscreen-render" : "main-render");
     if (renderTarget) {
       (
         renderTarget as RenderTarget & { _platformRenderTarget: IPlatformRenderTarget }
-      )._platformRenderTarget.activeRenderTarget(mipLevel, faceIndex);
+      )._platformRenderTarget.activeRenderTarget(mipLevel, faceIndex, depthReadOnly);
     } else {
       this._currentRenderTarget = null;
     }

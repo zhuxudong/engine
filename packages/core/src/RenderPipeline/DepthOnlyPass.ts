@@ -1,14 +1,24 @@
 import { Camera } from "../Camera";
+import type { RenderStateElementMap } from "../BasicResources";
 import { Engine } from "../Engine";
 import { PipelinePass } from "../RenderPipeline/PipelinePass";
 import { GLCapabilityType } from "../base/Constant";
 import { CameraClearFlags } from "../enums/CameraClearFlags";
+import { ColorWriteMask } from "../shader/enums/ColorWriteMask";
+import { RenderStateElementKey } from "../shader/enums/RenderStateElementKey";
 import { TextureFilterMode, TextureFormat, TextureWrapMode } from "../texture";
 import { RenderTarget } from "../texture/RenderTarget";
 import { CullingResults } from "./CullingResults";
 import { PipelineUtils } from "./PipelineUtils";
 import { RenderContext } from "./RenderContext";
 import { PipelineStage } from "./enums/PipelineStage";
+import { RenderQueueMaskType } from "./enums/RenderQueueMaskType";
+
+const DEPTH_ONLY_RENDER_STATES = <RenderStateElementMap>{
+  [RenderStateElementKey.BlendStateColorWriteMask0]: ColorWriteMask.None
+};
+/** @internal */
+export const depthPrimingOnlyStage = "DepthPrimingOnly";
 
 /**
  * @internal
@@ -59,7 +69,11 @@ export class DepthOnlyPass extends PipelinePass {
     this._ownsRenderTarget = true;
   }
 
-  override onRender(context: RenderContext, cullingResults: CullingResults): void {
+  override onRender(
+    context: RenderContext,
+    cullingResults: CullingResults,
+    depthPrimingEnabled: boolean = false
+  ): void {
     const engine = this.engine;
     const renderTarget = this.renderTarget;
     const camera = context.camera;
@@ -68,8 +82,32 @@ export class DepthOnlyPass extends PipelinePass {
     rhi.clearRenderTarget(engine, CameraClearFlags.Depth, null);
 
     engine._renderCount++;
-    cullingResults.opaqueQueue.render(context, PipelineStage.DepthOnly);
-    cullingResults.alphaTestQueue.render(context, PipelineStage.DepthOnly);
+    cullingResults.opaqueQueue.render(
+      context,
+      PipelineStage.DepthOnly,
+      RenderQueueMaskType.No,
+      DEPTH_ONLY_RENDER_STATES
+    );
+    cullingResults.alphaTestQueue.render(
+      context,
+      PipelineStage.DepthOnly,
+      RenderQueueMaskType.No,
+      DEPTH_ONLY_RENDER_STATES
+    );
+    if (depthPrimingEnabled) {
+      cullingResults.opaqueQueue.render(
+        context,
+        depthPrimingOnlyStage,
+        RenderQueueMaskType.No,
+        DEPTH_ONLY_RENDER_STATES
+      );
+      cullingResults.alphaTestQueue.render(
+        context,
+        depthPrimingOnlyStage,
+        RenderQueueMaskType.No,
+        DEPTH_ONLY_RENDER_STATES
+      );
+    }
 
     camera.shaderData.setTexture(Camera._cameraDepthTextureProperty, this.renderTarget.depthTexture);
   }

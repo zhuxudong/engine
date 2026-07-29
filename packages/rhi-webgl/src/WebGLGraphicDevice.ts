@@ -501,7 +501,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     isFlipProjection: boolean,
     mipLevel?: number,
     faceIndex?: TextureCubeFace,
-    _gpuTimingLabel?: string
+    _gpuTimingLabel?: string,
+    _depthReadOnly?: boolean
   ) {
     let bufferWidth: number, bufferHeight: number;
     if (renderTarget) {

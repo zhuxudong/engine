@@ -73,11 +73,20 @@ export class RenderContext {
     viewport: Vector4,
     mipLevel?: number,
     faceIndex?: TextureCubeFace,
-    gpuTimingLabel?: string
+    gpuTimingLabel?: string,
+    depthReadOnly?: boolean
   ) {
     const engine = this.camera.engine;
     const rhi = engine._hardwareRenderer;
-    rhi.activeRenderTarget(destination, viewport, this.flipProjection, mipLevel, faceIndex, gpuTimingLabel);
+    rhi.activeRenderTarget(
+      destination,
+      viewport,
+      this.flipProjection,
+      mipLevel,
+      faceIndex,
+      gpuTimingLabel,
+      depthReadOnly
+    );
 
     if (destination) {
       engine._macroCollection.disable(Engine._outputSRGBCorrectMacro);

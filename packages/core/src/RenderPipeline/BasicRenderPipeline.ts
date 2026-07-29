@@ -28,7 +28,7 @@ import {
 } from "../texture";
 import { Blitter } from "./Blitter";
 import { CullingResults } from "./CullingResults";
-import { DepthOnlyPass } from "./DepthOnlyPass";
+import { DepthOnlyPass, depthPrimingOnlyStage } from "./DepthOnlyPass";
 import { OpaqueTexturePass } from "./OpaqueTexturePass";
 import { PipelineUtils } from "./PipelineUtils";
 import { ContextRendererUpdateFlag, RenderContext } from "./RenderContext";
@@ -38,7 +38,10 @@ import { RenderQueueMaskType } from "./enums/RenderQueueMaskType";
 
 const DEPTH_PRIMING_RENDER_STATES = <RenderStateElementMap>{
   [RenderStateElementKey.DepthStateWriteEnabled]: false,
-  [RenderStateElementKey.DepthStateCompareFunction]: CompareFunction.Equal
+  [RenderStateElementKey.DepthStateCompareFunction]: CompareFunction.LessEqual
+};
+const DEPTH_READ_ONLY_RENDER_STATES = <RenderStateElementMap>{
+  [RenderStateElementKey.DepthStateWriteEnabled]: false
 };
 
 /**
@@ -142,7 +145,7 @@ export class BasicRenderPipeline {
       (camera.depthTextureMode === DepthTextureMode.PrePass || ambientOcclusionEnabled) && supportDepthTexture;
     const finalClearFlags = camera.clearFlags & ~(ignoreClear ?? CameraClearFlags.None);
     const msaaSamples = renderTarget ? renderTarget.antiAliasing : camera.msaaSamples;
-    const depthPrimingRequested =
+    const depthPrimingCandidate =
       rhi.depthPrimingEnabled &&
       depthPassEnabled &&
       msaaSamples === 1 &&
@@ -176,6 +179,10 @@ export class BasicRenderPipeline {
     const batcherManager = engine._batcherManager;
     cullingResults.sortBatch(batcherManager);
     batcherManager.uploadBuffer();
+    const depthPrimingRequested =
+      depthPrimingCandidate &&
+      cullingResults.opaqueQueue._hasAnyPipelineStage([PipelineStage.DepthOnly, depthPrimingOnlyStage]) &&
+      cullingResults.alphaTestQueue._hasAnyPipelineStage([PipelineStage.DepthOnly, depthPrimingOnlyStage]);
 
     const pool = engine._renderTargetPool;
 
@@ -222,9 +229,18 @@ export class BasicRenderPipeline {
     }
 
     const depthPrimingEnabled = depthPrimingRequested && !!this._internalColorTarget?.depthTexture;
+    if (depthPrimingEnabled) {
+      const primedFlipProjection =
+        rhi.renderTargetOrigin === "lower-left" &&
+        (!!this._internalColorTarget || (camera.renderTarget && cubeFace == undefined));
+      if (context.flipProjection !== primedFlipProjection) {
+        cullingResults.setRenderUpdateFlagTrue(ContextRendererUpdateFlag.ProjectionMatrix);
+        context.applyVirtualCamera(camera._virtualCamera, primedFlipProjection);
+      }
+    }
     if (depthPassEnabled) {
       depthOnlyPass.onConfig(camera, depthPrimingEnabled ? this._internalColorTarget : undefined);
-      depthOnlyPass.onRender(context, cullingResults);
+      depthOnlyPass.onRender(context, cullingResults, depthPrimingEnabled);
       for (const consumer of this._afterDepthPrepassConsumers) {
         consumer(depthOnlyPass.renderTarget.depthTexture);
       }
@@ -287,7 +303,7 @@ export class BasicRenderPipeline {
       context.applyVirtualCamera(camera._virtualCamera, needFlipProjection);
     }
 
-    context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
+    context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
 
     // Clear color
     const forwardClearFlags = depthPrimingEnabled ? finalClearFlags & ~CameraClearFlags.Depth : finalClearFlags;
@@ -329,7 +345,7 @@ export class BasicRenderPipeline {
           rhi.blitInternalRTByBlitFrameBuffer(camera.renderTarget, internalColorTarget, ignoreFlags, camera.viewport);
         }
       }
-      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
     }
 
     const maskManager = scene._maskManager;
@@ -338,25 +354,17 @@ export class BasicRenderPipeline {
     }
 
     const depthPrimingStates = depthPrimingEnabled ? DEPTH_PRIMING_RENDER_STATES : undefined;
-    opaqueQueue.render(
-      context,
-      PipelineStage.Forward,
-      RenderQueueMaskType.No,
-      depthPrimingStates,
-      PipelineStage.DepthOnly
-    );
-    alphaTestQueue.render(
-      context,
-      PipelineStage.Forward,
-      RenderQueueMaskType.No,
-      depthPrimingStates,
-      PipelineStage.DepthOnly
-    );
+    opaqueQueue.render(context, PipelineStage.Forward, RenderQueueMaskType.No, depthPrimingStates);
+    alphaTestQueue.render(context, PipelineStage.Forward, RenderQueueMaskType.No, depthPrimingStates);
     if (finalClearFlags & CameraClearFlags.Color) {
       if (background.mode === BackgroundMode.Sky) {
-        background.sky._render(context);
+        background.sky._render(context, depthPrimingEnabled ? DEPTH_READ_ONLY_RENDER_STATES : undefined);
       } else if (background.mode === BackgroundMode.Texture && background.texture) {
-        this._drawBackgroundTexture(camera, background);
+        this._drawBackgroundTexture(
+          camera,
+          background,
+          depthPrimingEnabled ? DEPTH_READ_ONLY_RENDER_STATES : undefined
+        );
       }
     }
 
@@ -370,12 +378,17 @@ export class BasicRenderPipeline {
       opaqueTexturePass.onRender(context);
 
       // Should revert to original render target
-      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
     } else {
       camera.shaderData.setTexture(Camera._cameraOpaqueTextureProperty, null);
     }
 
-    transparentQueue.render(context, PipelineStage.Forward);
+    transparentQueue.render(
+      context,
+      PipelineStage.Forward,
+      RenderQueueMaskType.No,
+      depthPrimingEnabled ? DEPTH_READ_ONLY_RENDER_STATES : undefined
+    );
     // Revert stencil buffer generated by mask
     maskManager.clearMask(context, PipelineStage.Forward);
 
@@ -507,7 +520,7 @@ export class BasicRenderPipeline {
     }
   }
 
-  private _drawBackgroundTexture(camera: Camera, background: Background) {
+  private _drawBackgroundTexture(camera: Camera, background: Background, customRenderStates?: RenderStateElementMap) {
     const engine = camera.engine;
     const rhi = engine._hardwareRenderer;
     const { canvas } = engine;
@@ -531,7 +544,7 @@ export class BasicRenderPipeline {
     program.uploadUnGroupTextures();
 
     const renderState = pass._renderState;
-    renderState._applyStates(engine, false, pass._renderStateDataMap, material.shaderData);
+    renderState._applyStates(engine, false, pass._renderStateDataMap, material.shaderData, customRenderStates);
     rhi.drawPrimitive(mesh._primitive, mesh.subMesh, program);
   }
 
