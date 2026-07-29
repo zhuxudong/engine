@@ -55,6 +55,27 @@ Shader "${name}" {
 `;
 }
 
+function createHalfValueComputeShaderSource(name: string): string {
+  return `
+Shader "${name}" {
+  SubShader "Default" {
+    Pass "Convert" {
+      readonly buffer vec4 inputValues[];
+      buffer vec4 outputValues[];
+
+      void convertValues() {
+        uint index = gl_GlobalInvocationID.x;
+        half4 localValue = half4(inputValues[index]);
+        outputValues[index] = vec4(localValue);
+      }
+
+      ComputeShader = convertValues;
+    }
+  }
+}
+`;
+}
+
 function createDepthTextureShaderSource(name: string): string {
   return `
 Shader "${name}" {
@@ -134,6 +155,50 @@ describe("ComputePass", () => {
 
     readback.unmap();
     readback.destroy();
+    computePass.destroy();
+    input.destroy(true);
+    output.destroy(true);
+    engine.destroy();
+  });
+
+  it("selects native or fallback half arithmetic from the WebGPU device feature", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const engine = await WebGPUEngine.create({
+      canvas: document.createElement("canvas"),
+      shaderCompiler: new ShaderCompiler()
+    });
+    const shader = Shader.create(createHalfValueComputeShaderSource("RHI/ComputeHalfValue"), ShaderLanguage.WGSL);
+    const shaderPass = shader.subShaders[0].passes[0];
+    const compiled = shaderPass._compileComputeShaderSource(engine);
+    const graphicDevice = engine._hardwareRenderer as unknown as {
+      device: GPUDevice;
+      shaderCapabilities: { float16: boolean };
+    };
+
+    expect(graphicDevice.shaderCapabilities.float16).toBe(graphicDevice.device.features.has("shader-f16"));
+    if (graphicDevice.shaderCapabilities.float16) {
+      expect(compiled.source).toContain("enable f16;");
+      expect(compiled.source).toContain("alias half4 = vec4<f16>;");
+    } else {
+      expect(compiled.source).not.toContain("enable f16;");
+      expect(compiled.source).toContain("alias half4 = vec4<f32>;");
+    }
+
+    const values = Float32Array.from({ length: 64 * 4 }, (_, index) => (index % 32) * 0.25);
+    const input = new Buffer(engine, BufferBindFlag.StorageBuffer, values, BufferUsage.Dynamic);
+    const output = new Buffer(engine, BufferBindFlag.StorageBuffer, values.byteLength, BufferUsage.Dynamic);
+    const computePass = new ComputePass(engine, shader);
+    computePass.setBuffer("inputValues", input);
+    computePass.setBuffer("outputValues", output);
+    computePass.dispatch(1);
+    engine._hardwareRenderer.flush();
+
+    const result = new Float32Array(await readStorageBuffer(graphicDevice.device, output, values.byteLength));
+    expect(result).toEqual(values);
+
     computePass.destroy();
     input.destroy(true);
     output.destroy(true);
