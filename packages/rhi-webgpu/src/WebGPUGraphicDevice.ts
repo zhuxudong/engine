@@ -59,6 +59,8 @@ export interface WebGPUGraphicDeviceOptions {
   requiredLimits?: Record<string, GPUSize64>;
   /** Request optional non-blocking GPU timestamp collection. */
   enableGPUTiming?: boolean;
+  /** Reuse eligible single-sample depth prepasses during forward rendering. */
+  enableDepthPriming?: boolean;
   /** Canvas alpha compositing mode. */
   alphaMode?: GPUCanvasAlphaMode;
   /** Canvas color space. */
@@ -105,6 +107,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly renderer: string;
   /** Optional GPU timestamp collection state. */
   readonly gpuTiming: WebGPUTimingProfiler;
+  /** Whether eligible single-sample depth prepasses are reused by the forward pass. */
+  readonly depthPrimingEnabled: boolean;
 
   /** @internal */
   _currentBindShaderProgram: unknown;
@@ -169,6 +173,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       options.enableGPUTiming ?? false
     );
     this.gpuTiming = this._gpuTimingProfiler;
+    this.depthPrimingEnabled = options.enableDepthPriming ?? false;
     const defaultVertexData = new ArrayBuffer(48);
     new Float32Array(defaultVertexData, 0, 4)[3] = 1;
     new Int32Array(defaultVertexData, 16, 4)[3] = 1;

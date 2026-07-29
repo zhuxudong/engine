@@ -17,14 +17,27 @@ import { PipelineStage } from "./enums/PipelineStage";
 export class DepthOnlyPass extends PipelinePass {
   readonly supportDepthTexture: boolean;
   renderTarget: RenderTarget;
+  private _ownsRenderTarget = false;
 
   constructor(engine: Engine) {
     super(engine);
     this.supportDepthTexture = engine._hardwareRenderer.canIUse(GLCapabilityType.depthTexture);
   }
 
-  onConfig(camera: Camera): void {
+  onConfig(camera: Camera, sharedRenderTarget?: RenderTarget): void {
     const engine = this.engine;
+    if (sharedRenderTarget) {
+      if (this._ownsRenderTarget) {
+        engine._renderTargetPool.freeRenderTarget(this.renderTarget);
+      }
+      this.renderTarget = sharedRenderTarget;
+      this._ownsRenderTarget = false;
+      return;
+    }
+
+    if (this.renderTarget && !this._ownsRenderTarget) {
+      this.renderTarget = null;
+    }
     const { width, height } = camera.pixelViewport;
 
     const renderTarget = PipelineUtils.recreateRenderTargetIfNeeded(
@@ -43,6 +56,7 @@ export class DepthOnlyPass extends PipelinePass {
     );
 
     this.renderTarget = renderTarget;
+    this._ownsRenderTarget = true;
   }
 
   override onRender(context: RenderContext, cullingResults: CullingResults): void {
@@ -62,9 +76,10 @@ export class DepthOnlyPass extends PipelinePass {
 
   release(): void {
     const renderTarget = this.renderTarget;
-    if (renderTarget) {
+    if (renderTarget && this._ownsRenderTarget) {
       this.engine._renderTargetPool.freeRenderTarget(renderTarget);
-      this.renderTarget = null;
     }
+    this.renderTarget = null;
+    this._ownsRenderTarget = false;
   }
 }

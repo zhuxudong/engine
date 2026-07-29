@@ -1,5 +1,6 @@
 import { Vector2 } from "@galacean/engine-math";
 import { Background } from "../Background";
+import type { RenderStateElementMap } from "../BasicResources";
 import { Camera } from "../Camera";
 import { BackgroundMode } from "../enums/BackgroundMode";
 import { BackgroundTextureFillMode } from "../enums/BackgroundTextureFillMode";
@@ -11,6 +12,8 @@ import { FinalPass } from "../postProcess";
 import { Shader } from "../shader/Shader";
 import { ShaderMacroCollection } from "../shader/ShaderMacroCollection";
 import { SubShader } from "../shader/SubShader";
+import { CompareFunction } from "../shader/enums/CompareFunction";
+import { RenderStateElementKey } from "../shader/enums/RenderStateElementKey";
 import { RenderQueueType } from "../shader/enums/RenderQueueType";
 import { CascadedShadowCasterPass } from "../shadow/CascadedShadowCasterPass";
 import { ShadowType } from "../shadow/enum/ShadowType";
@@ -31,6 +34,13 @@ import { PipelineUtils } from "./PipelineUtils";
 import { ContextRendererUpdateFlag, RenderContext } from "./RenderContext";
 import { RenderElement } from "./RenderElement";
 import { PipelineStage } from "./enums/PipelineStage";
+import { RenderQueueMaskType } from "./enums/RenderQueueMaskType";
+
+const DEPTH_PRIMING_RENDER_STATES = <RenderStateElementMap>{
+  [RenderStateElementKey.DepthStateWriteEnabled]: false,
+  [RenderStateElementKey.DepthStateCompareFunction]: CompareFunction.Equal
+};
+
 /**
  * Basic render pipeline.
  */
@@ -132,6 +142,11 @@ export class BasicRenderPipeline {
       (camera.depthTextureMode === DepthTextureMode.PrePass || ambientOcclusionEnabled) && supportDepthTexture;
     const finalClearFlags = camera.clearFlags & ~(ignoreClear ?? CameraClearFlags.None);
     const msaaSamples = renderTarget ? renderTarget.antiAliasing : camera.msaaSamples;
+    const depthPrimingRequested =
+      rhi.depthPrimingEnabled &&
+      depthPassEnabled &&
+      msaaSamples === 1 &&
+      (finalClearFlags & CameraClearFlags.Depth) !== 0;
 
     // Check whether can use `blitFramebuffer` to blit internal render target, source maybe screen canvas or camera's render target
     // Our screen canvas's anti-aliasing is always disable, so blit source and dest is always same by below rules:
@@ -162,17 +177,6 @@ export class BasicRenderPipeline {
     cullingResults.sortBatch(batcherManager);
     batcherManager.uploadBuffer();
 
-    if (depthPassEnabled) {
-      depthOnlyPass.onConfig(camera);
-      depthOnlyPass.onRender(context, cullingResults);
-      for (const consumer of this._afterDepthPrepassConsumers) {
-        consumer(depthOnlyPass.renderTarget.depthTexture);
-      }
-    } else {
-      depthOnlyPass.release();
-      camera.shaderData.setTexture(Camera._cameraDepthTextureProperty, engine._basicResources.whiteTexture2D);
-    }
-
     const pool = engine._renderTargetPool;
 
     // Check if need to create internal color texture or grab texture
@@ -195,7 +199,7 @@ export class BasicRenderPipeline {
         viewport.height,
         camera._getInternalColorTextureFormat(),
         depthFormat,
-        false,
+        depthPrimingRequested,
         false,
         !camera.enableHDR,
         msaaSamples,
@@ -217,6 +221,18 @@ export class BasicRenderPipeline {
       }
     }
 
+    const depthPrimingEnabled = depthPrimingRequested && !!this._internalColorTarget?.depthTexture;
+    if (depthPassEnabled) {
+      depthOnlyPass.onConfig(camera, depthPrimingEnabled ? this._internalColorTarget : undefined);
+      depthOnlyPass.onRender(context, cullingResults);
+      for (const consumer of this._afterDepthPrepassConsumers) {
+        consumer(depthOnlyPass.renderTarget.depthTexture);
+      }
+    } else {
+      depthOnlyPass.release();
+      camera.shaderData.setTexture(Camera._cameraDepthTextureProperty, engine._basicResources.whiteTexture2D);
+    }
+
     // Scalable ambient obscurance pass
     // Before opaque pass so materials can sample ambient occlusion in BRDF
     const saoPass = this._saoPass;
@@ -227,10 +243,13 @@ export class BasicRenderPipeline {
       this._saoPass.release();
     }
 
-    this._drawRenderPass(context, camera, finalClearFlags, cubeFace, mipLevel);
+    this._drawRenderPass(context, camera, finalClearFlags, depthPrimingEnabled, cubeFace, mipLevel);
 
     // Return the per-frame leases so the next camera with matching shape can reuse them
     if (this._internalColorTarget) {
+      if (depthPrimingEnabled) {
+        depthOnlyPass.release();
+      }
       pool.freeRenderTarget(this._internalColorTarget);
       this._internalColorTarget = null;
     }
@@ -244,6 +263,7 @@ export class BasicRenderPipeline {
     context: RenderContext,
     camera: Camera,
     finalClearFlags: CameraClearFlags,
+    depthPrimingEnabled: boolean,
     cubeFace?: TextureCubeFace,
     mipLevel?: number
   ) {
@@ -270,12 +290,13 @@ export class BasicRenderPipeline {
     context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
 
     // Clear color
-    if (finalClearFlags !== CameraClearFlags.None) {
+    const forwardClearFlags = depthPrimingEnabled ? finalClearFlags & ~CameraClearFlags.Depth : finalClearFlags;
+    if (forwardClearFlags !== CameraClearFlags.None) {
       const premultiplyColor = Background._premultiplySolidColor;
       const { solidColor } = background;
       const { a } = solidColor;
       premultiplyColor.set(solidColor.r * a, solidColor.g * a, solidColor.b * a, a);
-      rhi.clearRenderTarget(engine, finalClearFlags, premultiplyColor);
+      rhi.clearRenderTarget(engine, forwardClearFlags, premultiplyColor);
     }
 
     if (internalColorTarget) {
@@ -316,8 +337,21 @@ export class BasicRenderPipeline {
       maskManager.hasStencilWritten = false;
     }
 
-    opaqueQueue.render(context, PipelineStage.Forward);
-    alphaTestQueue.render(context, PipelineStage.Forward);
+    const depthPrimingStates = depthPrimingEnabled ? DEPTH_PRIMING_RENDER_STATES : undefined;
+    opaqueQueue.render(
+      context,
+      PipelineStage.Forward,
+      RenderQueueMaskType.No,
+      depthPrimingStates,
+      PipelineStage.DepthOnly
+    );
+    alphaTestQueue.render(
+      context,
+      PipelineStage.Forward,
+      RenderQueueMaskType.No,
+      depthPrimingStates,
+      PipelineStage.DepthOnly
+    );
     if (finalClearFlags & CameraClearFlags.Color) {
       if (background.mode === BackgroundMode.Sky) {
         background.sky._render(context);

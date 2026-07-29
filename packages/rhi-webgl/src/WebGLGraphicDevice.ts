@@ -121,6 +121,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     droppedSampleCount: 0,
     requestSample: () => false
   };
+  /** Depth priming is not enabled by the WebGL backend. */
+  readonly depthPrimingEnabled = false;
 
   maxUniformBlockSize: number;
 

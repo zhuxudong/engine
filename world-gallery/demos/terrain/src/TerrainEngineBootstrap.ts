@@ -21,13 +21,15 @@ export async function createTerrainEngine(
   canvas: HTMLCanvasElement | OffscreenCanvas | string
 ): Promise<TerrainEngineSession> {
   const backend = resolveTerrainBackend(location.search);
+  const searchParams = new URLSearchParams(location.search);
   const configuration = { canvas, shaderCompiler: new ShaderCompiler() };
   const engine =
     backend === "webgpu"
       ? await WebGPUEngine.create({
           ...configuration,
           graphicDeviceOptions: {
-            enableGPUTiming: new URLSearchParams(location.search).get("gpuTiming") === "1"
+            enableGPUTiming: searchParams.get("gpuTiming") === "1",
+            enableDepthPriming: searchParams.get("depthPriming") === "1"
           }
         })
       : await WebGLEngine.create(configuration);

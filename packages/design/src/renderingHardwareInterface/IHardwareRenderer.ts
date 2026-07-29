@@ -95,6 +95,8 @@ export interface IHardwareRenderer {
   readonly computeCapabilities: ComputeCapabilities;
   /** Optional GPU timestamp collection state. */
   readonly gpuTiming: GPUTiming;
+  /** Whether eligible single-sample depth prepasses are reused by the forward pass. */
+  readonly depthPrimingEnabled: boolean;
 
   /**
    * Create a backend compute program.

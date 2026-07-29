@@ -50,7 +50,9 @@ export class RenderQueue {
   render(
     context: RenderContext,
     pipelineStageTagValue: string,
-    maskType: RenderQueueMaskType = RenderQueueMaskType.No
+    maskType: RenderQueueMaskType = RenderQueueMaskType.No,
+    customRenderStates?: RenderStateElementMap,
+    customRenderStatesRequiredStage?: string
   ): void {
     const batchedElements = this.batchedElements;
     const length = batchedElements.length;
@@ -70,6 +72,15 @@ export class RenderQueue {
       const curElement = batchedElements[i];
       const { component, material } = curElement;
       const isInstanced = curElement.instancedRenderers.length > 0;
+      const shaderPasses = curElement.subShader.passes;
+      const elementCustomRenderStates =
+        customRenderStates &&
+        customRenderStatesRequiredStage &&
+        !shaderPasses.some(
+          (pass) => pass.getTagValue(RenderContext.pipelineStageKey) === customRenderStatesRequiredStage
+        )
+          ? undefined
+          : customRenderStates;
 
       // Update transform shader data
       // Instancing packs per-renderer transforms into the instance UBO at draw time, so skip here
@@ -84,14 +95,16 @@ export class RenderQueue {
       // Resolve mask render states
       const maskInteraction = component._maskInteraction;
       const needMaskInteraction = maskInteraction !== SpriteMaskInteraction.None;
-      let customStates: RenderStateElementMap = null;
+      let customStates = elementCustomRenderStates;
 
       if (needMaskType) {
-        customStates = BasicResources.getMaskTypeRenderStates(maskType);
+        const maskStates = BasicResources.getMaskTypeRenderStates(maskType);
+        customStates = customStates ? Object.assign({}, customStates, maskStates) : maskStates;
       } else {
         if (needMaskInteraction) {
           maskManager.drawMask(context, pipelineStageTagValue, component._maskLayer);
-          customStates = BasicResources.getMaskInteractionRenderStates(maskInteraction);
+          const maskStates = BasicResources.getMaskInteractionRenderStates(maskInteraction);
+          customStates = customStates ? Object.assign({}, customStates, maskStates) : maskStates;
         } else {
           maskManager.isReadStencil(material) && maskManager.clearMask(context, pipelineStageTagValue);
         }
@@ -99,7 +112,6 @@ export class RenderQueue {
       }
 
       const { shaderData: renderElementShaderData } = curElement;
-      const shaderPasses = curElement.subShader.passes;
       const { shaderData: rendererData, instanceId: rendererId } = component;
       const { shaderData: materialData, instanceId: materialId } = material;
 
