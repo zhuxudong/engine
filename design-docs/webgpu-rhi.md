@@ -818,6 +818,52 @@ per-cascade compute/pass 提交成本，并保持四组参数在同一 command b
 
 第一版不引入 occlusion culling、Hi-Z、mesh shader、多 draw indirect 或 render bundle。这些能力必须有独立设计、移动端限制检查和 benchmark 证据后再进入范围。
 
+### Alpha-test vegetation range ordering 设计
+
+#### Grasslands 上限与现状
+
+`hero` 固定相机保持四级阴影，关闭建筑、云、云影、雾、后处理、风和动画；同一 WebGPU 页面
+按 `on/off/off/on` 切换 category，每项稳定后采样 3 秒。关闭 136,466 个可见 grass 实例的
+两组配对 FPS 分别从 39.99 到 54.33（+35.88%）、从 37.33 到 54.37（+45.64%）。关闭 tree、
+rock、shrub 的两组配对分别为 65.31 到 89.66（+37.29%）、39.56 到 53.04（+34.09%）。
+所有 GPU/page diagnostic 为 0。绝对 FPS 受连续采样期间系统负载影响，因此这里只把配对区间
+作为整层成本上限，不归因为某一种 shader、vertex、fragment 或 shadow 工作。
+
+Grasslands 的三个 grass prototype 共 136,466 个当前可见实例，均为单 LOD、不投影，材质
+`alphaCutoff` 为 0.15 或 0.3，使用双面 vegetation pass。Forward fragment 先采 albedo 并
+discard，再为存活 fragment 采 normal/metallic/occlusion 并执行直接光、IBL 和阴影接收。
+WebGPU static atlas 已按 prototype LOD 合并为 indirect instanced draw，但 direct-copy command
+仍按 manifest range 顺序写 output stream，batch 内没有相机相关的 near-to-far 顺序。
+
+#### 业界源码边界
+
+| 引擎 | 本地版本 | 客观实现 |
+| --- | --- | --- |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `BatchedMesh.onBeforeRender` 默认按 object sphere 的 camera-space `z` 对 opaque range 升序，再更新 multi-draw start/count 与 indirect texture |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `RenderingGroup.frontToBackSortCompare` 按 `_distanceToCamera` 升序；该距离由 bounding-sphere center 到 camera position 的欧氏距离生成 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `Layer` 提供 `SORTMODE_FRONT2BACK`，按 draw bucket 与相机 forward 投影距离生成 dynamic sort key；opaque 默认仍是 material/mesh 排序 |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `UniversalRenderPipeline` 默认使用 `SortingCriteria.CommonOpaque`，但 GPU 声明 hidden-surface removal 时会去掉 front-to-back 标志 |
+
+这些源码只证明前向排序是现成策略，也证明 tile/hidden-surface-removal GPU 不保证受益；不能直接
+推导 Grasslands 或移动 WebGPU 会变快。
+
+#### 本阶段实验契约
+
+1. Engine、ShaderLab、材质和用户 API 不变；WebGL2 继续使用原 cell renderer。只重排 WebGPU
+   已有 static compaction 的 source-range copy command，不增加 draw、dispatch、buffer 或
+   shader variant。
+2. 是否排序从 renderer 实际绑定的 `SurfaceMaterial.alphaCutoff > 0` 推导，不按 grass/tree
+   category 写特例；同一 prototype LOD 只要有 alpha-test primitive，就共享同一实例顺序。
+3. range 使用 manifest world bounds center 到当前 camera position 的平方距离升序，offset
+   作为稳定 tie-breaker。只在 batch 因 visibility、density、LOD、tuning 或已有 fine-cull
+   camera invalidation 而需要 compact 时重排；排序本身不额外触发 compaction。
+4. visibility、density prefix、LOD 正负 fade、fine-cull boundary、indirect count 和 renderer
+   bounds 不变。首版不做 per-instance sort、GPU radix sort、深度 prepass、alpha-to-coverage
+   或额外 near/far draw bin。
+5. 验收对父提交做固定相机与连续移动 ABBA；报告排序 range 数、CPU frame p50/p95、FPS 与
+   GPU/page diagnostic。固定相机截图须保持像素等价，WebGL2 E2E 不变。若整帧无稳定收益或
+   移动尾延迟退化，撤销实现并保留实验记录。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
