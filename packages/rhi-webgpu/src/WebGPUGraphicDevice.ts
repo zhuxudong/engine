@@ -486,9 +486,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
     this._endCurrentPass();
     if (this._commandEncoder) {
-      for (const program of this._usedPrograms) {
-        program._flushUploads();
-      }
       const timingReadback = this._gpuTimingProfiler.resolve(this._commandEncoder);
       this.device.queue.submit([this._commandEncoder.finish()]);
       this._gpuTimingProfiler.readAfterSubmit(timingReadback);

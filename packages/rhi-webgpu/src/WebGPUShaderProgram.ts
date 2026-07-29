@@ -48,12 +48,9 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
   private readonly _bindGroups = new Map<string, GPUBindGroup>();
 
   private _uniformBuffer: GPUBuffer;
-  private _uniformUploadData: ArrayBuffer;
-  private _uniformUploadView: DataView;
   private _uniformCapacity = 64;
   private _uniformStride = 0;
   private _uniformCursor = 0;
-  private _uniformUploadEnd = 0;
   private _uniformGeneration = 0;
   private _instanceBuffer: GPUBuffer;
   private _instanceBindGroup: GPUBindGroup;
@@ -107,7 +104,6 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         this._uniformLayout.byteLength
       );
       this._uniformBuffer = this._createUniformBuffer(this._uniformCapacity);
-      this._createUniformUploadData();
       entries.push({
         binding: 0,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
@@ -228,11 +224,6 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       vertexBufferBindings
     );
     graphicDevice._useProgram(this);
-  }
-
-  /** @internal */
-  _flushUploads(): void {
-    this._flushUniformUpload();
   }
 
   /** @internal */
@@ -398,8 +389,8 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     if (this._uniformLayout.byteLength > 0) {
       this._ensureUniformCapacity();
       dynamicOffset = this._uniformCursor++ * this._uniformStride;
-      this._writeFields(this._uniformUploadView, this._uniformLayout.fields, dynamicOffset);
-      this._uniformUploadEnd = dynamicOffset + this._uniformLayout.byteLength;
+      const data = this._packUniforms();
+      this._graphicDevice.device.queue.writeBuffer(this._uniformBuffer, dynamicOffset, data);
       entries.push({
         binding: 0,
         resource: {
@@ -520,13 +511,20 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     }
   }
 
-  private _writeFields(view: DataView, fields: readonly WebGPUUniformFieldLayout[], baseOffset: number): void {
+  private _packUniforms(): ArrayBuffer {
+    const data = new ArrayBuffer(this._uniformLayout.byteLength);
+    const view = new DataView(data);
+    this._writeFields(view, this._uniformLayout.fields);
+    return data;
+  }
+
+  private _writeFields(view: DataView, fields: readonly WebGPUUniformFieldLayout[]): void {
     for (const field of fields) {
       if (field.members) {
         if (field.arrayLength > 0) {
           throw new Error(`Arrays of uniform structs are not supported yet: ${field.propertyName}.`);
         }
-        this._writeFields(view, field.members, baseOffset);
+        this._writeFields(view, field.members);
         continue;
       }
 
@@ -545,7 +543,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
           const columnStride = native.size / native.columns;
           for (let row = 0; row < native.rows; row++) {
             const sourceIndex = element * componentCount + column * native.rows + row;
-            const targetOffset = baseOffset + elementOffset + column * columnStride + row * 4;
+            const targetOffset = elementOffset + column * columnStride + row * 4;
             WebGPUShaderProgram._writeScalar(view, targetOffset, native.scalar, components[sourceIndex] ?? 0);
           }
         }
@@ -570,35 +568,12 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     if (this._uniformCursor < this._uniformCapacity) {
       return;
     }
-    this._flushUniformUpload();
     const oldBuffer = this._uniformBuffer;
     this._uniformCapacity *= 2;
     this._uniformBuffer = this._createUniformBuffer(this._uniformCapacity);
-    this._createUniformUploadData();
-    this._uniformCursor = 0;
     this._uniformGeneration++;
     this._bindGroups.clear();
     this._graphicDevice._retireBuffer(oldBuffer);
-  }
-
-  private _createUniformUploadData(): void {
-    this._uniformUploadData = new ArrayBuffer(this._uniformStride * this._uniformCapacity);
-    this._uniformUploadView = new DataView(this._uniformUploadData);
-    this._uniformUploadEnd = 0;
-  }
-
-  private _flushUniformUpload(): void {
-    if (this._uniformUploadEnd === 0) {
-      return;
-    }
-    this._graphicDevice.device.queue.writeBuffer(
-      this._uniformBuffer,
-      0,
-      this._uniformUploadData,
-      0,
-      this._uniformUploadEnd
-    );
-    this._uniformUploadEnd = 0;
   }
 
   private _createUniformBuffer(capacity: number): GPUBuffer {
