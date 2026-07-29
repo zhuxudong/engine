@@ -729,6 +729,7 @@ cascade 会重复消费主相机 stream 中的整批索引。
 | 按 cell 恢复 shadow renderer | 引擎现有 bounds culling 可用，但重新引入上千 draw/renderer | 不采用 |
 | Forward stream 不变；四级 cascade 共用一个 shadow output，每级 compute 后立即 draw | shadow-only output 实测只有 595,456 B | 实测淘汰，见下方检查点 |
 | Forward stream 不变；四级 cascade 使用四个长期驻留的 shadow-only slot | 4 份 output 共约 2.27 MiB；每级有独立参数、counter 与 indirect 区域，可缓存静止视图 | 实测淘汰，见下方检查点 |
+| 先生成全部 cascade 描述与四份 stream，再开始 shadow render | 保留四份参数快照；compute 可连续编码，避免四次 compute/render 交替 | 本阶段实验 |
 
 实验方案沿用 Unity Camera/Light 分离 visibility 与 PlayCanvas per-light visible-index/count 的
 源码结论，并只落地 Galacean directional cascade 所需的最小契约：
@@ -807,6 +808,49 @@ texture、render state、vertex layout、indirect argument 与实例 multiset �
 平面每帧变化，四组 `reset → cull → finalize` 无法复用；移动场景的整帧 FPS 与 P95 均退化。
 该实现未通过性能门，代码撤销，仅保留本检查点。再次进入实现前必须先证明能够减少每帧
 per-cascade compute/pass 提交成本，并保持四组参数在同一 command buffer 内的快照语义。
+
+#### 全级联预计算设计
+
+同一 WebGPU 页面关闭环境光没有形成可分辨收益；关闭整套方向光 shadow render/receive 的
+两组配对为 `37.11 → 45.61 FPS` 和 `36.91 → 45.39 FPS`。临时跳过 Forward shadow receive
+后，再关闭 caster render 的两组配对为 `37.78 → 43.39 FPS` 和
+`36.38 → 38.81 FPS`。这些 ablation 会改变画面，只用于确认 caster pass 是结构性成本来源，
+不作为候选收益或验收结果。
+
+业界固定源码快照给出的共同边界是“先准备 view/split，再消费 draw stream”，而不是在每次
+cascade render 之间改写同一个 renderer：
+
+| 引擎 | 固定源码 | 客观行为 |
+| --- | --- | --- |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` 的 `Runtime/ShadowCulling.cs`、`Runtime/Passes/MainLightShadowCasterPass.cs` | `ComputeShadowCasterCullingInfos` 先构造所有 light/split 的 `ShadowSplitData`，随后一次调用 `ScriptableRenderContext.CullShadowCasters`；Main Light pass 再按已生成的 cascade slice 渲染 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` 的 `shadow-renderer-directional.js`、`mesh-instance.js`、`shadow-renderer.js` | directional renderer 的 PASS 1 先遍历并裁剪所有 cascade；`MeshInstance.setIndirect(camera, ...)` 与 `getDrawCommands(camera)` 让 shadow camera 读取自己的 indirect command |
+| WebGPU | [GPUWeb specification](https://gpuweb.github.io/gpuweb/) 的 `GPUQueue.submit` 与 command-buffer 执行模型 | 同一 CPU buffer 的连续 `writeBuffer` 不能表达每个未执行 dispatch 的独立参数快照；四组参数必须使用不重叠的稳定区域或独立 buffer |
+
+本阶段只引入内部多 view draw 契约，不改变 `MeshRenderer`、材质、ShaderLab 或 Engine 的用户
+API：
+
+1. `CascadedShadowCasterPass` 先计算全部 `ShadowSliceData`、matrix、split sphere 与 viewport，
+   然后把只读 slice 描述一次性交给本帧出现的唯一 GPU-driven preparer；所有 preparer 完成后
+   才绑定、清理并渲染 shadow target。
+2. `RenderContext` 增加 internal `shadowCascadeIndex`，非 shadow 阶段固定为 `-1`。它只标识当前
+   消费的 view，不负责持有 Surface 资源。
+3. `MeshRenderer` 的默认 draw binding 保持现状；可选 internal provider 按 cascade 返回
+   `Primitive + indirect buffer/offset`。ShadowCaster 读取该 binding，Forward 继续读取现有
+   primitive 与 indirect binding，不再通过“重绑后恢复”修改 renderer 的共享状态。
+4. provider 由共享它的 renderers 持有；pass 按对象 identity 去重后只调用一次
+   `prepareShadowViews`。core 不知道 Surface category、range、instance layout 或 compute
+   shader。
+5. Surface provider 为四级 cascade 使用四组稳定 parameter/counter/output/indirect 区域。
+   首版仍可编码四组 `reset → cull → finalize`，但它们必须全部发生在第一个 shadow render
+   之前；是否实际合并成一个 native compute pass，以 RHI instrumentation 为准。
+6. 任一 cascade 缺少已完成的 stream 时显式报错，不复用 Forward count，不静默退回 per-cell
+   renderer。
+
+core 切片的验收门是默认 direct/indirect draw 不变、同一 provider 只准备一次、四级 cascade
+分别选择自己的 binding，且 WebGL2/WebGPU Grasslands 截图与父提交一致。Surface 切片额外报告
+native `beginComputePass`、dispatch、四级 survivor、实际索引工作与 fixed/moving ABBA；
+移动场景 FPS 或 P95 退化时撤销 Surface 实现，保留中立 core 契约的前提是它没有运行时成本且
+有独立单元测试覆盖。
 
 验收分三层：
 
