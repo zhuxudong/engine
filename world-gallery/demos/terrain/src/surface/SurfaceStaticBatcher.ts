@@ -878,6 +878,11 @@ export class SurfaceStaticBatcher {
     return this._instanceCount > 0 ? this._renderers.length : 0;
   }
 
+  /** Number of active renderer batches whose instance count is produced by compute. */
+  get activeIndirectRendererBatchCount(): number {
+    return this.fineCulling && this._instanceCount > 0 ? this._renderers.length : 0;
+  }
+
   /**
    * Updates one cell's retained density prefix.
    * @param rangeOffset Stable source offset identifying the manifest range.
@@ -1134,11 +1139,13 @@ function createBatcher(
     if (!material) throw new Error(`[SurfaceStaticBatcher] ${prototype.id} references unknown material ${materialId}`);
     for (let subMeshIndex = 0; subMeshIndex < sourceMesh.subMeshes.length; subMeshIndex++) {
       renderer.setMaterial(subMeshIndex, material);
-      renderer._setIndirectDrawBuffer(
-        subMeshIndex,
-        indirectBuffer,
-        indirectRecordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
-      );
+      if (plan.fineCulling) {
+        renderer._setIndirectDrawBuffer(
+          subMeshIndex,
+          indirectBuffer,
+          indirectRecordIndex * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE * Uint32Array.BYTES_PER_ELEMENT
+        );
+      }
       indirectRecordIndex++;
     }
     entity.isActive = false;
