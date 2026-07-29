@@ -44,23 +44,6 @@ import { WebGPUTexture2DArray } from "./WebGPUTexture2DArray";
 import { WebGPUTextureCube } from "./WebGPUTextureCube";
 import { WebGPUTimingProfiler } from "./WebGPUTimingProfiler";
 
-interface WebGPUDynamicStateCache {
-  pass: GPURenderPassEncoder;
-  viewportX?: number;
-  viewportY?: number;
-  viewportWidth?: number;
-  viewportHeight?: number;
-  scissorX?: number;
-  scissorY?: number;
-  scissorWidth?: number;
-  scissorHeight?: number;
-  blendRed?: number;
-  blendGreen?: number;
-  blendBlue?: number;
-  blendAlpha?: number;
-  stencilReference?: number;
-}
-
 /**
  * Options used to request and configure a WebGPU device.
  */
@@ -156,7 +139,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _globalDepthBias = 0;
   private _globalSlopeScaledDepthBias = 0;
   private _renderPassLabel = "render";
-  private _dynamicStateCache: WebGPUDynamicStateCache | null = null;
 
   /**
    * Whether the texture-based joint path is available.
@@ -723,63 +705,26 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   _applyDynamicState(pass: GPURenderPassEncoder): void {
     const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
     const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
-    const cache =
-      this._dynamicStateCache?.pass === pass ? this._dynamicStateCache : (this._dynamicStateCache = { pass });
     const viewportWidth = Math.max(0, Math.min(this._viewport.z, targetWidth - this._viewport.x));
     const viewportHeight = Math.max(0, Math.min(this._viewport.w, targetHeight - this._viewport.y));
-    if (
-      cache.viewportX !== this._viewport.x ||
-      cache.viewportY !== this._viewport.y ||
-      cache.viewportWidth !== viewportWidth ||
-      cache.viewportHeight !== viewportHeight
-    ) {
-      pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
-      cache.viewportX = this._viewport.x;
-      cache.viewportY = this._viewport.y;
-      cache.viewportWidth = viewportWidth;
-      cache.viewportHeight = viewportHeight;
-    }
-    const scissorX = Math.max(0, Math.floor(this._scissor.x));
-    const scissorY = Math.max(0, Math.floor(this._scissor.y));
-    const scissorWidth = Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x)));
-    const scissorHeight = Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)));
-    if (
-      cache.scissorX !== scissorX ||
-      cache.scissorY !== scissorY ||
-      cache.scissorWidth !== scissorWidth ||
-      cache.scissorHeight !== scissorHeight
-    ) {
-      pass.setScissorRect(scissorX, scissorY, scissorWidth, scissorHeight);
-      cache.scissorX = scissorX;
-      cache.scissorY = scissorY;
-      cache.scissorWidth = scissorWidth;
-      cache.scissorHeight = scissorHeight;
-    }
+    pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
+    pass.setScissorRect(
+      Math.max(0, Math.floor(this._scissor.x)),
+      Math.max(0, Math.floor(this._scissor.y)),
+      Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x))),
+      Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)))
+    );
     const { state, customStates } = this._getRenderState();
     const blendColor = state.blendState.blendColor;
-    if (
-      cache.blendRed !== blendColor.r ||
-      cache.blendGreen !== blendColor.g ||
-      cache.blendBlue !== blendColor.b ||
-      cache.blendAlpha !== blendColor.a
-    ) {
-      pass.setBlendConstant({
-        r: blendColor.r,
-        g: blendColor.g,
-        b: blendColor.b,
-        a: blendColor.a
-      });
-      cache.blendRed = blendColor.r;
-      cache.blendGreen = blendColor.g;
-      cache.blendBlue = blendColor.b;
-      cache.blendAlpha = blendColor.a;
-    }
-    const stencilReference =
-      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue;
-    if (cache.stencilReference !== stencilReference) {
-      pass.setStencilReference(stencilReference);
-      cache.stencilReference = stencilReference;
-    }
+    pass.setBlendConstant({
+      r: blendColor.r,
+      g: blendColor.g,
+      b: blendColor.b,
+      a: blendColor.a
+    });
+    pass.setStencilReference(
+      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue
+    );
   }
 
   /** @internal */
@@ -864,7 +809,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     if (this._renderPass) {
       this._renderPass.end();
       this._renderPass = null;
-      this._dynamicStateCache = null;
     }
   }
 
