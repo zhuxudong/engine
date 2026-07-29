@@ -6,6 +6,14 @@ const variants = {
 };
 const churnLods = process.env.BENCHMARK_LOD_CHURN === "1";
 const compactOutput = process.env.BENCHMARK_COMPACT === "1";
+const roundCount = Number(process.env.BENCHMARK_ROUNDS ?? 3);
+const gpuSampleCount = Number(process.env.BENCHMARK_GPU_SAMPLES ?? 0);
+if (!Number.isInteger(roundCount) || roundCount < 1) {
+  throw new RangeError(`BENCHMARK_ROUNDS must be a positive integer, received ${roundCount}.`);
+}
+if (!Number.isInteger(gpuSampleCount) || gpuSampleCount < 0) {
+  throw new RangeError(`BENCHMARK_GPU_SAMPLES must be a non-negative integer, received ${gpuSampleCount}.`);
+}
 const disabledCategories = (process.env.BENCHMARK_DISABLED_CATEGORIES ?? "")
   .split(",")
   .map((category) => category.trim())
@@ -15,11 +23,9 @@ const labels = {
   beforeCompute: process.env.BASELINE_LABEL ?? "beforeCompute",
   gpuCompaction: process.env.CANDIDATE_LABEL ?? "gpuCompaction"
 };
-const orders = [
-  ["beforeCompute", "gpuCompaction"],
-  ["gpuCompaction", "beforeCompute"],
-  ["beforeCompute", "gpuCompaction"]
-];
+const orders = Array.from({ length: roundCount }, (_, round) =>
+  round % 2 === 0 ? ["beforeCompute", "gpuCompaction"] : ["gpuCompaction", "beforeCompute"]
+);
 const browser = await chromium.launch({
   executablePath,
   headless: true,
@@ -47,7 +53,9 @@ for (let round = 0; round < orders.length; round++) {
     });
     page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
     const navigationStartedAt = performance.now();
-    await page.goto(variants[variant], { waitUntil: "networkidle", timeout: 120_000 });
+    const pageUrl = new URL(variants[variant]);
+    if (gpuSampleCount > 0) pageUrl.searchParams.set("gpuTiming", "1");
+    await page.goto(pageUrl.href, { waitUntil: "networkidle", timeout: 120_000 });
     await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
     const readyMs = performance.now() - navigationStartedAt;
     await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
@@ -62,6 +70,28 @@ for (let round = 0; round < orders.length; round++) {
     }
     await page.waitForFunction(() => window.grasslandsDebug.inspectSurface().transitioningRanges === 0);
     await page.waitForTimeout(1_800);
+    const gpuSamples = [];
+    if (gpuSampleCount > 0) {
+      const gpuTiming = await page.evaluate(() => window.grasslandsDebug.inspectGPUTiming());
+      if (!gpuTiming.supported || !gpuTiming.enabled) {
+        throw new Error(`${labels[variant]} does not support the requested GPU timestamp samples.`);
+      }
+      for (let sampleIndex = 0; sampleIndex < gpuSampleCount; sampleIndex++) {
+        const previousSubmissionId = await page.evaluate(
+          () => window.grasslandsDebug.inspectGPUTiming().latestSample?.submissionId ?? 0
+        );
+        const requested = await page.evaluate(() => window.grasslandsDebug.requestGPUTimingSample());
+        if (!requested) {
+          throw new Error(`${labels[variant]} rejected GPU timestamp sample ${sampleIndex + 1}.`);
+        }
+        await page.waitForFunction(
+          (submissionId) => (window.grasslandsDebug.inspectGPUTiming().latestSample?.submissionId ?? 0) > submissionId,
+          previousSubmissionId,
+          { timeout: 15_000 }
+        );
+        gpuSamples.push(await page.evaluate(() => window.grasslandsDebug.inspectGPUTiming().latestSample));
+      }
+    }
     const frameTimes = await page.evaluate(
       (churn) =>
         new Promise((resolve) => {
@@ -106,6 +136,7 @@ for (let round = 0; round < orders.length; round++) {
       fps: (frameTimes.length * 1_000) / duration,
       p50: sorted[Math.floor(sorted.length * 0.5)],
       p95: sorted[Math.floor(sorted.length * 0.95)],
+      gpuSamples,
       surface: await page.evaluate(() => window.grasslandsDebug.inspectSurface()),
       diagnostics
     });
@@ -115,12 +146,13 @@ for (let round = 0; round < orders.length; round++) {
 
 await browser.close();
 const outputResults = compactOutput
-  ? results.map(({ round, label, fps, p50, p95, surface, diagnostics }) => ({
+  ? results.map(({ round, label, fps, p50, p95, gpuSamples, surface, diagnostics }) => ({
       round,
       label,
       fps,
       p50,
       p95,
+      gpuSamples,
       surface: {
         visibleRendererBatches: surface.visibleRendererBatches,
         indirectRendererBatches: surface.indirectRendererBatches,
@@ -135,6 +167,8 @@ console.log(
   JSON.stringify(
     {
       browser: { executablePath, version: browserVersion },
+      roundCount,
+      gpuSampleCount,
       churnLods,
       disabledCategories,
       results: outputResults
