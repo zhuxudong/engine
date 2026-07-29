@@ -2478,6 +2478,72 @@ constant-depth fixture 使用 `0.625` 的真实 depth attachment，放置一个�
 after-depth hook 与 identity output stream；后续只有在 workload 包含更深的遮挡层次，或完整
 Hi-Z pyramid 能先证明显著 survivor 降幅时才重新进入实现。
 
+### WebGPU 单采样 depth priming 设计
+
+#### 候选上限与选择依据
+
+first-person 固定相机的原生命令探针按 category 单独提交，并以空 Surface 页面扣除场景自身
+draw 后，得到当前 sparse Surface 的 indexed work：
+
+| category | Forward indexed work | Shadow indexed work | 稳定 GPU category 成本 |
+| --- | ---: | ---: | --- |
+| tree | 1,112,502 | 4,448,514 | Shadow 约 0.633 ms |
+| rock | 1,591,659 | 6,366,228 | Shadow 约 0.563 ms |
+| shrub | 229,032 | 916,128 | 未单独形成稳定结论 |
+
+另按 manifest 的每个实例位置、缩放、prototype LOD0 高度和现有
+`screenRelativeHeight` 阈值离线重放 LOD 选择。把 range center/max scale 改成逐实例距离/scale
+后，树木 Forward index 上限只从 1,607,346 降到 1,541,991（-4.07%），岩石从 1,801,197
+降到 1,706,541（-5.26%），灌木不变。该数字尚未计入多输出 compaction、cross-fade 和
+light-view stream 成本，明显低于此前 range-level cascade provider 已实现但未形成整帧收益的
+工作量变化，因此不把 per-instance GPU LOD 作为下一项 runtime consumer。
+
+草地仍是稳定且最大的单项 Forward 成本：逐 pass 配对差约 2.345 ms。当前三个 grass prototype
+已经压到 3 个 indirect draw，视锥细筛已删除 47.4% grass survivor，单层 Hi-Z 只再删除 0.099%。
+剩余主要上限是双面 alpha-test Surface 的 vertex/fragment 工作，而不是 submission 或不可见
+range。Grasslands 当前 `MSAASamples.None` 且明确请求 `DepthTextureMode.PrePass`，但
+`DepthOnlyPass` 写独立 depth target，Forward 创建并清理另一张 depth attachment；现有 prepass
+不能触发 Forward early depth。
+
+#### 固定上游源码事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `DepthOnlyPass` 在 depth priming 时写 camera depth attachment；opaque Forward 强制 `ZWrite Off + ZTest Equal`。只允许单采样、可复制 depth、base camera；源码明确因 Apple ARM 上 WebGL/WebGPU 渲染错误而禁用 Web 平台 |
+| Three.js WebGPU | `c6620cee323838ead14035b37008f401edbc2ea1` | 同一 depth attachment 在 clear 时使用 `loadOp=clear/store`，后续不清理时使用 `loadOp=load/store`；只提供 attachment 生命周期事实，不实现自动 depth priming |
+| PlayCanvas WebGPU | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | render-pass depth ops 显式映射 `clear/load` 与 `store/discard`；transient depth 若后续要求 load/store 会报告错误并强制回 clear/discard |
+
+这些源码支持“同一非 transient depth attachment 跨 pass store/load，Forward 使用 Equal”的
+基础合同，也给出了不能默认启用的移动端反例。桌面 Chromium/Metal 成功不能覆盖 Apple ARM
+WebGPU 风险。
+
+#### 实验契约
+
+1. `WebGPUGraphicDeviceOptions.enableDepthPriming` 默认 `false`。WebGL2 不读取该选项；示例只在
+   创建 `WebGPUEngine` 时由 `?depthPriming=1` 开启，仍通过刷新页面切换后端。
+2. RHI 只暴露后端中立的只读 `depthPrimingEnabled`。BasicRenderPipeline 仅在已存在 depth
+   prepass、单采样、offscreen color target、可采样 depth attachment 且本帧允许清 depth 时
+   复用 attachment；其他情况严格走现有独立 depth target。
+3. Depth prepass 只清 depth 并 store；SAO/after-depth consumer 可在 pass 结束后读取同一 texture；
+   Forward 对 depth 使用 load，清理 flags 只移除 Depth、保留 Color/Stencil 语义。
+4. opaque 与 alpha-test Forward 统一覆盖为 `DepthWrite=false`、`DepthCompare=Equal`。覆盖通过
+   RenderQueue 的通用 internal render-state map 合并，不修改材质 ShaderData，不增加
+   Surface/category/backend 特例。
+5. `Terrain/Surface` 增加同一 ShaderLab source 的标准 `DepthOnly` pass。vertex placement、
+   billboard、wind、world grounding、distance fine-cull、LOD dither 和 alpha cutoff 必须与
+   Forward 一致；`.shaderc`/`.wgslc` 都由现有构建导出，禁止 raw WGSL。
+6. native probe 必须证明 depth-prepass 与 Forward 使用同一 `GPUTexture` view，前者
+   `depthLoadOp=clear`、后者 `depthLoadOp=load`；Forward pipeline 为 Equal/no-write，且新增
+   Surface depth indirect draw 数与 Forward 的 6 个 record 对齐。
+7. 功能门包含 WebGL2 默认回归、WebGPU option off 回归、option on 的 backend reload、四个固定
+   相机、移动/LOD/wind/category 压力、截图、Surface/indirect count 和零 page/GPU diagnostic。
+8. 性能按父提交与候选独立页面轮换 `all/no_grass/no_tree/no_rock`，每区块读取逐 pass timestamp
+   和稳态 frame。保留要求完整场景 Forward 与 total improvement 中位数为正且 IQR 不跨 0，
+   FPS 为正、P95 不稳定退化超过 2%；`no_grass` 应显著缩小收益才能归因到草。
+9. 即使桌面门通过，本候选仍保持默认关闭，直到 Apple Silicon Safari/Chrome 与至少一台 Android
+   WebGPU 真机通过画面和性能门。任一目标出现 Equal 漏像素、depth load/store validation 或
+   移动端退化，撤销 runtime consumer，只保留通用附件测试与本检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
