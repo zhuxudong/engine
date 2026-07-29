@@ -49,6 +49,9 @@ await page.addInitScript(() => {
     "setBlendConstant",
     "setStencilReference"
   ];
+  const stateCommandNames = ["setPipeline", "setBindGroup", "setVertexBuffer", "setIndexBuffer"];
+  const createCommandCounts = () => Object.fromEntries(commandNames.map((name) => [name, 0]));
+  const createStateCommandCounts = () => Object.fromEntries(stateCommandNames.map((name) => [name, 0]));
   const createEmptyCounts = () => ({
     submissions: 0,
     createRenderPipeline: 0,
@@ -60,18 +63,42 @@ await page.addInitScript(() => {
     bufferWrites: {},
     renderPasses: 0,
     directInstances: { draw: 0, drawIndexed: 0 },
-    commands: Object.fromEntries(commandNames.map((name) => [name, 0])),
-    bundleCommands: Object.fromEntries(commandNames.map((name) => [name, 0])),
+    commands: createCommandCounts(),
+    redundantCommands: createStateCommandCounts(),
+    bundleCommands: createCommandCounts(),
     byPass: {}
   });
   let counts = createEmptyCounts();
   const bufferIds = new WeakMap();
   let nextBufferId = 1;
+  const nativeObjectIds = new WeakMap();
+  let nextNativeObjectId = 1;
+  const stateCommandKeys = new Set(stateCommandNames);
+  const getNativeObjectId = (value) => {
+    let objectId = nativeObjectIds.get(value);
+    if (objectId === undefined) {
+      objectId = nextNativeObjectId++;
+      nativeObjectIds.set(value, objectId);
+    }
+    return objectId;
+  };
+  const commandArgumentKey = (value) => {
+    if (value === null) return "null";
+    if (ArrayBuffer.isView(value)) return `${value.constructor.name}:${Array.from(value).join(",")}`;
+    if (Array.isArray(value)) return `Array:${value.map(commandArgumentKey).join(",")}`;
+    const valueType = typeof value;
+    if (valueType === "object" || valueType === "function") return `Object:${getNativeObjectId(value)}`;
+    return `${valueType}:${String(value)}`;
+  };
+  const stateCommandSlot = (name, args) =>
+    name === "setBindGroup" || name === "setVertexBuffer" ? `${name}:${args[0]}` : name;
+  const stateCommandSignature = (args) => args.map(commandArgumentKey).join("|");
   const getPassCounts = (label) => {
     counts.byPass[label] ??= {
       renderPasses: 0,
       directInstances: { draw: 0, drawIndexed: 0 },
-      commands: Object.fromEntries(commandNames.map((name) => [name, 0]))
+      commands: createCommandCounts(),
+      redundantCommands: createStateCommandCounts()
     };
     return counts.byPass[label];
   };
@@ -168,6 +195,7 @@ await page.addInitScript(() => {
   commandEncoderPrototype.beginRenderPass = function (descriptor) {
     const label = descriptor?.label || "unlabeled";
     const pass = beginRenderPass.call(this, descriptor);
+    const stateCommandSignatures = new Map();
     counts.renderPasses++;
     getPassCounts(label).renderPasses++;
     for (const name of commandNames) {
@@ -175,6 +203,15 @@ await page.addInitScript(() => {
       if (typeof command !== "function") continue;
       pass[name] = (...args) => {
         incrementCommand(label, name, args);
+        if (stateCommandKeys.has(name)) {
+          const stateSlot = stateCommandSlot(name, args);
+          const signature = stateCommandSignature(args);
+          if (stateCommandSignatures.get(stateSlot) === signature) {
+            counts.redundantCommands[name]++;
+            getPassCounts(label).redundantCommands[name]++;
+          }
+          stateCommandSignatures.set(stateSlot, signature);
+        }
         return command.call(pass, ...args);
       };
     }
@@ -184,16 +221,19 @@ await page.addInitScript(() => {
 
 await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
 await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
-await page.evaluate(({ deterministic, disableShadows }) => {
-  window.grasslandsDebug.setScene({
-    animation: false,
-    ...(disableShadows ? { shadows: false } : {}),
-    ...(deterministic ? { cloudShadows: false, clouds: false, fog: false, postProcess: false } : {})
-  });
-  if (deterministic) {
-    window.grasslandsDebug.setSurface({ wind: { enabled: false } });
-  }
-}, { deterministic: deterministicScene, disableShadows });
+await page.evaluate(
+  ({ deterministic, disableShadows }) => {
+    window.grasslandsDebug.setScene({
+      animation: false,
+      ...(disableShadows ? { shadows: false } : {}),
+      ...(deterministic ? { cloudShadows: false, clouds: false, fog: false, postProcess: false } : {})
+    });
+    if (deterministic) {
+      window.grasslandsDebug.setSurface({ wind: { enabled: false } });
+    }
+  },
+  { deterministic: deterministicScene, disableShadows }
+);
 if (disabledCategories.length > 0) {
   await page.evaluate(
     (categories) =>
@@ -246,6 +286,9 @@ const byPassPerSubmission = Object.fromEntries(
       ),
       commands: Object.fromEntries(
         Object.entries(pass.commands).map(([name, count]) => [name, count / counts.submissions])
+      ),
+      redundantCommands: Object.fromEntries(
+        Object.entries(pass.redundantCommands).map(([name, count]) => [name, count / counts.submissions])
       )
     }
   ])
@@ -309,6 +352,9 @@ const report = {
       Object.entries(counts.directInstances).map(([name, count]) => [name, count / counts.submissions])
     ),
     commands: perSubmission,
+    redundantCommands: Object.fromEntries(
+      Object.entries(counts.redundantCommands).map(([name, count]) => [name, count / counts.submissions])
+    ),
     byPass: byPassPerSubmission
   },
   diagnostics
