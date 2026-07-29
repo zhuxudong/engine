@@ -1421,6 +1421,89 @@ antialias filtering 后为 926 像素（0.1570%）；差异集中在量化后植
 format、`packHalf2x16`/`unpackHalf2x16` WGSL lowering 和 bit reinterpretation 修复保留，
 不改变当前 Grasslands 64-byte output。
 
+### WebGPU render bundle 命令复用设计
+
+#### 目标与适用边界
+
+Grasslands 稳态帧当前有 76 个 active indirect renderer batch。每个 WebGPU draw 仍在 JavaScript
+侧重复编码 pipeline、带 dynamic offset 的 draw uniform bind group、可选 renderer-instance
+bind group、viewport/scissor/blend constant/stencil reference、vertex/index buffer 和
+`drawIndirect`/`drawIndexedIndirect`。pipeline 与 bind group 已缓存，但这些 native command
+调用没有跨帧复用。
+
+本阶段只验证 render bundle 能否减少稳定 indirect draw 的 JavaScript 到 native 命令编码成本。
+它不减少 vertex/fragment 工作量、可见实例、draw 数或 GPU pass 数，因此不能把 GPU timestamp
+波动包装成该能力的主要收益。只有主线程 encode/frame time 出现可重复改善且 GPU pass 不退化，
+才保留 Grasslands consumer。
+
+[WebGPU 规范](https://gpuweb.github.io/gpuweb/#render-bundles) 把 render bundle 定义为可在
+render pass 中重复执行的预编码命令。bundle encoder 可以记录 pipeline、bind group、
+vertex/index buffer、direct draw 和 indirect draw，但不能记录 viewport、scissor、blend
+constant 或 stencil reference。bundle 的 color format、depth-stencil format 和 sample count
+必须与执行它的 render pass 兼容。`executeBundles` 后，render pass 的 pipeline、bind group、
+vertex/index buffer 状态被清空，而不是恢复为执行前状态；后续 direct draw 必须完整重绑。
+
+#### 业界源码事实
+
+| 实现 | 本地版本 | 客观实现 |
+| --- | --- | --- |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | non-compat fast path 在 draw context 缓存单 draw `fastBundle`；instance count 通过 bundle 引用的 indirect buffer 更新；`WebGPUBundleList` 把连续 bundle 合成一次 `executeBundles`，viewport/scissor/stencil/blend 作为 bundle 之外的独立命令项 |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | 用户通过 `BundleGroup.static` 和 `needsUpdate` 显式声明可缓存范围；backend 缓存整个 group 的 bundle，render context 在结束时统一执行 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | 当前固定版本没有 render bundle 缓存或执行策略 |
+| LayaAir | `722a2847902909c952257d6dd50e5e32f5b07bff` | WebGPU command encoder 只有 `executeBundles` 包装和 TODO，没有缓存、分组或失效策略 |
+
+这些源码证明 per-draw bundle 加连续合并、显式静态 group 是两种已存在的策略；它们不证明
+Galacean Grasslands 在当前浏览器和移动 GPU 上一定更快。
+
+#### 方案比较
+
+| 方案 | 模块边界 | 优点 | 风险 | 决策 |
+| --- | --- | --- | --- | --- |
+| 公开 `BundleGroup`，由用户标记静态对象 | core scene/render API + WebGPU backend | 生命周期显式，接近 Three.js | 初始化之外出现 WebGPU 专用使用方式；world renderer、材质和 example 都要感知 | 不采用 |
+| 缓存完整 RenderQueue/pass 快照 | core queue 或 WebGPU pass | 单个 bundle 覆盖更多 draw | 透明排序、camera mask、shadow view、动态状态与资源失效范围过大；一次变化重录整队列 | 不采用 |
+| WebGPU RHI 内缓存单个稳定 indirect draw，连续同状态 bundle 合并执行 | `WebGPUShaderProgram`、`WebGPUPrimitive`、`WebGPUGraphicDevice` | 不改 public API；indirect 参数内容可更新；失效可限定到单 draw | cache key 和资源销毁必须完整；零散 bundle 可能抵消收益 | 实验 |
+
+#### RHI 契约
+
+1. 首版只缓存已有 indirect buffer 的 draw。direct draw 继续原路径，并在编码前执行所有 pending
+   bundle；WebGL2、core RenderQueue、renderer/material、ShaderLab 和 engine 初始化不变。
+2. bundle 记录 pipeline、0/1 号 bind group 及其 dynamic offset、vertex/index buffer 和
+   indirect buffer/offset。每帧仍打包并上传 draw uniform 与 renderer-instance 数据；bundle
+   复用的是绑定和 draw 命令，不缓存数据内容。
+3. 当前 program 的 draw 顺序在 `_resetFrame()` 后令 uniform/instance cursor 从 0 重用，因此
+   稳态 dynamic offset 可作为 cache key。容量扩张会替换 uniform/instance buffer，必须使该
+   program 的全部 bundle 失效后才能退休旧 buffer。
+4. cache key 必须覆盖 program、pipeline、bind group、两个 dynamic offset、primitive、
+   sub-primitive、vertex/index binding、override binding、indirect buffer/offset、attachment
+   format 和 sample count。buffer 使用已有稳定 `_bindingId`；不能用 WGSL 文本或对象
+   `toString()` 猜测资源身份。
+5. primitive destroy 清空由它持有的 bundle；program destroy、uniform/instance buffer generation
+   变化清空引用该 program 的 bundle；buffer identity、texture bind group 或 pipeline 改变通过
+   key miss 重录。不得让已销毁或已退休资源继续被 cache 强引用。
+6. device 只合并连续、attachment 相同且动态状态快照相同的 bundle。动态状态快照包含裁剪后的
+   viewport、scissor、blend constant 和 stencil reference；值变化、direct draw、compute
+   开始、render pass 结束、clear、render target 切换、flush 和 destroy 都是强制执行边界。
+7. 一组 pending bundle 只调用一次 `executeBundles`。执行后不假设 pipeline/bind group/
+   vertex/index 状态仍有效；后续 direct draw 必须从 `setPipeline` 开始完整编码。
+8. 首版不加入启发式静态帧计数、magic threshold 或公开开关。是否使用 bundle 只由
+   “indirect draw 且 cache key 完整”决定；性能不成立时整体撤销 consumer，不留环境特例。
+
+#### 验收与保留门槛
+
+- 单元测试用 fake GPU 记录 bundle encoder 与 render pass 命令，覆盖首次录制、跨帧复用、
+  两个连续 bundle 合成一次执行、动态状态分段、direct draw 强制执行与完整重绑、uniform/
+  instance capacity 增长失效、primitive/program destroy。
+- 真实 Chromium WebGPU 页面必须证明 `createRenderBundleEncoder` 只出现在 warm-up/cache miss，
+  稳态 76 个 indirect batch 被复用；报告每帧 bundle 数、`executeBundles` 次数、cache hit/miss
+  和 direct indirect command 数。页面、ShaderLab、GPU validation 和 device-lost 均为 0。
+- Grasslands 使用父提交与候选的独立页面、相同 hero camera、分辨率、DPR、manifest 与开关，
+  分别测 `all/no_grass/no_tree/no_rock`。报告 rAF frame P50/P95、WebGPU RHI CPU encode
+  P50/P95，以及 Forward/Shadow GPU timestamp；树、岩石和草的实例/category/LOD/indirect
+  count 与截图必须一致。
+- 保留条件是 RHI encode time 和 frame time 的配对改善中位数为正且 IQR 不跨 0；Forward/
+  Shadow GPU time 不得稳定退化超过 2%。若 CPU 改善在 frame time 中不可分辨，或 bundle
+  cache/execute 开销抵消编码收益，撤销实现并只保留本检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
