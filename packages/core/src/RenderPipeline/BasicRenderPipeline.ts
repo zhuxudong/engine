@@ -16,6 +16,7 @@ import { CascadedShadowCasterPass } from "../shadow/CascadedShadowCasterPass";
 import { ShadowType } from "../shadow/enum/ShadowType";
 import {
   RenderTarget,
+  Texture,
   Texture2D,
   TextureCubeFace,
   TextureFilterMode,
@@ -49,6 +50,7 @@ export class BasicRenderPipeline {
   private _copyBackgroundTexture: Texture2D;
   private _canUseBlitFrameBuffer = false;
   private _shouldCopyBackgroundColor = false;
+  private readonly _afterDepthPrepassConsumers = new Set<(depthTexture: Texture) => void>();
 
   /**
    * Create a basic render pipeline.
@@ -63,6 +65,24 @@ export class BasicRenderPipeline {
     this._saoPass = new ScalableAmbientObscurancePass(engine);
     this._opaqueTexturePass = new OpaqueTexturePass(engine);
     this._finalPass = new FinalPass(engine);
+  }
+
+  /**
+   * Subscribe an internal consumer that encodes work after a successful depth prepass.
+   * @param consumer - Callback receiving the current camera depth attachment.
+   * @internal
+   */
+  _addAfterDepthPrepassConsumer(consumer: (depthTexture: Texture) => void): void {
+    this._afterDepthPrepassConsumers.add(consumer);
+  }
+
+  /**
+   * Remove a previously registered depth-prepass consumer.
+   * @param consumer - Callback passed to `_addAfterDepthPrepassConsumer`.
+   * @internal
+   */
+  _removeAfterDepthPrepassConsumer(consumer: (depthTexture: Texture) => void): void {
+    this._afterDepthPrepassConsumers.delete(consumer);
   }
 
   /**
@@ -83,6 +103,7 @@ export class BasicRenderPipeline {
       this._copyBackgroundTexture = null;
     }
 
+    this._afterDepthPrepassConsumers.clear();
     this._camera = null;
   }
 
@@ -144,6 +165,9 @@ export class BasicRenderPipeline {
     if (depthPassEnabled) {
       depthOnlyPass.onConfig(camera);
       depthOnlyPass.onRender(context, cullingResults);
+      for (const consumer of this._afterDepthPrepassConsumers) {
+        consumer(depthOnlyPass.renderTarget.depthTexture);
+      }
     } else {
       depthOnlyPass.release();
       camera.shaderData.setTexture(Camera._cameraDepthTextureProperty, engine._basicResources.whiteTexture2D);
