@@ -100,32 +100,78 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   await page.waitForFunction(() => window.terrainDebug?.ready === true);
   await expect(page.locator("#status")).toContainText("webgpu");
   expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(webglTimeOrigin);
-  const gpuTimingSupported = await page.evaluate(
-    () => window.grasslandsDebug!.inspectGPUTiming().supported
-  );
-  expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().enabled)).toBe(
-    gpuTimingSupported
-  );
+  const gpuTimingSupported = await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().supported);
+  expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().enabled)).toBe(gpuTimingSupported);
   if (gpuTimingSupported) {
     expect(await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample)).toBeNull();
     expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
     await expect
-      .poll(() =>
-        page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.durationMs ?? 0)
-      )
+      .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.durationMs ?? 0))
       .toBeGreaterThan(0);
-    expect(
-      await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample!.passCount)
-    ).toBeGreaterThan(0);
+    const firstGpuSample = await page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample!);
+    expect(firstGpuSample.passCount).toBeGreaterThan(0);
+    expect(firstGpuSample.passes).toHaveLength(firstGpuSample.passCount);
+    expect(firstGpuSample.passes.every((pass) => pass.durationMs >= 0)).toBe(true);
+    expect(firstGpuSample.passes.every((pass) => pass.name.length > 0)).toBe(true);
+    expect(firstGpuSample.durationMs).toBeGreaterThanOrEqual(
+      Math.max(...firstGpuSample.passes.map((pass) => pass.durationMs))
+    );
+    expect(firstGpuSample.passes.map((pass) => pass.name)).toEqual(
+      expect.arrayContaining([
+        "shadow",
+        "depth-prepass",
+        "forward",
+        "grasslands-exposure",
+        "post-process-uber",
+        "final-srgb"
+      ])
+    );
     const initialSubmissionId = await page.evaluate(
       () => window.grasslandsDebug!.inspectGPUTiming().latestSample!.submissionId
     );
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ shadows: false }));
     expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
     await expect
-      .poll(() =>
-        page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.submissionId ?? 0)
-      )
+      .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.submissionId ?? 0))
       .toBeGreaterThan(initialSubmissionId);
+    const noShadowPasses = await page.evaluate(() =>
+      window.grasslandsDebug!.inspectGPUTiming().latestSample!.passes.map((pass) => pass.name)
+    );
+    expect(noShadowPasses).toContain("forward");
+    expect(noShadowPasses).not.toContain("shadow");
+
+    const noShadowSubmissionId = await page.evaluate(
+      () => window.grasslandsDebug!.inspectGPUTiming().latestSample!.submissionId
+    );
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ shadows: true, postProcess: false }));
+    expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.submissionId ?? 0))
+      .toBeGreaterThan(noShadowSubmissionId);
+    const noPostProcessPasses = await page.evaluate(() =>
+      window.grasslandsDebug!.inspectGPUTiming().latestSample!.passes.map((pass) => pass.name)
+    );
+    expect(noPostProcessPasses).toContain("shadow");
+    expect(noPostProcessPasses).toContain("depth-prepass");
+    expect(noPostProcessPasses).toContain("forward");
+    expect(noPostProcessPasses).not.toContain("grasslands-exposure");
+    expect(noPostProcessPasses).not.toContain("post-process-uber");
+
+    const noPostProcessSubmissionId = await page.evaluate(
+      () => window.grasslandsDebug!.inspectGPUTiming().latestSample!.submissionId
+    );
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ architecture: false }));
+    expect(await page.evaluate(() => window.grasslandsDebug!.requestGPUTimingSample())).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectGPUTiming().latestSample?.submissionId ?? 0))
+      .toBeGreaterThan(noPostProcessSubmissionId);
+    const surfaceOnlyPasses = await page.evaluate(() =>
+      window.grasslandsDebug!.inspectGPUTiming().latestSample!.passes.map((pass) => pass.name)
+    );
+    expect(surfaceOnlyPasses).toContain("shadow");
+    expect(surfaceOnlyPasses).toContain("forward");
+    expect(surfaceOnlyPasses).not.toContain("depth-prepass");
+    await page.evaluate(() => window.grasslandsDebug!.setScene({ architecture: true, postProcess: true }));
   }
 
   await page.evaluate(() => {

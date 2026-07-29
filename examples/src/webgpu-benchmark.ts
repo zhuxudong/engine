@@ -44,6 +44,15 @@ export interface WebGPUBenchmarkSnapshot {
   readonly gpuSampleCount: number;
   /** Native render and compute passes covered by the latest GPU timing sample. */
   readonly gpuPassCount: number;
+  /** Ordered native pass timings from the latest GPU timing sample. */
+  readonly gpuPasses: readonly {
+    /** Stable diagnostic pass name. */
+    readonly name: string;
+    /** Native pass kind. */
+    readonly kind: "render" | "compute";
+    /** GPU duration in milliseconds. */
+    readonly durationMs: number;
+  }[];
   /** GPU timing samples skipped rather than blocking on readback. */
   readonly gpuDroppedSampleCount: number;
 }
@@ -205,6 +214,7 @@ async function boot(): Promise<void> {
         gpuFrameTimeP95: sortedGpu.length > 0 ? percentile(sortedGpu, 0.95) : null,
         gpuSampleCount: sortedGpu.length,
         gpuPassCount: latestGpuSample?.passCount ?? 0,
+        gpuPasses: latestGpuSample?.passes.map(({ name, kind, durationMs }) => ({ name, kind, durationMs })) ?? [],
         gpuDroppedSampleCount: engine.gpuTiming.droppedSampleCount
       };
     }

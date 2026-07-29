@@ -126,6 +126,11 @@ declare global {
           readonly submissionId: number;
           readonly passCount: number;
           readonly durationMs: number;
+          readonly passes: readonly {
+            readonly name: string;
+            readonly kind: "render" | "compute";
+            readonly durationMs: number;
+          }[];
         } | null;
         readonly droppedSampleCount: number;
       };

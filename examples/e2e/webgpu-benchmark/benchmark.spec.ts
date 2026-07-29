@@ -58,10 +58,14 @@ test("the same candidate workload renders on WebGL2 and WebGPU", async (
     expect(webGPU.snapshot.gpuFrameTimeMedian).toBeGreaterThan(0);
     expect(webGPU.snapshot.gpuFrameTimeP95).toBeGreaterThan(0);
     expect(webGPU.snapshot.gpuPassCount).toBeGreaterThan(0);
+    expect(webGPU.snapshot.gpuPasses).toHaveLength(webGPU.snapshot.gpuPassCount);
+    expect(webGPU.snapshot.gpuPasses.every((pass) => pass.durationMs >= 0)).toBe(true);
+    expect(webGPU.snapshot.gpuPasses.map((pass) => pass.name)).toContain("forward");
   } else {
     expect(webGPU.snapshot.gpuSampleCount).toBe(0);
     expect(webGPU.snapshot.gpuFrameTimeMedian).toBeNull();
     expect(webGPU.snapshot.gpuFrameTimeP95).toBeNull();
+    expect(webGPU.snapshot.gpuPasses).toEqual([]);
   }
 
   await attachBackendScreenshot(testInfo, "webgl2", webGL2.screenshot);

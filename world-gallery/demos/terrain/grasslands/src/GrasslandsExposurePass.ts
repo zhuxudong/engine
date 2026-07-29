@@ -86,7 +86,17 @@ export class GrasslandsExposurePass extends PostProcessPass {
    */
   override onRender(camera: Camera, srcTexture: Texture2D, destTarget: RenderTarget): void {
     const viewport = destTarget === camera.renderTarget ? camera.viewport : undefined;
-    Blitter.blitTexture(camera.engine, srcTexture, destTarget, 0, viewport, this._material);
+    Blitter.blitTexture(
+      camera.engine,
+      srcTexture,
+      destTarget,
+      0,
+      viewport,
+      this._material,
+      0,
+      undefined,
+      "grasslands-exposure"
+    );
   }
 
   override _onDestroy(): void {
