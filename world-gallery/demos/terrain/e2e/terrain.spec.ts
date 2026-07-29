@@ -1871,7 +1871,7 @@ async function verifyPerformancePanel(page: Page): Promise<void> {
 
   await expect.poll(async () => numericMetric(page, "fps"), { timeout: 15_000 }).toBeGreaterThan(0);
   await expect.poll(async () => numericMetric(page, "gpuMemory")).toBeGreaterThan(0);
-  await expect(page.locator("[data-metric='webgl']")).toHaveText("2.0");
+  await expect(page.locator("[data-metric='graphicsApi']")).toHaveText("WebGL 2.0");
 
   await expect
     .poll(async () => {
