@@ -50,7 +50,7 @@ export class DepthOnlyPass extends PipelinePass {
     const renderTarget = this.renderTarget;
     const camera = context.camera;
     const rhi = engine._hardwareRenderer;
-    context.setRenderTarget(renderTarget, PipelineUtils.defaultViewport, 0);
+    context.setRenderTarget(renderTarget, PipelineUtils.defaultViewport, 0, undefined, "depth-prepass");
     rhi.clearRenderTarget(engine, CameraClearFlags.Depth, null);
 
     engine._renderCount++;

@@ -497,7 +497,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     viewport: Vector4,
     isFlipProjection: boolean,
     mipLevel?: number,
-    faceIndex?: TextureCubeFace
+    faceIndex?: TextureCubeFace,
+    _gpuTimingLabel?: string
   ) {
     let bufferWidth: number, bufferHeight: number;
     if (renderTarget) {

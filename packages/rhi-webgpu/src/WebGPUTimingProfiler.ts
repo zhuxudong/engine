@@ -1,6 +1,7 @@
-import type { GPUTiming, GPUTimingSample } from "@galacean/engine-design";
+import type { GPUTiming, GPUTimingPassKind, GPUTimingPassSample, GPUTimingSample } from "@galacean/engine-design";
 
-const TIMESTAMP_QUERY_COUNT = 2;
+const MAX_PASSES_PER_SAMPLE = 64;
+const TIMESTAMP_QUERY_COUNT = MAX_PASSES_PER_SAMPLE * 2;
 const TIMESTAMP_BYTE_SIZE = 8;
 // Three in-flight readbacks cover the browser/GPU pipeline without allowing profiler memory to grow unbounded.
 const MAX_PENDING_READBACKS = 3;
@@ -8,7 +9,12 @@ const MAX_PENDING_READBACKS = 3;
 interface PendingGPUTimingReadback {
   readonly buffer: GPUBuffer;
   readonly submissionId: number;
-  readonly passCount: number;
+  readonly passes: readonly PendingGPUTimingPass[];
+}
+
+interface PendingGPUTimingPass {
+  readonly name: string;
+  readonly kind: GPUTimingPassKind;
 }
 
 /**
@@ -32,6 +38,8 @@ export class WebGPUTimingProfiler implements GPUTiming {
   private _passCount = 0;
   private _submissionId = 0;
   private _collectCurrentSubmission = false;
+  private _passOverflow = false;
+  private _passes: PendingGPUTimingPass[] = [];
   private _destroyed = false;
 
   /** @inheritdoc */
@@ -80,24 +88,31 @@ export class WebGPUTimingProfiler implements GPUTiming {
   }
 
   /**
-   * Add the current submission span to a pass descriptor.
+   * Add one native pass to the current submission measurement.
    * @param descriptor - Render or compute descriptor about to begin a native pass.
+   * @param kind - Native pass kind.
    */
-  addTimestampWrites(descriptor: GPURenderPassDescriptor | GPUComputePassDescriptor): void {
+  addTimestampWrites(descriptor: GPURenderPassDescriptor | GPUComputePassDescriptor, kind: GPUTimingPassKind): void {
     if (!this.enabled || !this._collectCurrentSubmission) {
       return;
     }
-    descriptor.timestampWrites =
-      this._passCount++ === 0
-        ? {
-            querySet: this._querySet!,
-            beginningOfPassWriteIndex: 0,
-            endOfPassWriteIndex: 1
-          }
-        : {
-            querySet: this._querySet!,
-            endOfPassWriteIndex: 1
-          };
+
+    const passIndex = this._passCount++;
+    if (passIndex >= MAX_PASSES_PER_SAMPLE) {
+      this._passOverflow = true;
+      return;
+    }
+
+    const queryIndex = passIndex * 2;
+    this._passes.push({
+      name: descriptor.label?.trim() || `${kind}-${passIndex}`,
+      kind
+    });
+    descriptor.timestampWrites = {
+      querySet: this._querySet!,
+      beginningOfPassWriteIndex: queryIndex,
+      endOfPassWriteIndex: queryIndex + 1
+    };
   }
 
   /**
@@ -116,18 +131,28 @@ export class WebGPUTimingProfiler implements GPUTiming {
 
     this._collectCurrentSubmission = false;
     const submissionId = ++this._submissionId;
-    const passCount = this._passCount;
+    const passes = this._passes;
+    const overflow = this._passOverflow;
     this._passCount = 0;
+    this._passes = [];
+    this._passOverflow = false;
+    if (overflow) {
+      this._droppedSampleCount++;
+      return null;
+    }
+
     const readback = this._acquireReadback();
     if (!readback) {
       this._droppedSampleCount++;
       return null;
     }
 
-    encoder.resolveQuerySet(this._querySet!, 0, TIMESTAMP_QUERY_COUNT, this._resolveBuffer!, 0);
-    encoder.copyBufferToBuffer(this._resolveBuffer!, 0, readback, 0, TIMESTAMP_QUERY_COUNT * TIMESTAMP_BYTE_SIZE);
+    const queryCount = passes.length * 2;
+    const byteLength = queryCount * TIMESTAMP_BYTE_SIZE;
+    encoder.resolveQuerySet(this._querySet!, 0, queryCount, this._resolveBuffer!, 0);
+    encoder.copyBufferToBuffer(this._resolveBuffer!, 0, readback, 0, byteLength);
     this._pendingReadbacks.add(readback);
-    return { buffer: readback, submissionId, passCount };
+    return { buffer: readback, submissionId, passes };
   }
 
   /**
@@ -138,21 +163,40 @@ export class WebGPUTimingProfiler implements GPUTiming {
     if (!pending || this._destroyed) {
       return;
     }
-    const { buffer, submissionId, passCount } = pending;
+    const { buffer, submissionId, passes: pendingPasses } = pending;
     void buffer
       .mapAsync(GPUMapMode.READ)
       .then(() => {
         if (this._destroyed) {
           return;
         }
-        const timestamps = new BigUint64Array(buffer.getMappedRange());
-        const beginning = timestamps[0];
-        const end = timestamps[1];
-        if (end > beginning && (!this._latestSample || submissionId > this._latestSample.submissionId)) {
+        const timestamps = new BigUint64Array(buffer.getMappedRange(), 0, pendingPasses.length * 2);
+        let earliest: bigint | undefined;
+        let latest: bigint | undefined;
+        const passes: GPUTimingPassSample[] = pendingPasses.map(({ name, kind }, index) => {
+          const beginning = timestamps[index * 2];
+          const end = timestamps[index * 2 + 1];
+          if (end > beginning) {
+            if (earliest === undefined || beginning < earliest) earliest = beginning;
+            if (latest === undefined || end > latest) latest = end;
+          }
+          return Object.freeze({
+            name,
+            kind,
+            durationMs: end > beginning ? Number(end - beginning) * 0.000001 : 0
+          });
+        });
+        if (
+          earliest !== undefined &&
+          latest !== undefined &&
+          latest > earliest &&
+          (!this._latestSample || submissionId > this._latestSample.submissionId)
+        ) {
           this._latestSample = Object.freeze({
             submissionId,
-            passCount,
-            durationMs: Number(end - beginning) * 0.000001
+            passCount: passes.length,
+            durationMs: Number(latest - earliest) * 0.000001,
+            passes: Object.freeze(passes)
           });
         }
       })
@@ -180,6 +224,7 @@ export class WebGPUTimingProfiler implements GPUTiming {
       return;
     }
     this._destroyed = true;
+    this._passes = [];
     this._querySet?.destroy();
     this._resolveBuffer?.destroy();
     for (const buffer of this._availableReadbacks) {

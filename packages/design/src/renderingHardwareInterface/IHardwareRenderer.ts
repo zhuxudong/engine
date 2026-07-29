@@ -32,6 +32,23 @@ export interface ComputeCapabilities {
 }
 
 /**
+ * Backend-neutral native pass kind reported by GPU timestamp profiling.
+ */
+export type GPUTimingPassKind = "render" | "compute";
+
+/**
+ * Completed GPU timestamp measurement for one native pass.
+ */
+export interface GPUTimingPassSample {
+  /** Stable diagnostic name assigned by the core render pipeline. */
+  readonly name: string;
+  /** Native pass kind. */
+  readonly kind: GPUTimingPassKind;
+  /** GPU duration between this pass's beginning and end timestamps, in milliseconds. */
+  readonly durationMs: number;
+}
+
+/**
  * Completed GPU timestamp measurement for one command submission.
  */
 export interface GPUTimingSample {
@@ -41,6 +58,8 @@ export interface GPUTimingSample {
   readonly passCount: number;
   /** GPU span from the first pass beginning to the last pass ending, in milliseconds. */
   readonly durationMs: number;
+  /** Ordered native render and compute pass measurements. */
+  readonly passes: readonly GPUTimingPassSample[];
 }
 
 /**

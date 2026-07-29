@@ -24,7 +24,7 @@ describe("WebGPU timestamp profiling", () => {
     const profiler = new WebGPUTimingProfiler(fixture.device, false, true);
     const descriptor: GPUComputePassDescriptor = {};
 
-    profiler.addTimestampWrites(descriptor);
+    profiler.addTimestampWrites(descriptor, "compute");
 
     expect(profiler).toMatchObject({
       supported: false,
@@ -40,35 +40,44 @@ describe("WebGPU timestamp profiling", () => {
   it("measures the span from the first pass beginning to the last pass ending", async () => {
     const fixture = createDevice(true);
     const profiler = new WebGPUTimingProfiler(fixture.device, true, true);
-    const first: GPURenderPassDescriptor = { colorAttachments: [] };
-    const second: GPUComputePassDescriptor = {};
+    const first: GPURenderPassDescriptor = { label: "shadow", colorAttachments: [] };
+    const second: GPUComputePassDescriptor = { label: "compute" };
     const encoder = createEncoder();
 
     expect(profiler.requestSample()).toBe(true);
-    profiler.addTimestampWrites(first);
-    profiler.addTimestampWrites(second);
+    profiler.addTimestampWrites(first, "render");
+    profiler.addTimestampWrites(second, "compute");
 
     expect(first.timestampWrites).toMatchObject({
       beginningOfPassWriteIndex: 0,
       endOfPassWriteIndex: 1
     });
-    expect(second.timestampWrites).toMatchObject({ endOfPassWriteIndex: 1 });
-    expect(second.timestampWrites?.beginningOfPassWriteIndex).toBeUndefined();
+    expect(second.timestampWrites).toMatchObject({
+      beginningOfPassWriteIndex: 2,
+      endOfPassWriteIndex: 3
+    });
     expect(second.timestampWrites?.querySet).toBe(first.timestampWrites?.querySet);
 
     const pending = profiler.resolve(encoder.encoder);
-    expect(encoder.resolveQuerySet).toHaveBeenCalledWith(first.timestampWrites?.querySet, 0, 2, fixture.buffers[0], 0);
-    expect(encoder.copyBufferToBuffer).toHaveBeenCalledWith(fixture.buffers[0], 0, fixture.buffers[1], 0, 16);
+    expect(encoder.resolveQuerySet).toHaveBeenCalledWith(first.timestampWrites?.querySet, 0, 4, fixture.buffers[0], 0);
+    expect(encoder.copyBufferToBuffer).toHaveBeenCalledWith(fixture.buffers[0], 0, fixture.buffers[1], 0, 32);
 
-    fixture.buffers[1].setTimestamps(1_000_000n, 7_250_000n);
+    fixture.buffers[1].setTimestamps(1_000_000n, 3_000_000n, 2_000_000n, 7_250_000n);
     profiler.readAfterSubmit(pending);
     await vi.waitFor(() => expect(profiler.latestSample).not.toBeNull());
 
     expect(profiler.latestSample).toEqual({
       submissionId: 1,
       passCount: 2,
-      durationMs: 6.25
+      durationMs: 6.25,
+      passes: [
+        { name: "shadow", kind: "render", durationMs: 2 },
+        { name: "compute", kind: "compute", durationMs: 5.25 }
+      ]
     });
+    expect(Object.isFrozen(profiler.latestSample)).toBe(true);
+    expect(Object.isFrozen(profiler.latestSample?.passes)).toBe(true);
+    expect(profiler.latestSample?.passes.every((pass) => Object.isFrozen(pass))).toBe(true);
     expect(fixture.buffers[1].unmap).toHaveBeenCalledOnce();
   });
 
@@ -79,7 +88,7 @@ describe("WebGPU timestamp profiling", () => {
 
     for (let index = 0; index < 4; index++) {
       expect(profiler.requestSample()).toBe(true);
-      profiler.addTimestampWrites({} as GPUComputePassDescriptor);
+      profiler.addTimestampWrites({} as GPUComputePassDescriptor, "compute");
       profiler.readAfterSubmit(profiler.resolve(encoder.encoder));
     }
 
@@ -95,18 +104,18 @@ describe("WebGPU timestamp profiling", () => {
     const encoder = createEncoder();
     const initial: GPUComputePassDescriptor = {};
     expect(profiler.requestSample()).toBe(true);
-    profiler.addTimestampWrites(initial);
+    profiler.addTimestampWrites(initial, "compute");
     profiler.readAfterSubmit(profiler.resolve(encoder.encoder));
 
     const idle: GPUComputePassDescriptor = {};
-    profiler.addTimestampWrites(idle);
+    profiler.addTimestampWrites(idle, "compute");
     expect(idle.timestampWrites).toBeUndefined();
     expect(profiler.resolve(encoder.encoder)).toBeNull();
 
     expect(profiler.requestSample()).toBe(true);
     expect(profiler.requestSample()).toBe(false);
     const requested: GPUComputePassDescriptor = {};
-    profiler.addTimestampWrites(requested);
+    profiler.addTimestampWrites(requested, "compute");
     expect(requested.timestampWrites).toBeDefined();
     profiler.readAfterSubmit(profiler.resolve(encoder.encoder));
     profiler.destroy();
@@ -122,7 +131,7 @@ describe("WebGPU timestamp profiling", () => {
     expect(profiler.requestSample()).toBe(false);
 
     const requested: GPUComputePassDescriptor = {};
-    profiler.addTimestampWrites(requested);
+    profiler.addTimestampWrites(requested, "compute");
     expect(requested.timestampWrites).toBeDefined();
     profiler.readAfterSubmit(profiler.resolve(encoder.encoder));
     profiler.destroy();
@@ -134,7 +143,7 @@ describe("WebGPU timestamp profiling", () => {
     const encoder = createEncoder();
 
     expect(profiler.requestSample()).toBe(true);
-    profiler.addTimestampWrites({} as GPURenderPassDescriptor);
+    profiler.addTimestampWrites({} as GPURenderPassDescriptor, "render");
     const pending = profiler.resolve(encoder.encoder);
     fixture.buffers[1].setTimestamps(5_000n, 5_000n);
     profiler.readAfterSubmit(pending);
@@ -145,6 +154,54 @@ describe("WebGPU timestamp profiling", () => {
     expect(fixture.querySet.destroy).toHaveBeenCalledOnce();
     expect(fixture.buffers.every((buffer) => buffer.destroy.mock.calls.length === 1)).toBe(true);
   });
+
+  it("keeps invalid pass durations at zero without widening a valid span", async () => {
+    const fixture = createDevice(true);
+    const profiler = new WebGPUTimingProfiler(fixture.device, true, true);
+    const encoder = createEncoder();
+
+    expect(profiler.requestSample()).toBe(true);
+    profiler.addTimestampWrites({ label: "invalid" } as GPUComputePassDescriptor, "compute");
+    profiler.addTimestampWrites({ label: "valid" } as GPUComputePassDescriptor, "compute");
+    const pending = profiler.resolve(encoder.encoder);
+    fixture.buffers[1].setTimestamps(9_000_000n, 1_000_000n, 2_000_000n, 5_000_000n);
+    profiler.readAfterSubmit(pending);
+    await vi.waitFor(() => expect(profiler.latestSample).not.toBeNull());
+
+    expect(profiler.latestSample).toMatchObject({
+      durationMs: 3,
+      passes: [
+        { name: "invalid", durationMs: 0 },
+        { name: "valid", durationMs: 3 }
+      ]
+    });
+    profiler.destroy();
+  });
+
+  it("drops the whole sample when a submission exceeds the pass capacity", () => {
+    const fixture = createDevice(true);
+    const profiler = new WebGPUTimingProfiler(fixture.device, true, true);
+    const encoder = createEncoder();
+    const descriptors: GPURenderPassDescriptor[] = [];
+
+    expect(profiler.requestSample()).toBe(true);
+    for (let index = 0; index < 65; index++) {
+      const descriptor: GPURenderPassDescriptor = { label: `render-${index}`, colorAttachments: [] };
+      descriptors.push(descriptor);
+      profiler.addTimestampWrites(descriptor, "render");
+    }
+
+    expect(descriptors[63].timestampWrites).toMatchObject({
+      beginningOfPassWriteIndex: 126,
+      endOfPassWriteIndex: 127
+    });
+    expect(descriptors[64].timestampWrites).toBeUndefined();
+    expect(profiler.resolve(encoder.encoder)).toBeNull();
+    expect(profiler.droppedSampleCount).toBe(1);
+    expect(encoder.resolveQuerySet).not.toHaveBeenCalled();
+    expect(profiler.requestSample()).toBe(true);
+    profiler.destroy();
+  });
 });
 
 class FakeGPUBuffer {
@@ -153,14 +210,17 @@ class FakeGPUBuffer {
     this.mapState = "unmapped";
   });
   mapState: GPUBufferMapState = "unmapped";
-  private readonly _data = new ArrayBuffer(16);
+  private readonly _data: ArrayBuffer;
 
-  constructor(private readonly _keepPending: boolean) {}
+  constructor(
+    private readonly _keepPending: boolean,
+    size: number
+  ) {
+    this._data = new ArrayBuffer(size);
+  }
 
-  setTimestamps(beginning: bigint, end: bigint): void {
-    const timestamps = new BigUint64Array(this._data);
-    timestamps[0] = beginning;
-    timestamps[1] = end;
+  setTimestamps(...values: bigint[]): void {
+    new BigUint64Array(this._data).set(values);
   }
 
   mapAsync(): Promise<void> {
@@ -195,8 +255,8 @@ function createDevice(
       has: (feature: GPUFeatureName) => feature === "timestamp-query" && timestampFeature
     },
     createQuerySet,
-    createBuffer: vi.fn(() => {
-      const buffer = new FakeGPUBuffer(keepReadbacksPending && buffers.length > 0);
+    createBuffer: vi.fn((descriptor: GPUBufferDescriptor) => {
+      const buffer = new FakeGPUBuffer(keepReadbacksPending && buffers.length > 0, descriptor.size);
       buffers.push(buffer);
       return buffer;
     })

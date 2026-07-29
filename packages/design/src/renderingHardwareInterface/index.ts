@@ -2,6 +2,8 @@ export type { GraphicsBackend } from "./GraphicsBackend";
 export type {
   ComputeCapabilities,
   GPUTiming,
+  GPUTimingPassKind,
+  GPUTimingPassSample,
   GPUTimingSample,
   IHardwareRenderer,
   RenderTargetOrigin

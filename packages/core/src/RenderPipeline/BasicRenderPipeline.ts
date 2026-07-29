@@ -243,7 +243,7 @@ export class BasicRenderPipeline {
       context.applyVirtualCamera(camera._virtualCamera, needFlipProjection);
     }
 
-    context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace);
+    context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
 
     // Clear color
     if (finalClearFlags !== CameraClearFlags.None) {
@@ -273,7 +273,10 @@ export class BasicRenderPipeline {
             internalColorTarget,
             0,
             undefined,
-            camera.renderTarget ? undefined : engine._basicResources.blitScreenMaterial
+            camera.renderTarget ? undefined : engine._basicResources.blitScreenMaterial,
+            0,
+            undefined,
+            "background-copy"
           );
         } else {
           // Only blit color buffer from back buffer
@@ -281,7 +284,7 @@ export class BasicRenderPipeline {
           rhi.blitInternalRTByBlitFrameBuffer(camera.renderTarget, internalColorTarget, ignoreFlags, camera.viewport);
         }
       }
-      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace);
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
     }
 
     const maskManager = scene._maskManager;
@@ -309,7 +312,7 @@ export class BasicRenderPipeline {
       opaqueTexturePass.onRender(context);
 
       // Should revert to original render target
-      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace);
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward");
     } else {
       camera.shaderData.setTexture(Camera._cameraOpaqueTextureProperty, null);
     }
@@ -349,7 +352,17 @@ export class BasicRenderPipeline {
 
     // If output target is not camera's render target(only enable HDR or opaqueTexture), we should blit it to camera's render target
     if (outputTarget !== cameraRenderTarget) {
-      Blitter.blitTexture(engine, <Texture2D>outputTarget.getColorTexture(0), cameraRenderTarget, 0, camera.viewport);
+      Blitter.blitTexture(
+        engine,
+        <Texture2D>outputTarget.getColorTexture(0),
+        cameraRenderTarget,
+        0,
+        camera.viewport,
+        undefined,
+        0,
+        undefined,
+        "final-copy"
+      );
     }
 
     cameraRenderTarget?._blitRenderTarget();

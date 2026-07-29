@@ -138,6 +138,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _destroyed = false;
   private _globalDepthBias = 0;
   private _globalSlopeScaledDepthBias = 0;
+  private _renderPassLabel = "render";
 
   /**
    * Whether the texture-based joint path is available.
@@ -438,9 +439,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     viewport: Vector4,
     _isFlipProjection?: boolean,
     mipLevel: number = 0,
-    faceIndex?: number
+    faceIndex?: number,
+    gpuTimingLabel?: string
   ): void {
     this._endCurrentPass();
+    this._renderPassLabel = gpuTimingLabel || (renderTarget ? "offscreen-render" : "main-render");
     if (renderTarget) {
       (
         renderTarget as RenderTarget & { _platformRenderTarget: IPlatformRenderTarget }
@@ -621,7 +624,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     const descriptor = this._currentRenderTarget
       ? this._currentRenderTarget.createDescriptor(this._pendingClearFlags, this._pendingClearColor)
       : this._createMainRenderPassDescriptor();
-    this._gpuTimingProfiler.addTimestampWrites(descriptor);
+    descriptor.label = this._renderPassLabel;
+    this._gpuTimingProfiler.addTimestampWrites(descriptor, "render");
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
@@ -641,9 +645,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       label: "Galacean WebGPU frame"
     });
     const descriptor: GPUComputePassDescriptor = {
-      label: "Galacean compute pass"
+      label: "compute"
     };
-    this._gpuTimingProfiler.addTimestampWrites(descriptor);
+    this._gpuTimingProfiler.addTimestampWrites(descriptor, "compute");
     return (this._computePass = this._commandEncoder.beginComputePass(descriptor));
   }
 
