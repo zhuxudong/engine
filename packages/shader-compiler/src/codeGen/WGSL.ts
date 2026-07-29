@@ -95,6 +95,7 @@ export class WGSLVisitor extends GLESVisitor {
   private _fragmentEntry = "";
   private _swizzleTempIndex = 0;
   private _requiresNanHelper = false;
+  private _usesHalfValueTypes = false;
   private _includeGuardMacros = new Set<string>();
 
   static getVisitor(): WGSLVisitor {
@@ -124,10 +125,11 @@ export class WGSLVisitor extends GLESVisitor {
     this._collectFragmentOutputs(node, fragmentEntry);
     const reflection = this._createReflection();
     const declarations = this._createResourceDeclarations();
+    const halfValueTypes = this._createHalfValueTypeDeclarations();
 
     return {
-      vertex: `${declarations}\n${generated.vertex}\n${this._createVertexWrapper()}`,
-      fragment: `${declarations}\n${generated.fragment}\n${this._createFragmentWrapper()}`,
+      vertex: `${halfValueTypes}\n${declarations}\n${generated.vertex}\n${this._createVertexWrapper()}`,
+      fragment: `${halfValueTypes}\n${declarations}\n${generated.fragment}\n${this._createFragmentWrapper()}`,
       reflection
     };
   }
@@ -146,6 +148,7 @@ export class WGSLVisitor extends GLESVisitor {
     workgroupSize: readonly [string, string, string]
   ): IShaderInfo {
     this._resetProgram();
+    this._validateHalfValueTypes(node);
     VisitorContext.reset();
     this._collectGlobalResources(node, "", "", computeEntry);
     this._prepareAtomics(node, true);
@@ -153,11 +156,12 @@ export class WGSLVisitor extends GLESVisitor {
     const generated = this._visitComputeProgramBody(node, computeEntry);
     const reflection = this._createReflection();
     const declarations = this._createResourceDeclarations();
+    const halfValueTypes = this._createHalfValueTypeDeclarations();
 
     return {
       vertex: "",
       fragment: "",
-      compute: `${declarations}\n${generated}\n${this._createComputeWrapper(workgroupSize)}`,
+      compute: `${halfValueTypes}\n${declarations}\n${generated}\n${this._createComputeWrapper(workgroupSize)}`,
       computeWorkgroupSize: workgroupSize,
       reflection
     };
@@ -340,7 +344,7 @@ export class WGSLVisitor extends GLESVisitor {
       }
     }
     if (identifier.isBuiltin && typeof identifier.ident !== "string") {
-      const targetType = this._typeFromDataType(identifier.ident);
+      const targetType = this._getWGSLHalfValueType(identifier.lexeme) ?? this._typeFromDataType(identifier.ident);
       const targetComponentType = /<([^>]+)>/.exec(targetType)?.[1] ?? targetType;
       if (targetComponentType !== "bool") {
         for (let i = 0; i < args.length; i++) {
@@ -360,7 +364,7 @@ export class WGSLVisitor extends GLESVisitor {
 
   override visitFunctionIdentifier(node: ASTNode.FunctionIdentifier): string {
     if (node.isBuiltin && typeof node.ident !== "string") {
-      return this._typeFromDataType(node.ident);
+      return this._getWGSLHalfValueType(node.lexeme) ?? this._typeFromDataType(node.ident);
     }
     return this._builtinFunction(node.lexeme);
   }
@@ -415,7 +419,7 @@ export class WGSLVisitor extends GLESVisitor {
 
   override visitSingleDeclaration(node: ASTNode.SingleDeclaration): string {
     const children = node.children;
-    const type = this._typeFromSpecifier(node.typeSpecifier, node.arraySpecifier);
+    const type = this._valueTypeFromSpecifier(node.typeSpecifier, node.arraySpecifier);
     const name = (children[1] as BaseToken).lexeme;
     const initializer = children[children.length - 1];
     const hasInitializer = children.length === 4 || children.length === 5;
@@ -679,6 +683,7 @@ export class WGSLVisitor extends GLESVisitor {
     this._samplerParameterStack.length = 0;
     this._swizzleTempIndex = 0;
     this._requiresNanHelper = false;
+    this._usesHalfValueTypes = false;
   }
 
   private _collectGlobalResources(
@@ -1259,8 +1264,52 @@ ${assignments.join("\n")}
     const array = children[3] instanceof ASTNode.ArraySpecifier ? children[3] : node.typeInfo.arraySpecifier;
     const initializer = children[children.length - 1];
     const value = children.length === 5 || children.length === 6 ? ` = ${this._code(initializer)}` : "";
-    output.push(`var ${name}: ${this._type(node.typeInfo, array)}${value}`);
+    output.push(`var ${name}: ${this._valueType(node.typeInfo, array)}${value}`);
     return output;
+  }
+
+  private _valueType(typeInfo: SymbolType, array = typeInfo.arraySpecifier): string {
+    const halfType = this._getWGSLHalfValueType(typeInfo.typeLexeme);
+    if (!halfType) {
+      return this._type(typeInfo, array);
+    }
+    const length = this._arrayLength(array);
+    return length ? `array<${halfType}, ${length}>` : halfType;
+  }
+
+  private _valueTypeFromSpecifier(specifier: ASTNode.TypeSpecifier, array = specifier.arraySpecifier): string {
+    const halfType = this._getWGSLHalfValueType(specifier.lexeme);
+    if (!halfType) {
+      return this._typeFromSpecifier(specifier, array);
+    }
+    const length = this._arrayLength(array);
+    return length ? `array<${halfType}, ${length}>` : halfType;
+  }
+
+  private _getWGSLHalfValueType(lexeme: string): string | undefined {
+    if (!this._getHalfValueType(lexeme)) {
+      return undefined;
+    }
+    this._usesHalfValueTypes = true;
+    return lexeme;
+  }
+
+  private _createHalfValueTypeDeclarations(): string {
+    if (!this._usesHalfValueTypes) {
+      return "";
+    }
+    return `#ifdef GRAPHICS_FEATURE_SHADER_F16
+enable f16;
+alias half = f16;
+alias half2 = vec2<f16>;
+alias half3 = vec3<f16>;
+alias half4 = vec4<f16>;
+#else
+alias half = f32;
+alias half2 = vec2<f32>;
+alias half3 = vec3<f32>;
+alias half4 = vec4<f32>;
+#endif`;
   }
 
   private _textureCall(
