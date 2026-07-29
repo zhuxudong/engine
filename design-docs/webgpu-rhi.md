@@ -2432,17 +2432,51 @@ sphere 半径。第二阶段不使用近似屏幕半径，而把该 sphere 的 w
 4. 扫描 rect 覆盖的全部 tile，取最大的 far depth。只有
    `nearestDepth > maxCoveredTileFarDepth` 时才拒绝实例；严格比较不加经验 epsilon。tile
    外扩或 clear-depth `1` 只会使实例更可能保留。
-5. 一个 workgroup 负责一个 eligible batch。所有 invocation 以统一 chunk 循环扫描 input
-   survivor，通过 workgroup shared atomic 分配连续 output slot；最后把同一 survivor count
-   写入该 batch 的全部 indirect records。
-6. pass 的 8 个 storage binding 分别是 input instance、input indirect、command、现有
-   fine-cull batch 参数、camera/tile 参数、far-depth tile、output instance 和 output
-   indirect，等于 WebGPU guaranteed minimum；创建时继续用 active device limits 验证。
+5. 每个 workgroup 负责一个预先展平的 batch chunk，通过 workgroup shared atomic 分配局部
+   slot，再用 batch counter 分配全局连续 output。`reset → cull → finalize` 三个 dispatch
+   避免在 storage-buffer count 控制的循环里执行 barrier。
+6. cull pass 的 8 个 storage binding 分别是 input instance、input indirect、command、现有
+   fine-cull batch 参数、camera/tile 参数、far-depth tile、output instance 和 counter，等于
+   WebGPU guaranteed minimum；finalize 再把 counter 写入 output indirect。创建时继续用
+   active device limits 验证。
 
 已知深度 fixture 必须同时放置一个位于 constant depth 前方和一个位于后方的实例，真实读回
 只保留前方 record。Grasslands 至少一个固定遮挡视角的 6 个 count 必须下降；与
 `copy-survivors` 对比截图不得缺失可见植被轮廓，关闭 `surfaceHiZ=occlusion` 必须恢复原
 count。功能门通过后才进入 GPU timing 与 FPS 保留门。
+
+#### world AABB tile test 实验检查点：不保留
+
+第一版尝试让一个 workgroup 以循环处理一个 batch；native WGSL validation 正确拒绝了循环内
+barrier，因为循环条件读取 storage-buffer indirect count，不能证明为 uniform control flow。
+最终实验改为 CPU 预先展平 capacity chunk，执行 `reset → chunk cull → finalize`；每个 chunk
+只含一次 uniform barrier 序列，没有通过 raw WGSL 或跳过 validation 绕开。
+
+constant-depth fixture 使用 `0.625` 的真实 depth attachment，放置一个在深度前方和一个在后方
+的 world AABB，GPU readback 从 2 个 input survivor 得到 1 个前方 output，证明 normal-Z
+比较、矩阵投影和 compact counter 本身有效。但 Grasslands 的实际 workload 没有形成足够的
+遮挡量：
+
+| far-depth 粒度 | 固定视角 | input survivor | output survivor | 降幅 |
+| --- | --- | ---: | ---: | ---: |
+| workgroup-derived 16 px | `first-person` | 35,280 | 35,280 | 0 |
+| workgroup-derived 16 px | `hero` | 35,409 | 35,409 | 0 |
+| workgroup-derived 16 px | `terrain-horizon` | 33,986 | 33,986 | 0 |
+| workgroup-derived 16 px | `valley-overview` | 31,611 | 31,611 | 0 |
+| 同 workgroup 输出 8 px / 4 px sub-tile | `first-person` | 35,280 | 35,280 | 0 |
+| 同 workgroup输出逐像素 far depth | `first-person` | 35,280 | 35,245 | -35（-0.099%） |
+
+逐像素候选相对 identity copy 的 normalized RGB RMSE 为 0.000628，589,824 个像素中 23 个
+像素有通道差超过 5/255；GPU/page diagnostic 为 0。画面门通过，但 35 个实例的减少需要
+全分辨率 far-depth buffer、八角投影、tile 扫描和三个额外 dispatch，没有进入 FPS 保留门的
+实际 workload 前提。Grasslands 的 5 个 grass/flower batch 最大距离只有 110 m，当前视锥内
+实例大多是贴地可见点；fake-tree 的保守 bounds 又扩大投影 rect，单层 far-depth 不能提供
+有意义的拒绝率。
+
+因此 `surfaceHiZ=occlusion` consumer、细粒度 tile 变体、known-depth occlusion fixture 和
+对应测试全部撤销。保留已经独立验收的 compute sampled texture、同帧 far-depth tile、
+after-depth hook 与 identity output stream；后续只有在 workload 包含更深的遮挡层次，或完整
+Hi-Z pyramid 能先证明显著 survivor 降幅时才重新进入实现。
 
 ### 移动端约束与验收
 
