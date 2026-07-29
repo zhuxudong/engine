@@ -45,6 +45,73 @@ Shader "WGSL/Basic" {
 }
 `;
 
+const halfValueShader = `
+Shader "WGSL/HalfValue" {
+  SubShader "Default" {
+    Pass "Forward" {
+      mat4 renderer_MVPMat;
+
+      struct Attributes {
+        vec3 POSITION;
+      };
+
+      struct Varyings {
+        vec2 v_uv;
+      };
+
+      VertexShader = vert;
+      FragmentShader = frag;
+
+      Varyings vert(Attributes attributes) {
+        Varyings output;
+        half3 localPosition = half3(attributes.POSITION);
+        gl_Position = renderer_MVPMat * vec4(half4(localPosition, half(1.0)));
+        output.v_uv = vec2(localPosition.xy);
+        return output;
+      }
+
+      vec4 frag(Varyings varyings) {
+        half2 localUv = half2(varyings.v_uv);
+        half4 localColor = half4(localUv, half(0.25), half(1.0));
+        return vec4(localColor);
+      }
+    }
+  }
+}
+`;
+
+const invalidHalfInterfaceShader = `
+Shader "WGSL/InvalidHalfInterface" {
+  SubShader "Default" {
+    Pass "Forward" {
+      half4 material_Color;
+
+      struct Attributes {
+        vec3 POSITION;
+      };
+
+      struct Varyings {
+        vec2 v_uv;
+      };
+
+      VertexShader = vert;
+      FragmentShader = frag;
+
+      Varyings vert(Attributes attributes) {
+        Varyings output;
+        gl_Position = vec4(attributes.POSITION, 1.0);
+        output.v_uv = attributes.POSITION.xy;
+        return output;
+      }
+
+      vec4 frag(Varyings varyings) {
+        return material_Color;
+      }
+    }
+  }
+}
+`;
+
 const computeShader = `
 Shader "WGSL/ComputeCopy" {
   SubShader "Default" {
@@ -215,6 +282,28 @@ function generateWGSLFromSource(
   };
 }
 
+function generateGLESFromSource(
+  source: string,
+  language: ShaderLanguage.GLSLES100 | ShaderLanguage.GLSLES300
+): { vertex: string; fragment: string } {
+  const compiler = new ShaderCompiler();
+  const shader = compiler._parseShaderSource(source);
+  const pass = shader.subShaders[0].passes[0];
+  const program = compiler._parseShaderPass(
+    pass.contents,
+    pass.vertexEntry,
+    pass.fragmentEntry,
+    language,
+    "shaders://root/"
+  );
+
+  expect(program).toBeDefined();
+  return {
+    vertex: ShaderMacroProcessor.evaluate(program!.vertexShaderInstructions!, new Map()),
+    fragment: ShaderMacroProcessor.evaluate(program!.fragmentShaderInstructions!, new Map())
+  };
+}
+
 function generateWGSLCompute(
   source: string = computeShader,
   macros: ReadonlyMap<string, string> = new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "64"]])
@@ -253,6 +342,83 @@ function formatCompilationErrors(stage: string, info: GPUCompilationInfo, source
 }
 
 describe("ShaderCompiler WGSL codegen", () => {
+  it("emits explicit half values with native f16 and f32 fallback aliases", () => {
+    const native = generateWGSLFromSource(halfValueShader, new Map([["GRAPHICS_FEATURE_SHADER_F16", ""]]));
+    const fallback = generateWGSLFromSource(halfValueShader);
+    const unchanged = generateWGSL();
+
+    for (const source of [native.vertex, native.fragment]) {
+      expect(source).toContain("enable f16;");
+      expect(source).toContain("alias half = f16;");
+      expect(source).toContain("alias half4 = vec4<f16>;");
+      expect(source).not.toContain("#");
+    }
+    for (const source of [fallback.vertex, fallback.fragment]) {
+      expect(source).not.toContain("enable f16;");
+      expect(source).toContain("alias half = f32;");
+      expect(source).toContain("alias half4 = vec4<f32>;");
+      expect(source).not.toContain("#");
+    }
+    expect(native.vertex).toContain("var localPosition: half3 = half3(POSITION)");
+    expect(native.fragment).toContain("var localColor: half4 = half4(localUv, half(0.25), half(1.0))");
+    expect(unchanged.vertex).not.toContain("alias half");
+    expect(unchanged.fragment).not.toContain("alias half");
+  });
+
+  it("lowers explicit half values to valid GLES precision declarations", () => {
+    for (const language of [ShaderLanguage.GLSLES100, ShaderLanguage.GLSLES300] as const) {
+      const generated = generateGLESFromSource(halfValueShader, language);
+      expect(generated.vertex).toContain("mediump vec3 localPosition");
+      expect(generated.vertex).toContain("vec3 ( POSITION )");
+      expect(generated.fragment).toContain("mediump vec4 localColor");
+      expect(generated.fragment).not.toMatch(/\bhalf[234]?\b/);
+    }
+  });
+
+  it("rejects half values in shader interfaces", () => {
+    expect(() => generateWGSLFromSource(invalidHalfInterfaceShader)).toThrow(
+      "ShaderLab half4 is only supported in function-local declarations and explicit constructors."
+    );
+    expect(() => generateGLESFromSource(invalidHalfInterfaceShader, ShaderLanguage.GLSLES300)).toThrow(
+      "ShaderLab half4 is only supported in function-local declarations and explicit constructors."
+    );
+  });
+
+  it("passes native WebGPU validation for half native and fallback variants", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const nativeAdapter = adapter!.features.has("shader-f16") ? await navigator.gpu.requestAdapter() : null;
+
+    const fallback = generateWGSLFromSource(halfValueShader);
+    const fallbackDevice = await adapter!.requestDevice();
+    const fallbackInfos = await Promise.all([
+      fallbackDevice.createShaderModule({ code: fallback.vertex }).getCompilationInfo(),
+      fallbackDevice.createShaderModule({ code: fallback.fragment }).getCompilationInfo()
+    ]);
+    expect([
+      ...formatCompilationErrors("fallback vertex", fallbackInfos[0], fallback.vertex),
+      ...formatCompilationErrors("fallback fragment", fallbackInfos[1], fallback.fragment)
+    ]).toEqual([]);
+
+    if (!nativeAdapter) {
+      return;
+    }
+    const native = generateWGSLFromSource(halfValueShader, new Map([["GRAPHICS_FEATURE_SHADER_F16", ""]]));
+    const nativeDevice = await nativeAdapter.requestDevice({ requiredFeatures: ["shader-f16"] });
+    const nativeInfos = await Promise.all([
+      nativeDevice.createShaderModule({ code: native.vertex }).getCompilationInfo(),
+      nativeDevice.createShaderModule({ code: native.fragment }).getCompilationInfo()
+    ]);
+    expect([
+      ...formatCompilationErrors("native vertex", nativeInfos[0], native.vertex),
+      ...formatCompilationErrors("native fragment", nativeInfos[1], native.fragment)
+    ]).toEqual([]);
+  });
+
   it("emits storage bindings and a compute wrapper from ShaderLab", () => {
     const compiler = new ShaderCompiler();
     const shader = compiler._parseShaderSource(computeShader);
