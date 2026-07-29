@@ -1854,9 +1854,9 @@ Galacean 当前在 `WebGPUShaderProgram.draw` 的每个 draw 前调用
 | --- | --- | --- | --- |
 | device 全局保存最后值 | `WebGPUGraphicDevice` | 新 render pass 的动态状态有独立默认值；跨 pass 复用会漏掉首个必要 command | 不采用 |
 | 每个 `WebGPUShaderProgram` 保存最后值 | shader program | 同一 pass 会切换 program，状态又不属于 shader；多个 program 无法共享同一 native pass 的最终值 | 不采用 |
-| native pass identity + 最终规范化值 | `WebGPUGraphicDevice` | cache 仅在 backend 内多保存一份小状态；新 pass 首次 draw 必须完整编码 | 采用 |
+| native pass identity + 最终规范化值 | `WebGPUGraphicDevice` | cache 仅在 backend 内多保存一份小状态；新 pass 首次 draw 必须完整编码 | 候选；性能门否决 |
 
-采用方案不增加 core/RHI/public API。`_applyDynamicState` 先按 attachment 尺寸计算最终 viewport 和
+候选方案不增加 core/RHI/public API。`_applyDynamicState` 先按 attachment 尺寸计算最终 viewport 和
 scissor，再逐项比较当前 native pass 的最后编码值；只跳过完全相等的 command。cache 以
 `GPURenderPassEncoder` identity 隔离，结束 pass 时释放。首个 draw、状态变化和新 pass 都必须
 编码；ShaderLab source、pipeline key、bind group、draw 顺序和 WebGL2 路径不变。
@@ -1871,6 +1871,41 @@ scissor，再逐项比较当前 native pass 的最后编码值；只跳过完全
   console error、page error 或 device lost。
 - 独立父提交基线与候选按 `all/no_grass/no_tree/no_rock` 交替三轮。只有完整场景 FPS 配对变化
   中位数为正、至少两轮同向、P95 中位数不退化时保留；category ablation 只用于归因。
+
+#### 实验检查点：拒绝动态状态 cache
+
+候选实现按 native pass identity 缓存最终值。固定 Grasslands 命令探针对比：
+
+| 每 submission 命令 | 基线 | 候选 | 差异 |
+| --- | ---: | ---: | ---: |
+| `setViewport` | 450 | 7 | -98.4% |
+| `setScissorRect` | 450 | 7 | -98.4% |
+| `setBlendConstant` | 450 | 4 | -99.1% |
+| `setStencilReference` | 450 | 4 | -99.1% |
+| `drawIndexed` | 443 | 443 | 0 |
+| `drawIndexedIndirect` | 6 | 6 | 0 |
+| 可见实例 | 169,199 | 169,199 | 0 |
+| GPU/page diagnostic | 0 | 0 | 0 |
+
+Shadow pass 的 viewport/scissor 从各 323 次降到各 4 次，对应四级 cascade；其他三个 pass 各保留
+一次。固定候选与父提交截图的归一化 RGB RMSE 为 0.000274，仅 26 个像素不同。候选阶段的
+WebGPU RHI 精确测试 19/19、package 类型检查、完整 module build 和 Grasslands WebGPU E2E
+均通过。
+
+同一 Chromium 140、ANGLE Metal、1280×720 CSS viewport、DPR 2、同一 browser context 和
+交替顺序的三轮数据如下。每轮列为候选相对基线的 FPS 变化：
+
+| workload | 第 1 轮 | 第 2 轮 | 第 3 轮 | 配对变化中位数 | baseline → candidate P95 中位数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | -1.15% | 0.00% | +3.86% | 0.00% | 16.70 → 16.70 ms |
+| no_grass | +0.03% | -0.003% | -0.007% | -0.003% | 8.90 → 8.90 ms |
+| no_tree | -9.06% | -7.51% | -1.16% | -7.51% | 16.60 → 16.70 ms |
+| no_rock | +2.32% | +1.25% | +15.48% | +2.32% | 16.70 → 16.60 ms |
+
+完整场景只有一轮为正、一轮持平，配对变化中位数不是正值；`no_tree` 三轮全部退化。
+`no_rock` 的正向结果不能证明完整 workload 受益。候选未通过预先定义的保留门槛，runtime cache
+和对应测试已撤销；四种动态状态继续逐 draw 编码。本检查点只保留命令边界和失败数据，不把
+native command 减少包装成移动端性能提升。
 
 ### 移动端约束与验收
 
