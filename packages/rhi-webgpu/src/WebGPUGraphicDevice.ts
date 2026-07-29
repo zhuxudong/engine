@@ -18,7 +18,8 @@ import {
   SubMesh,
   Texture2D,
   Texture2DArray,
-  TextureCube
+  TextureCube,
+  type VertexBufferBinding
 } from "@galacean/engine-core";
 import type {
   ComputeCapabilities,
@@ -393,18 +394,20 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
    * @param shaderProgram Shader program supplying pipeline and bind groups.
    * @param indirectBuffer Platform buffer containing WebGPU draw arguments.
    * @param indirectOffset Byte offset of the argument record.
+   * @param vertexBufferBindings Optional per-draw buffer replacements preserving the primitive layout.
    */
   drawPrimitiveIndirect(
     primitive: WebGPUPrimitive,
     subPrimitive: SubMesh,
     shaderProgram: IPlatformShaderProgram,
     indirectBuffer: IPlatformBuffer,
-    indirectOffset: number = 0
+    indirectOffset: number = 0,
+    vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[]
   ): void {
     const platformProgram =
       (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
       shaderProgram;
-    primitive.draw(platformProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset);
+    primitive.draw(platformProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset, vertexBufferBindings);
   }
 
   getMainFrameBufferWidth(): number {

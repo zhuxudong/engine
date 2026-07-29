@@ -1,4 +1,11 @@
-import { IndexFormat, MeshTopology, Primitive, SubPrimitive, VertexElementFormat } from "@galacean/engine-core";
+import {
+  IndexFormat,
+  MeshTopology,
+  Primitive,
+  SubPrimitive,
+  type VertexBufferBinding,
+  VertexElementFormat
+} from "@galacean/engine-core";
 import type { IPlatformPrimitive, IPlatformShaderProgram, IShaderVertexInputReflection } from "@galacean/engine-design";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
@@ -23,9 +30,16 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     shaderProgram: IPlatformShaderProgram,
     subPrimitive: SubPrimitive,
     indirectBuffer?: WebGPUBuffer,
-    indirectOffset: number = 0
+    indirectOffset: number = 0,
+    vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[]
   ): void {
-    (shaderProgram as WebGPUShaderProgram).draw(this, subPrimitive, indirectBuffer, indirectOffset);
+    (shaderProgram as WebGPUShaderProgram).draw(
+      this,
+      subPrimitive,
+      indirectBuffer,
+      indirectOffset,
+      vertexBufferBindings
+    );
   }
 
   destroy(): void {}
@@ -128,11 +142,19 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     subPrimitive: SubPrimitive,
     defaultBufferSlot?: number,
     indirectBuffer?: WebGPUBuffer,
-    indirectOffset: number = 0
+    indirectOffset: number = 0,
+    vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[]
   ): void {
     const primitive = this.primitive;
     for (let index = 0; index < primitive.vertexBufferBindings.length; index++) {
-      const binding = primitive.vertexBufferBindings[index];
+      const defaultBinding = primitive.vertexBufferBindings[index];
+      const overrideBinding = vertexBufferBindings?.[index];
+      if (overrideBinding && overrideBinding.stride !== defaultBinding?.stride) {
+        throw new Error(
+          `WebGPU draw override for vertex buffer ${index} must preserve stride ${defaultBinding?.stride}.`
+        );
+      }
+      const binding = overrideBinding ?? defaultBinding;
       if (binding) {
         pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer, binding.offset);
       }

@@ -226,7 +226,8 @@ export class RenderQueue {
               curElement.subPrimitive,
               program,
               indirectBuffer._platformBuffer,
-              curElement.indirectOffset
+              curElement.indirectOffset,
+              curElement.vertexBufferBindings
             );
           } else {
             rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);

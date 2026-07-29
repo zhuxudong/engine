@@ -469,7 +469,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     _subPrimitive: SubMesh,
     _shaderProgram: IPlatformShaderProgram,
     _indirectBuffer: IPlatformBuffer,
-    _indirectOffset: number = 0
+    _indirectOffset: number = 0,
+    _vertexBufferBindings?: unknown
   ): never {
     throw new Error("Indirect drawing is not supported by the WebGL backend.");
   }

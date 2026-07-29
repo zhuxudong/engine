@@ -11,7 +11,7 @@ import {
   DirectLight,
   ShadowType
 } from "@galacean/engine-core";
-import type { Buffer, MeshRendererShadowViewProvider } from "@galacean/engine-core";
+import type { Buffer, MeshRendererShadowViewProvider, VertexBufferBinding } from "@galacean/engine-core";
 import { Vector3 } from "@galacean/engine-math";
 import { WebGLEngine } from "@galacean/engine";
 import { describe, beforeAll, expect, it } from "vitest";
@@ -93,6 +93,7 @@ describe("MeshRenderer", async function () {
     renderer.setMaterial(new UnlitMaterial(engine));
 
     const shadowBuffer = {} as Buffer;
+    const vertexBufferBindings = [{} as VertexBufferBinding];
     const provider: MeshRendererShadowViewProvider = {
       prepareShadowViews: () => {},
       getShadowViewBinding: (_renderer, shadowCascadeIndex, subMeshIndex) => {
@@ -101,7 +102,8 @@ describe("MeshRenderer", async function () {
         return {
           primitive: shadowMesh._primitive,
           indirectBuffer: shadowBuffer,
-          indirectOffset: 40
+          indirectOffset: 40,
+          vertexBufferBindings
         };
       }
     };
@@ -118,6 +120,7 @@ describe("MeshRenderer", async function () {
     const forwardElement = cullingResults.opaqueQueue.elements.find((element) => element.component === renderer);
     expect(forwardElement.primitive).toBe(forwardMesh._primitive);
     expect(forwardElement.indirectBuffer).toBeNull();
+    expect(forwardElement.vertexBufferBindings).toBeNull();
 
     cullingResults.reset();
     context.shadowCascadeIndex = 2;
@@ -126,6 +129,7 @@ describe("MeshRenderer", async function () {
     expect(shadowElement.primitive).toBe(shadowMesh._primitive);
     expect(shadowElement.indirectBuffer).toBe(shadowBuffer);
     expect(shadowElement.indirectOffset).toBe(40);
+    expect(shadowElement.vertexBufferBindings).toBe(vertexBufferBindings);
 
     context.shadowCascadeIndex = -1;
     renderer._setShadowViewProvider(null);

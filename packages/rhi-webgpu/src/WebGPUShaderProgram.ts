@@ -10,7 +10,8 @@ import {
   ShaderProperty,
   StencilOperation,
   SubPrimitive,
-  Texture
+  Texture,
+  type VertexBufferBinding
 } from "@galacean/engine-core";
 import type { IPlatformShaderProgram, IShaderReflection, IShaderResourceReflection } from "@galacean/engine-design";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
@@ -194,7 +195,8 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     primitive: WebGPUPrimitive,
     subPrimitive: SubPrimitive,
     indirectBuffer?: WebGPUBuffer,
-    indirectOffset: number = 0
+    indirectOffset: number = 0,
+    vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[]
   ): void {
     if (this._destroyed) {
       throw new Error("Cannot draw with a destroyed WebGPU shader program.");
@@ -213,7 +215,14 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       pass.setBindGroup(1, instanceBinding.bindGroup, [instanceBinding.dynamicOffset]);
     }
     graphicDevice._applyDynamicState(pass);
-    primitive._encodeDraw(pass, subPrimitive, vertexState.defaultBufferSlot, indirectBuffer, indirectOffset);
+    primitive._encodeDraw(
+      pass,
+      subPrimitive,
+      vertexState.defaultBufferSlot,
+      indirectBuffer,
+      indirectOffset,
+      vertexBufferBindings
+    );
     graphicDevice._useProgram(this);
   }
 

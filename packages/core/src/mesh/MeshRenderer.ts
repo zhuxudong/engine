@@ -9,6 +9,7 @@ import { ignoreClone } from "../clone/CloneManager";
 import { Buffer, BufferBindFlag } from "../graphic";
 import { Mesh, MeshModifyFlags } from "../graphic/Mesh";
 import type { Primitive } from "../graphic/Primitive";
+import type { VertexBufferBinding } from "../graphic/VertexBufferBinding";
 import { ShaderMacro } from "../shader/ShaderMacro";
 import type { ShadowSliceData } from "../shadow/ShadowSliceData";
 
@@ -23,6 +24,8 @@ export interface MeshRendererShadowViewBinding {
   readonly indirectBuffer: Buffer;
   /** Byte offset of this sub-mesh's indirect record. */
   readonly indirectOffset: number;
+  /** Per-draw buffer replacements that preserve each primitive binding slot's vertex layout. */
+  readonly vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[];
 }
 
 /**
@@ -288,6 +291,7 @@ export class MeshRenderer extends Renderer {
         renderElement.set(this, material, shadowBinding.primitive, subMeshes[i]);
         renderElement.indirectBuffer = shadowBinding.indirectBuffer;
         renderElement.indirectOffset = shadowBinding.indirectOffset;
+        renderElement.vertexBufferBindings = shadowBinding.vertexBufferBindings ?? null;
       } else {
         renderElement.set(this, material, mesh._primitive, subMeshes[i]);
         const indirectBinding = this._indirectDrawBindings[i];
