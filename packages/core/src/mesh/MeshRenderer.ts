@@ -20,10 +20,10 @@ import type { ShadowSliceData } from "../shadow/ShadowSliceData";
 export interface MeshRendererShadowViewBinding {
   /** Primitive whose instance stream belongs to the cascade. */
   readonly primitive: Primitive;
-  /** Optional indirect arguments generated for the cascade. */
-  readonly indirectBuffer?: Buffer;
+  /** Indirect arguments generated for the cascade. */
+  readonly indirectBuffer: Buffer;
   /** Byte offset of this sub-mesh's indirect record. */
-  readonly indirectOffset?: number;
+  readonly indirectOffset: number;
   /** Per-draw buffer replacements that preserve each primitive binding slot's vertex layout. */
   readonly vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[];
 }
@@ -46,13 +46,13 @@ export interface MeshRendererShadowViewProvider {
    * @param renderer Renderer requesting the binding.
    * @param shadowCascadeIndex Active directional shadow cascade.
    * @param subMeshIndex Renderer sub-mesh index.
-   * @returns Prepared draw resources, or null when this sub-mesh has no instances in the cascade.
+   * @returns Prepared draw resources for the cascade.
    */
   getShadowViewBinding(
     renderer: MeshRenderer,
     shadowCascadeIndex: number,
     subMeshIndex: number
-  ): MeshRendererShadowViewBinding | null;
+  ): MeshRendererShadowViewBinding;
 }
 
 /**
@@ -285,10 +285,12 @@ export class MeshRenderer extends Renderer {
       const renderElement = renderElementPool.get();
       if (shadowViewProvider) {
         const shadowBinding = shadowViewProvider.getShadowViewBinding(this, shadowCascadeIndex, i);
-        if (!shadowBinding) continue;
+        if (!shadowBinding) {
+          throw new Error(`Missing shadow-view draw binding for cascade ${shadowCascadeIndex}, sub-mesh ${i}.`);
+        }
         renderElement.set(this, material, shadowBinding.primitive, subMeshes[i]);
-        renderElement.indirectBuffer = shadowBinding.indirectBuffer ?? null;
-        renderElement.indirectOffset = shadowBinding.indirectOffset ?? 0;
+        renderElement.indirectBuffer = shadowBinding.indirectBuffer;
+        renderElement.indirectOffset = shadowBinding.indirectOffset;
         renderElement.vertexBufferBindings = shadowBinding.vertexBufferBindings ?? null;
       } else {
         renderElement.set(this, material, mesh._primitive, subMeshes[i]);

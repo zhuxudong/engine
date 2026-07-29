@@ -137,61 +137,6 @@ describe("MeshRenderer", async function () {
     shadowMesh.destroy();
   });
 
-  it("accepts direct shadow-view bindings with cascade-owned primitives", () => {
-    const entity = rootEntity.createChild("DirectShadowViewBinding");
-    const renderer = entity.addComponent(MeshRenderer);
-    const forwardMesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
-    const shadowMesh = PrimitiveMesh.createCuboid(engine, 2, 2, 2);
-    shadowMesh._primitive.instanceCount = 7;
-    renderer.mesh = forwardMesh;
-    renderer.setMaterial(new UnlitMaterial(engine));
-    renderer._setShadowViewProvider({
-      prepareShadowViews: () => {},
-      getShadowViewBinding: () => ({ primitive: shadowMesh._primitive })
-    });
-
-    const context = engine._renderContext;
-    context.camera = camera;
-    context.applyVirtualCamera(camera._virtualCamera, false);
-    const cullingResults = camera._renderPipeline._cullingResults;
-    cullingResults.reset();
-    context.shadowCascadeIndex = 0;
-    renderer._prepareRender(context);
-
-    const shadowElement = cullingResults.opaqueQueue.elements.find((element) => element.component === renderer);
-    expect(shadowElement.primitive).toBe(shadowMesh._primitive);
-    expect(shadowElement.primitive.instanceCount).toBe(7);
-    expect(shadowElement.indirectBuffer).toBeNull();
-    expect(shadowElement.indirectOffset).toBe(0);
-
-    context.shadowCascadeIndex = -1;
-    entity.destroy();
-    shadowMesh.destroy();
-  });
-
-  it("omits shadow elements when a cascade binding has no instances", () => {
-    const entity = rootEntity.createChild("EmptyShadowViewBinding");
-    const renderer = entity.addComponent(MeshRenderer);
-    renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
-    renderer.setMaterial(new UnlitMaterial(engine));
-    renderer._setShadowViewProvider({
-      prepareShadowViews: () => {},
-      getShadowViewBinding: () => null
-    });
-
-    const context = engine._renderContext;
-    context.camera = camera;
-    context.applyVirtualCamera(camera._virtualCamera, false);
-    const cullingResults = camera._renderPipeline._cullingResults;
-    cullingResults.reset();
-    context.shadowCascadeIndex = 1;
-    renderer._prepareRender(context);
-
-    expect(cullingResults.opaqueQueue.elements.some((element) => element.component === renderer)).toBe(false);
-    context.shadowCascadeIndex = -1;
-    entity.destroy();
-  });
-
   it("prepares each shared shadow-view provider once before rendering cascades", () => {
     const scene = engine.sceneManager.activeScene;
     const lightEntity = rootEntity.createChild("ShadowViewLight");
