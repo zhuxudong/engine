@@ -303,14 +303,7 @@ export class BasicRenderPipeline {
       context.applyVirtualCamera(camera._virtualCamera, needFlipProjection);
     }
 
-    context.setRenderTarget(
-      colorTarget,
-      colorViewport,
-      mipLevel,
-      cubeFace,
-      "forward",
-      depthPrimingEnabled ? { depthReadOnly: true } : undefined
-    );
+    context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
 
     // Clear color
     const forwardClearFlags = depthPrimingEnabled ? finalClearFlags & ~CameraClearFlags.Depth : finalClearFlags;
@@ -352,14 +345,7 @@ export class BasicRenderPipeline {
           rhi.blitInternalRTByBlitFrameBuffer(camera.renderTarget, internalColorTarget, ignoreFlags, camera.viewport);
         }
       }
-      context.setRenderTarget(
-        colorTarget,
-        colorViewport,
-        mipLevel,
-        cubeFace,
-        "forward",
-        depthPrimingEnabled ? { depthReadOnly: true } : undefined
-      );
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
     }
 
     const maskManager = scene._maskManager;
@@ -392,14 +378,7 @@ export class BasicRenderPipeline {
       opaqueTexturePass.onRender(context);
 
       // Should revert to original render target
-      context.setRenderTarget(
-        colorTarget,
-        colorViewport,
-        mipLevel,
-        cubeFace,
-        "forward",
-        depthPrimingEnabled ? { depthReadOnly: true } : undefined
-      );
+      context.setRenderTarget(colorTarget, colorViewport, mipLevel, cubeFace, "forward", depthPrimingEnabled);
     } else {
       camera.shaderData.setTexture(Camera._cameraOpaqueTextureProperty, null);
     }

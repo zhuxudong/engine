@@ -3,7 +3,6 @@ import { Camera } from "../Camera";
 import { Engine } from "../Engine";
 import { VirtualCamera } from "../VirtualCamera";
 import { ReplacementFailureStrategy } from "../enums/ReplacementFailureStrategy";
-import type { RenderTargetActivationOptions } from "../renderingHardwareInterface";
 import { Shader, ShaderProperty } from "../shader";
 import { ShaderTagKey } from "../shader/ShaderTagKey";
 import { RenderTarget, TextureCubeFace } from "../texture";
@@ -75,7 +74,7 @@ export class RenderContext {
     mipLevel?: number,
     faceIndex?: TextureCubeFace,
     gpuTimingLabel?: string,
-    activationOptions?: RenderTargetActivationOptions
+    depthReadOnly?: boolean
   ) {
     const engine = this.camera.engine;
     const rhi = engine._hardwareRenderer;
@@ -86,7 +85,7 @@ export class RenderContext {
       mipLevel,
       faceIndex,
       gpuTimingLabel,
-      activationOptions
+      depthReadOnly
     );
 
     if (destination) {

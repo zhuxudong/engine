@@ -16,7 +16,6 @@ import {
   Mesh,
   Platform,
   Primitive,
-  type RenderTargetActivationOptions,
   RenderTarget,
   SubMesh,
   SystemInfo,
@@ -503,7 +502,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     mipLevel?: number,
     faceIndex?: TextureCubeFace,
     _gpuTimingLabel?: string,
-    activationOptions?: RenderTargetActivationOptions
+    _depthReadOnly?: boolean
   ) {
     let bufferWidth: number, bufferHeight: number;
     if (renderTarget) {
@@ -512,7 +511,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
       /** @ts-ignore */
       const platformRenderTarget = renderTarget._platformRenderTarget as GLRenderTarget;
-      platformRenderTarget.activeRenderTarget(mipLevel, faceIndex, activationOptions);
+      platformRenderTarget.activeRenderTarget(mipLevel, faceIndex);
 
       bufferWidth = renderTarget.width >> mipLevel;
       bufferHeight = renderTarget.height >> mipLevel;

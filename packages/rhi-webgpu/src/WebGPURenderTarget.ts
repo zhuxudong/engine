@@ -1,7 +1,6 @@
 import {
   CameraClearFlags,
   IPlatformRenderTarget,
-  type RenderTargetActivationOptions,
   RenderTarget,
   Texture,
   TextureCube,
@@ -24,7 +23,6 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
   private _mipLevel = 0;
   private _faceIndex?: TextureCubeFace;
   private _depthReadOnly = false;
-  private _colorAttachments = true;
 
   constructor(device: WebGPUGraphicDevice, target: RenderTarget) {
     this._device = device;
@@ -66,15 +64,10 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
     }
   }
 
-  activeRenderTarget(
-    mipLevel: number = 0,
-    faceIndex?: TextureCubeFace,
-    options: RenderTargetActivationOptions = {}
-  ): void {
+  activeRenderTarget(mipLevel: number = 0, faceIndex?: TextureCubeFace, depthReadOnly: boolean = false): void {
     this._mipLevel = mipLevel;
     this._faceIndex = faceIndex;
-    this._depthReadOnly = options.depthReadOnly ?? false;
-    this._colorAttachments = options.colorAttachments ?? true;
+    this._depthReadOnly = depthReadOnly;
     this._device._setRenderTarget(this);
   }
 
@@ -89,9 +82,6 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
 
   /** @internal */
   get colorFormats(): readonly GPUTextureFormat[] {
-    if (!this._colorAttachments) {
-      return [];
-    }
     return this._target.colorTextures.map(
       (texture) => ((texture as TextureInternal)._platformTexture as WebGPUTexture)._format
     );
@@ -125,26 +115,24 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
     const clearColorAttachment = (clearFlags & CameraClearFlags.Color) !== 0;
     const clearDepth = (clearFlags & CameraClearFlags.Depth) !== 0;
     const clearStencil = (clearFlags & CameraClearFlags.Stencil) !== 0;
-    const colorAttachments: GPURenderPassColorAttachment[] = this._colorAttachments
-      ? target.colorTextures.map((texture, index) => {
-          const platformTexture = (texture as TextureInternal)._platformTexture as WebGPUTexture;
-          const resolveTarget = platformTexture._gpuTexture.createView(this._viewDescriptor(texture));
-          return {
-            view: sampleCount > 1 ? this._multisampledColors[index].createView() : resolveTarget,
-            resolveTarget: sampleCount > 1 ? resolveTarget : undefined,
-            clearValue: clearColorAttachment
-              ? {
-                  r: clearColor?.r ?? 0,
-                  g: clearColor?.g ?? 0,
-                  b: clearColor?.b ?? 0,
-                  a: clearColor?.a ?? 0
-                }
-              : undefined,
-            loadOp: clearColorAttachment ? "clear" : "load",
-            storeOp: "store"
-          };
-        })
-      : [];
+    const colorAttachments: GPURenderPassColorAttachment[] = target.colorTextures.map((texture, index) => {
+      const platformTexture = (texture as TextureInternal)._platformTexture as WebGPUTexture;
+      const resolveTarget = platformTexture._gpuTexture.createView(this._viewDescriptor(texture));
+      return {
+        view: sampleCount > 1 ? this._multisampledColors[index].createView() : resolveTarget,
+        resolveTarget: sampleCount > 1 ? resolveTarget : undefined,
+        clearValue: clearColorAttachment
+          ? {
+              r: clearColor?.r ?? 0,
+              g: clearColor?.g ?? 0,
+              b: clearColor?.b ?? 0,
+              a: clearColor?.a ?? 0
+            }
+          : undefined,
+        loadOp: clearColorAttachment ? "clear" : "load",
+        storeOp: "store"
+      };
+    });
 
     const targetInternal = target as RenderTargetInternal;
     const depth = targetInternal._depth;
