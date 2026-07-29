@@ -1,4 +1,4 @@
-import { DataType, GLCapabilityType, Logger, Primitive } from "@galacean/engine-core";
+import { DataType, GLCapabilityType, type IPlatformBuffer, Logger, Primitive } from "@galacean/engine-core";
 import { SubPrimitive } from "@galacean/engine-core/types/graphic/SubPrimitive";
 import { IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
 import { WebGLGraphicDevice } from "./WebGLGraphicDevice";
@@ -93,6 +93,20 @@ export class GLPrimitive implements IPlatformPrimitive {
     } else {
       this._disableAttrib();
     }
+  }
+
+  /**
+   * Reports the unsupported indirect-draw capability on WebGL.
+   * @throws Always; WebGL does not expose core indirect drawing.
+   */
+  drawIndirect(
+    _shaderProgram: IPlatformShaderProgram,
+    _subMesh: SubPrimitive,
+    _indirectBuffer: IPlatformBuffer,
+    _indirectOffset: number,
+    _vertexBufferBindings?: readonly unknown[]
+  ): never {
+    throw new Error("Indirect drawing is not supported by the WebGL backend.");
   }
 
   destroy(): void {

@@ -396,7 +396,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
   }
 
-  drawPrimitive(primitive: WebGPUPrimitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram): void {
+  drawPrimitive(primitive: Primitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram): void {
     const platformProgram =
       (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
       shaderProgram;
@@ -413,7 +413,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
    * @param vertexBufferBindings Optional per-draw buffer replacements preserving the primitive layout.
    */
   drawPrimitiveIndirect(
-    primitive: WebGPUPrimitive,
+    primitive: Primitive,
     subPrimitive: SubMesh,
     shaderProgram: IPlatformShaderProgram,
     indirectBuffer: IPlatformBuffer,
@@ -423,7 +423,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     const platformProgram =
       (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
       shaderProgram;
-    primitive.draw(platformProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset, vertexBufferBindings);
+    primitive._drawIndirect(platformProgram, subPrimitive, indirectBuffer, indirectOffset, vertexBufferBindings);
   }
 
   getMainFrameBufferWidth(): number {

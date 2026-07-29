@@ -15,6 +15,7 @@ import {
   Logger,
   Mesh,
   Platform,
+  Primitive,
   RenderTarget,
   SubMesh,
   SystemInfo,
@@ -455,7 +456,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     gl.clear(clearFlag);
   }
 
-  drawPrimitive(primitive: GLPrimitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram) {
+  drawPrimitive(primitive: Primitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram) {
     // todo: VAO not support morph animation
     if (primitive) {
       primitive.draw(shaderProgram, subPrimitive);
@@ -474,7 +475,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
    * @throws Always; indirect drawing is only available on WebGPU.
    */
   drawPrimitiveIndirect(
-    _primitive: GLPrimitive,
+    _primitive: Primitive,
     _subPrimitive: SubMesh,
     _shaderProgram: IPlatformShaderProgram,
     _indirectBuffer: IPlatformBuffer,

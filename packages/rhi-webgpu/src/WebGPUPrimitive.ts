@@ -1,5 +1,6 @@
 import {
   IndexFormat,
+  type IPlatformBuffer,
   MeshTopology,
   Primitive,
   SubPrimitive,
@@ -26,7 +27,21 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     this.primitive = primitive;
   }
 
-  draw(
+  draw(shaderProgram: IPlatformShaderProgram, subPrimitive: SubPrimitive): void {
+    this._draw(shaderProgram, subPrimitive);
+  }
+
+  drawIndirect(
+    shaderProgram: IPlatformShaderProgram,
+    subPrimitive: SubPrimitive,
+    indirectBuffer: IPlatformBuffer,
+    indirectOffset: number,
+    vertexBufferBindings?: readonly (VertexBufferBinding | undefined)[]
+  ): void {
+    this._draw(shaderProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset, vertexBufferBindings);
+  }
+
+  private _draw(
     shaderProgram: IPlatformShaderProgram,
     subPrimitive: SubPrimitive,
     indirectBuffer?: WebGPUBuffer,
