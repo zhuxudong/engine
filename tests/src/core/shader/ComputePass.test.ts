@@ -55,6 +55,25 @@ Shader "${name}" {
 `;
 }
 
+function createDepthTextureShaderSource(name: string): string {
+  return `
+Shader "${name}" {
+  SubShader "Default" {
+    Pass "ReadDepth" {
+      sampler2D camera_DepthTexture;
+      buffer float outputValues[];
+
+      void readDepth() {
+        outputValues[gl_GlobalInvocationID.x] = texelFetch(camera_DepthTexture, ivec2(2, 2), 0).x;
+      }
+
+      ComputeShader = readDepth;
+    }
+  }
+}
+`;
+}
+
 async function readStorageBuffer(device: GPUDevice, buffer: Buffer, byteLength: number): Promise<ArrayBuffer> {
   const readback = device.createBuffer({
     size: byteLength,
@@ -265,6 +284,60 @@ describe("ComputePass", () => {
     foreignTexture.destroy(true);
     engine.destroy();
     foreignEngine.destroy();
+  });
+
+  it("lowers and samples the camera depth texture in compute", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const engine = await WebGPUEngine.create({
+      canvas: document.createElement("canvas"),
+      shaderCompiler: new ShaderCompiler()
+    });
+    const shader = Shader.create(createDepthTextureShaderSource("RHI/ComputeDepthTexture"), ShaderLanguage.WGSL);
+    const shaderPass = shader.subShaders[0].passes[0];
+    const compiled = shaderPass._compileComputeShaderSource(engine);
+    expect(compiled.source).toContain("var camera_DepthTexture: texture_depth_2d;");
+    expect(compiled.source).toContain("gs_loadDepth_camera_DepthTexture");
+    expect(compiled.reflection.resources[0].textureType).toBe("texture_depth_2d");
+
+    const depthTexture = new Texture2D(engine, 4, 4, TextureFormat.Depth24, false, false);
+    depthTexture.filterMode = TextureFilterMode.Point;
+    const graphicDevice = engine._hardwareRenderer as unknown as { device: GPUDevice };
+    const nativeDepthTexture = (
+      depthTexture._platformTexture as unknown as {
+        _gpuTexture: GPUTexture;
+      }
+    )._gpuTexture;
+    const clearEncoder = graphicDevice.device.createCommandEncoder();
+    const clearPass = clearEncoder.beginRenderPass({
+      colorAttachments: [],
+      depthStencilAttachment: {
+        view: nativeDepthTexture.createView(),
+        depthClearValue: 0.625,
+        depthLoadOp: "clear",
+        depthStoreOp: "store"
+      }
+    });
+    clearPass.end();
+    graphicDevice.device.queue.submit([clearEncoder.finish()]);
+
+    const computePass = new ComputePass(engine, shader);
+    const outputByteLength = computePass.workgroupSize[0] * Float32Array.BYTES_PER_ELEMENT;
+    const output = new Buffer(engine, BufferBindFlag.StorageBuffer, outputByteLength, BufferUsage.Dynamic);
+    computePass.setTexture("camera_DepthTexture", depthTexture);
+    computePass.setBuffer("outputValues", output);
+    computePass.dispatch(1);
+    engine._hardwareRenderer.flush();
+
+    const result = new Float32Array(await readStorageBuffer(graphicDevice.device, output, outputByteLength));
+    expect(Array.from(result).every((value) => Math.abs(value - 0.625) < 0.0001)).toBe(true);
+
+    computePass.destroy();
+    output.destroy(true);
+    depthTexture.destroy(true);
+    engine.destroy();
   });
 
   it("executes sampled-texture compute from a serialized WGSL artifact", async () => {

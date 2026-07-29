@@ -955,7 +955,9 @@ return output;
     const lowered = ShaderFactory.lowerWGSLDepthTextures(
       `@group(0) @binding(1) var camera_DepthTexture: texture_2d<f32>;
 @group(0) @binding(2) var camera_DepthTexture_sampler: sampler;
-let depth = textureSample(camera_DepthTexture, camera_DepthTexture_sampler, screenUv).r;`,
+let sampledDepth = textureSample(camera_DepthTexture, camera_DepthTexture_sampler, screenUv).r;
+let levelDepth = textureSampleLevel(camera_DepthTexture, camera_DepthTexture_sampler, screenUv, 0.0).r;
+let loadedDepth = textureLoad(camera_DepthTexture, pixelCoord, 0).r;`,
       reflection
     );
 
@@ -963,6 +965,10 @@ let depth = textureSample(camera_DepthTexture, camera_DepthTexture_sampler, scre
     expect(lowered.source).toContain(
       "gs_sampleDepth_camera_DepthTexture(camera_DepthTexture, camera_DepthTexture_sampler, screenUv).r"
     );
+    expect(lowered.source).toContain(
+      "gs_sampleDepthLevel_camera_DepthTexture(camera_DepthTexture, camera_DepthTexture_sampler, screenUv, 0.0).r"
+    );
+    expect(lowered.source).toContain("gs_loadDepth_camera_DepthTexture(camera_DepthTexture, pixelCoord, 0).r");
     expect(lowered.reflection.resources[0].textureType).toBe("texture_depth_2d");
   });
 

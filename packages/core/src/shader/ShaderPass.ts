@@ -213,11 +213,14 @@ export class ShaderPass extends ShaderPart {
     ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macros, discoveredMacros);
     const macroSeed = ShaderPass._createWGSLMacroSeed(macros, discoveredMacros, target.reflection);
     const evaluatedMacros = new Map<string, string>();
-    const source = ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macroSeed, evaluatedMacros);
-    const reflection = ShaderPass._resolveReflection(target.reflection, evaluatedMacros);
+    let source = ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macroSeed, evaluatedMacros);
+    let reflection = ShaderPass._resolveReflection(target.reflection, evaluatedMacros);
     if (!reflection) {
       throw new Error(`Shader pass "${this.name}" has no compute reflection.`);
     }
+    const loweredDepthTextures = ShaderFactory.lowerWGSLDepthTextures(source, reflection);
+    source = loweredDepthTextures.source;
+    reflection = loweredDepthTextures.reflection;
 
     const workgroupExpressions = target.computeWorkgroupSize ?? ["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1", "1"];
     const workgroupSize = workgroupExpressions.map((expression) =>
