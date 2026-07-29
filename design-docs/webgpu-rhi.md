@@ -1823,6 +1823,55 @@ Grasslands E2E 通过 backend reload、相机移动、LOD transition、阴影开
 category/LOD/count、可见像素和零 diagnostic。结合 WebGL2 shadow 对照，candidate 同时通过
 正确性与性能门，正式移除 custom provider；通用 core Shadow 和 WebGPU indirect RHI 保持不变。
 
+### Render-pass 动态状态去重设计
+
+#### 固定源码与标准事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| WebGPU 标准接口 | [`GPURenderPassEncoder`](https://gpuweb.github.io/types/interfaces/GPURenderPassEncoder.html) | viewport、scissor、blend constant 和 stencil reference 都是 render-pass encoder 命令；blend constant 和 stencil reference 在每个新 pass 分别从全零和 0 开始 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `setStencilState` 比较 `stencilRef`，`setBlendColor` 逐分量比较 `blendColor` 后才编码；viewport/scissor 源码仍保留“仅在变化时执行”的 TODO |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | 每个 render context 创建自己的 pass 状态；viewport/scissor 在 pass 开始或恢复时设置，draw 路径用 `currentStencilRef` 去重 stencil reference |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | bundle list 把四种动态状态保存为独立 command 并在目标 render pass 回放；该结构没有证明等值 command 会自动去重 |
+
+Galacean 当前在 `WebGPUShaderProgram.draw` 的每个 draw 前调用
+`WebGPUGraphicDevice._applyDynamicState`。固定 Grasslands hero 相机、关闭动画和非确定性环境后，
+每次 submission 的 native 命令如下：
+
+| pass | draw | viewport | scissor | blend constant | stencil reference |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Shadow | 323 | 323 | 323 | 323 | 323 |
+| Depth prepass | 19 | 19 | 19 | 19 | 19 |
+| Forward | 107 | 107 | 107 | 107 | 107 |
+| Final sRGB | 1 | 1 | 1 | 1 | 1 |
+| 合计 | 450 | 450 | 450 | 450 | 450 |
+
+该数据只证明存在重复编码，不预设去重能改善 frame time。
+
+#### 方案比较
+
+| 方案 | 状态所有者 | 问题 | 决策 |
+| --- | --- | --- | --- |
+| device 全局保存最后值 | `WebGPUGraphicDevice` | 新 render pass 的动态状态有独立默认值；跨 pass 复用会漏掉首个必要 command | 不采用 |
+| 每个 `WebGPUShaderProgram` 保存最后值 | shader program | 同一 pass 会切换 program，状态又不属于 shader；多个 program 无法共享同一 native pass 的最终值 | 不采用 |
+| native pass identity + 最终规范化值 | `WebGPUGraphicDevice` | cache 仅在 backend 内多保存一份小状态；新 pass 首次 draw 必须完整编码 | 采用 |
+
+采用方案不增加 core/RHI/public API。`_applyDynamicState` 先按 attachment 尺寸计算最终 viewport 和
+scissor，再逐项比较当前 native pass 的最后编码值；只跳过完全相等的 command。cache 以
+`GPURenderPassEncoder` identity 隔离，结束 pass 时释放。首个 draw、状态变化和新 pass 都必须
+编码；ShaderLab source、pipeline key、bind group、draw 顺序和 WebGL2 路径不变。
+
+#### 验收与保留门槛
+
+- fake pass 测试覆盖首次完整编码、相同值不重复、四种状态分别变化、attachment clamp 后等值和
+  新 pass 重新编码。
+- Grasslands native probe 必须保持 450 draw、443 direct、6 indirect、169,199 可见实例和
+  category/LOD 计数，只减少四种动态状态 command。
+- backend reload、Shadow/Depth/Forward/Final pass、固定截图与 E2E 必须无 GPU validation、
+  console error、page error 或 device lost。
+- 独立父提交基线与候选按 `all/no_grass/no_tree/no_rock` 交替三轮。只有完整场景 FPS 配对变化
+  中位数为正、至少两轮同向、P95 中位数不退化时保留；category ablation 只用于归因。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
