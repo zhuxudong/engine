@@ -1053,6 +1053,65 @@ diagnostic 为 0，实例、category、LOD 与 renderer batch 计数一致。固
 尾延迟恶化，未通过性能门；实现代码全部撤销，仅保留本检查点。因为 WebGPU 已失败，不再把
 WebGL2 性能测量误写成通过依据。
 
+### GPU timestamp profiling 设计
+
+#### 为什么先补测量边界
+
+Grasslands 现有 A/B 只能从 `requestAnimationFrame` 计算整页 frame time。全级联 stream 的
+固定/移动 FPS 中位差分别只有 +0.38%/+0.94%，且配对方向不一致；六平面裁剪虽然删除
+44.76% 的 indirect survivor，整帧反而退化。仅靠 CPU 可见的帧间隔无法区分 GPU
+fragment/vertex/compute 成本、CPU submission 和浏览器调度噪声，继续选择草地优化会缺少可证伪
+的 GPU 边界。
+
+`timestamp-query` 是 WebGPU optional feature。当前规范要求设备创建时显式请求；render 和
+compute pass descriptor 都通过 `timestampWrites` 写入 query set。规范同时说明该能力并非所有
+实现都支持，且实现会因安全与隐私降低时间精度。因此它只能作为可选 profiler，不能成为渲染
+正确性或 WebGPU Engine 创建的前置条件。
+
+#### 业界源码事实
+
+| 实现 | 本地版本 | 客观实现 |
+| --- | --- | --- |
+| webgpu-samples | `4181da1b8d4e3d4fe5ea52fc1150fe5200b87515` | `timestampQuery` 先检查 adapter feature，支持时才请求；pass 前后写两个 query，经 resolve buffer 复制到 MAP_READ buffer 后异步读取 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | 每个 pass 分配 begin/end pair；readback buffer 池避免同步等待；frame time 取所有 pass 最早 begin 到最晚 end 的 span，不把可能重叠的 pass duration 相加 |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `WebGPUTimestampQueryPool` 为 render/compute context 分配 query pair，批量 resolve 后异步 map；pending resolve 不重复发起 |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | timestamp 由 Engine option 与 runtime enable 双重控制；pass descriptor 注入 begin/end query，unsupported 时不启用 |
+| Dawn tests | `ab59f06a8b755646aeb156dfad9270fa2265918a` | validation tests 明确允许不同 render/compute pass 重写相同 query index，但禁止同一 pass 的 begin/end 使用同一 index |
+
+这些实现共同证明 feature gate、pass descriptor、resolve/copy/map 和异步 readback 的完整链路；
+它们没有证明某个固定 query 容量或逐 pass duration 求和适合移动端。
+
+#### Galacean 契约
+
+1. `WebGPUGraphicDeviceOptions.enableGPUTiming` 默认 `false`。仅当调用方开启且 adapter 支持
+   `timestamp-query` 时才把 feature 加入 `requestDevice`；不支持时 Engine 仍正常创建。
+2. `IHardwareRenderer` 暴露只读的后端中立 `gpuTiming` snapshot，`Engine.gpuTiming` 原样转发。
+   WebGL2 当前返回 `supported=false`、`enabled=false` 和空 sample；页面无需访问
+   `_hardwareRenderer` 或判断具体 RHI class。
+3. WebGPU 每次 command submission 只使用两个 timestamp slot。首个 pass 写 begin/end，后续
+   pass 只重写 end，因此最终值是首 pass begin 到末 pass end 的 GPU span；同时记录实际
+   pass count。该边界包含 pass 间 GPU idle，但不会把 tile/pipelined GPU 上重叠的 pass
+   duration 重复相加。
+4. query 先 resolve 到 GPU-only buffer，再复制到有限的 MAP_READ staging pool。所有 staging
+   都在映射时则丢弃该次 measurement，不等待 GPU、不阻塞 render loop，并递增
+   `droppedSampleCount`。
+5. readback 完成后才原子替换 latest immutable sample；timestamp 结束值小于开始值时视为
+   invalid sample，不把负值或零值混入统计。销毁 Engine 时 query、resolve 和空闲/在途 staging
+   都释放。
+6. benchmark 继续只显示 `backend` 与 `candidates` 两个控件；inspect API 增加 WebGPU GPU-time
+   median/P95、sample count、pass count 和 dropped count。Grasslands 只在显式
+   `?gpuTiming=1` 时开启，以免普通 demo 请求不需要的 optional feature。
+
+#### 验收
+
+- 单元测试验证首 pass begin/end、后续 pass 只更新 end、resolve/copy、staging 饱和丢样、
+  invalid timestamp 和 destroy。
+- 浏览器 E2E 使用真实 `timestamp-query` device，要求连续得到正数 GPU span、pass count
+  大于 0、页面/GPU diagnostic 为 0；feature 不可用时明确 skip GPU 数值断言而不是伪造结果。
+- WebGL2 默认页和 WebGPU 未启用 profiler 页保持原创建与渲染结果；benchmark 控件数量不变。
+- Grasslands 后续优化同时报告 rAF frame p50/p95 与 GPU span p50/p95。只有 GPU 时间和整帧
+  时间在固定/移动场景都形成可重复方向，才宣称某项 GPU 优化带来收益。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
