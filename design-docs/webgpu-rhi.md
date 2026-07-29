@@ -1703,7 +1703,8 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 | --- | --- | --- | --- | --- |
 | 全部 compute + indirect | GPU copy/fine-cull 后 76 indirect | 四级 GPU per-instance compaction 后 277 indirect | 当前正确基线，移动端驱动需处理 353 个独立 indirect record | 基线 |
 | 全部 conservative direct | CPU 已知 batch count 直接提交 | Forward stream 在四级 cascade 重复 direct | 不需要 GPU-only count，但草失去已有 distance fine-cull | 不采用 |
-| CPU 已知 count direct，GPU-only count indirect；Shadow conservative direct | tree/rock 等 legacy copy 走 direct，grass等 fine-cull 继续 indirect | caster 使用已 compact 的 Forward stream 和 CPU count，依赖 raster/cascade clipping 保证结果 | Shadow 会处理被单 cascade 排除的额外实例，但移除 per-cascade compaction、buffer 和 indirect 同步 | 实验 |
+| CPU 已知 count direct，GPU-only count indirect | tree/rock 等 legacy copy 走 direct，grass 等 fine-cull 继续 indirect | 保留现有 per-cascade compaction 与 indirect stream | Forward 减少 70 个 indirect，Shadow 正确性和 277 个 indirect 不变 | 保留 |
+| 上述 Forward hybrid + Shadow conservative direct | 同上 | caster 使用 Forward stream 和 CPU count | 截图显示植被投影缺失；Forward stream 不能替代 cascade stream | 拒绝 |
 | 先做跨 mesh/material mega-batch | 合并 geometry/material 后再提交 | 同步重做 shadow geometry | 资产 attributes、alpha clip、材质贴图和 bounds 语义同时变化，无法单独定位 indirect 成本 | 后续独立实验 |
 
 #### 模块与正确性契约
@@ -1714,29 +1715,58 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
    复制到共享 output。其 renderer 不绑定 indirect record，使用 `BufferMesh.instanceCount`
    direct draw。
 3. `fineCulling=true` 的 batch count 只能在 compute 后确定，继续绑定 indirect record。当前
-   eligibility 要求单 LOD、无 crossfade、所有 renderer 不投射阴影，因此不会与 direct Shadow
-   stream 冲突。
-4. Shadow 不安装 per-cascade override provider。所有 caster 都是 `fineCulling=false`，直接使用
-   已填充的 Forward output 和相同 CPU instance count；单 cascade 之外的实例由既有 shadow
-   view-projection clipping 排除，不能少画任何 caster。
-5. 通过性能门后删除不再使用的 shadow counter/output/indirect buffer 和五个 shadow compute
-   binding，不保留隐藏开关、平台型号名单、magic threshold 或 demo 特例。
-6. `inspectSurface().indirectRendererBatches` 必须改为实际绑定 Forward indirect record 的 active
+   eligibility 要求单 LOD、无 crossfade、所有 renderer 不投射阴影。
+4. Shadow 继续安装现有 per-cascade override provider，保持独立的 cull plane、output instance
+   和 GPU-only count。不能把 camera/LOD 的 Forward stream 当成 cascade caster stream。
+5. 不增加隐藏开关、平台型号名单、magic threshold、RHI public API 或 demo category 特例。
+6. `inspectSurface().indirectRendererBatches` 改为实际绑定 Forward indirect record 的 active
    renderer 数；不能继续把全部 WebGPU static renderer 计为 indirect。
 
 #### 验收与保留门槛
 
-- 单测覆盖 legacy batch 不绑定 indirect、fine-cull batch 仍绑定、debug count 与 renderer
-  active 状态；RHI indirect 路由测试继续通过。
-- 真实命令探针预期 Forward 只剩 GPU fine-cull 的 3 个 indirect，Shadow 为 0 indirect；
-  direct draw 相应增加。不得以减少逻辑计数代替 native prototype 观测。
+- E2E 覆盖 legacy batch 不绑定 indirect、fine-cull batch 仍绑定、debug count 与 renderer
+  active/LOD transition 状态；RHI indirect 路由测试继续通过。
+- 真实命令探针预期 Forward 只剩 GPU fine-cull 的 6 个 indirect，Shadow 保持 277 个
+  indirect，总计 283；direct draw 相应增加 70。不得以减少逻辑计数代替 native prototype
+  观测。
 - 固定 wind/animation/camera 后，用父提交与候选独立页面比对 tree、rock、grass、四级 shadow、
   category/LOD/count 和截图。移动相机、LOD churn、阴影开关与 category 开关必须无
   validation、console error、page error 或 device lost。
 - 性能按 `all/no_grass/no_tree/no_rock` 交替页面报告 frame P50/P95、FPS、Forward/Shadow
-  timestamp 和 native direct/indirect count。保留条件是 frame time 配对改善中位数为正且
-  IQR 不跨 0，P95 不退化；Shadow timestamp 的收益必须覆盖 conservative extra instances。
+  timestamp 和 native direct/indirect count。保留条件是完整场景 frame time 配对改善中位数
+  为正且 IQR 不跨 0，P95 不退化；category ablation 只用于归因，不把单类波动包装成收益。
 - 若 hybrid 不成立，整体撤销 Surface consumer 改动，只保留本检查点与通用 indirect 修复。
+
+#### 实验检查点：保留 Forward hybrid
+
+候选只移除 70 个 CPU 已知 count 的 Forward indirect binding，Shadow provider 未变：
+
+| 每 submission 命令 | 基线 | 候选 | 差异 |
+| --- | ---: | ---: | ---: |
+| Forward `drawIndexedIndirect` | 76 | 6 | -70 |
+| Shadow `drawIndexedIndirect` | 277 | 277 | 0 |
+| 总 `drawIndexedIndirect` | 353 | 283 | -70 |
+| 总 `drawIndexed` | 98 | 168 | +70 |
+| `writeBuffer` | 538 | 538 | 0 |
+| GPU/page diagnostic | 0 | 0 | 0 |
+
+独立 worktree、同一父提交、同一 Chromium/ANGLE Metal 交替三轮的完整 Grasslands：
+
+| 指标 | 基线中位数 | 候选中位数 | 变化 |
+| --- | ---: | ---: | ---: |
+| FPS | 16.72 | 18.51 | +10.7% |
+| frame P50 | 58.60 ms | 56.80 ms | -3.1% |
+| frame P95 | 66.90 ms | 59.80 ms | -10.6% |
+| 可见实例 | 169,199 | 169,199 | 0 |
+| Forward indirect renderer | 76 | 6 | -70 |
+
+完整场景三轮 FPS 配对变化均为正。`no_tree`、`no_rock`、`no_grass` 的三轮方向并不一致，
+因此当前证据只能说明完整树木+岩石+草地组合下有收益，不能把收益单独归因给某一 category。
+每 400 ms 切换 LOD distance 的压力测试也没有形成稳定提升，候选只作为稳态提交优化保留。
+
+固定相机并关闭 wind、cloud、cloud shadow、fog 和 post-process 后，候选相对基线的归一化
+RGB RMSE 为 0.027773；同一基线两次独立运行 RMSE 为 0.030204。Shadow conservative direct
+候选则产生肉眼可见的植被投影缺失，已撤销。
 
 ### 移动端约束与验收
 
