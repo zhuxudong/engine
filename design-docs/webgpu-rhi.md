@@ -2385,6 +2385,30 @@ RHI 对照 `maxWorkgroupsPerDimension`。不写 Grasslands 分辨率、实例数
 通过 raw WGSL 绕过；`ShaderFactory.lowerWGSLDepthTextures` 继续保持 ShaderLab sampler 的
 `vec4` 语义，并为显式 LOD 与 texel load 分别生成 depth helper。
 
+#### Hi-Z 第一阶段：独立 Forward 输出流
+
+遮挡 pass 不能在现有视锥 compaction atlas 上原地读写：同一 dispatch 中不同 invocation
+读取尚未搬移的 survivor 时，写入较早的紧凑位置会与后续读取形成数据竞争。第一阶段先建立
+独立输出流并执行等价 copy，隔离资源切换风险后再加入遮挡判定。
+
+1. 仅为现有 `isSurfaceFineCullingEligible` 推导出的 batch 分配紧凑的第二份
+   `VertexBuffer | StorageBuffer` atlas 和第二份 `StorageBuffer | IndirectBuffer` records；
+   不按 grass、flower 或 fake-tree id 写特例。
+2. 输入继续读取视锥 compaction 的 survivor 和 indirect count。after-depth compute 先把全部
+   survivor 按 batch copy 到独立 slice，并把相同 count 写入第二份 indirect records；静态
+   index count、first index 与 base vertex 从原 plan 初始化，不由 compute 重建。
+3. eligible renderer 仍使用原 `BufferMesh`、材质、submesh 与 6 个 Forward draw，只替换实例
+   vertex binding 和 indirect record。非 eligible batch、ShadowCaster 和 WebGL2 保持原绑定。
+4. `SurfaceDepthTiles` 在 tile dispatch 后按注册顺序通知内部 consumer，保证 copy 与后续遮挡
+   都编码在 `depth-prepass → forward` 之间；consumer 不取得 native encoder。
+5. 独立 atlas 按 eligible batch capacity 紧凑分配，不复制完整 Surface atlas。buffer 大小、
+   storage binding 数与 dispatch 维度继续对照 active device limits。
+
+等价门要求固定相机的 6 个 input/output indirect count 逐项一致，Surface/category/LOD 快照
+一致，截图相对只构建 depth tile 的父提交像素等价，原生命令顺序为
+`depth-prepass → tile compute → copy compute → forward`，且 GPU/page diagnostic 为 0。
+该切片只证明无原地竞争的输出资源契约，不报告遮挡或性能提升。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
