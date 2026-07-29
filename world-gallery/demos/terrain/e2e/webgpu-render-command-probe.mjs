@@ -6,6 +6,11 @@ const requestGPUTiming = new URL(url).searchParams.get("gpuTiming") === "1";
 const compactOutput = process.env.PROBE_COMPACT === "1";
 const deterministicScene = process.env.PROBE_DETERMINISTIC_SCENE === "1";
 const disableShadows = process.env.PROBE_DISABLE_SHADOWS === "1";
+const cameraPose = process.env.PROBE_CAMERA_POSE;
+const frameSampleCount = Number(process.env.PROBE_FRAME_SAMPLES ?? 120);
+if (!Number.isInteger(frameSampleCount) || frameSampleCount < 1) {
+  throw new RangeError(`PROBE_FRAME_SAMPLES must be a positive integer, received ${frameSampleCount}.`);
+}
 const disabledCategories = (process.env.PROBE_DISABLED_CATEGORIES ?? "")
   .split(",")
   .map((category) => category.trim())
@@ -293,7 +298,10 @@ await page.addInitScript(() => {
 await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
 await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
 await page.evaluate(
-  ({ deterministic, disableShadows }) => {
+  ({ deterministic, disableShadows, cameraPose }) => {
+    if (cameraPose) {
+      window.terrainDebug.setPose(cameraPose);
+    }
     window.grasslandsDebug.setScene({
       animation: false,
       ...(disableShadows ? { shadows: false } : {}),
@@ -303,7 +311,7 @@ await page.evaluate(
       window.grasslandsDebug.setSurface({ wind: { enabled: false } });
     }
   },
-  { deterministic: deterministicScene, disableShadows }
+  { deterministic: deterministicScene, disableShadows, cameraPose }
 );
 if (disabledCategories.length > 0) {
   await page.evaluate(
@@ -325,21 +333,22 @@ if (requestGPUTiming && (await page.evaluate(() => window.grasslandsDebug.inspec
 const warmupCounts = await page.evaluate(() => window.__webgpuRenderCommandProbe.snapshot());
 await page.evaluate(() => window.__webgpuRenderCommandProbe.reset());
 const frameTimes = await page.evaluate(
-  () =>
+  (sampleCount) =>
     new Promise((resolve) => {
       const samples = [];
       let previous;
       const sample = (now) => {
         if (previous !== undefined) samples.push(now - previous);
         previous = now;
-        if (samples.length < 120) {
+        if (samples.length < sampleCount) {
           requestAnimationFrame(sample);
         } else {
           resolve(samples);
         }
       };
       requestAnimationFrame(sample);
-    })
+    }),
+  frameSampleCount
 );
 const sorted = [...frameTimes].sort((left, right) => left - right);
 const totalDuration = frameTimes.reduce((sum, value) => sum + value, 0);
@@ -392,6 +401,7 @@ const report = {
   url,
   deterministicScene,
   disableShadows,
+  cameraPose: cameraPose ?? null,
   disabledCategories,
   frame: {
     samples: frameTimes.length,
@@ -440,6 +450,7 @@ console.log(
           url: report.url,
           deterministicScene: report.deterministicScene,
           disableShadows: report.disableShadows,
+          cameraPose: report.cameraPose,
           disabledCategories: report.disabledCategories,
           frame: report.frame,
           surface: {
