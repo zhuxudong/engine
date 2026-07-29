@@ -1,6 +1,7 @@
 import {
   GLCapabilityType,
   IPlatformRenderTarget,
+  type RenderTargetActivationOptions,
   RenderTarget,
   Texture,
   TextureCube,
@@ -91,8 +92,9 @@ export class GLRenderTarget implements IPlatformRenderTarget {
    * Set which face and mipLevel of the cube texture to render to.
    * @param mipLevel - Set mip level the data want to write
    * @param faceIndex - Cube texture face
+   * @param options - Attachment state for this pass
    */
-  activeRenderTarget(mipLevel: number, faceIndex?: TextureCubeFace): void {
+  activeRenderTarget(mipLevel: number, faceIndex?: TextureCubeFace, options: RenderTargetActivationOptions = {}): void {
     // @todo: support MRT
     const { _gl: gl, _target: target } = this;
 
@@ -144,6 +146,9 @@ export class GLRenderTarget implements IPlatformRenderTarget {
 
     if (this._MSAAFrameBuffer) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this._MSAAFrameBuffer);
+    }
+    if (this._isWebGL2) {
+      gl.drawBuffers(options.colorAttachments === false ? [] : this._oriDrawBuffers);
     }
   }
 

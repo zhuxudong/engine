@@ -14,6 +14,7 @@ import {
   type InstanceBufferLayout,
   Primitive,
   RenderStateElementKey,
+  type RenderTargetActivationOptions,
   RenderTarget,
   SubMesh,
   Texture2D,
@@ -447,14 +448,14 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     mipLevel: number = 0,
     faceIndex?: number,
     gpuTimingLabel?: string,
-    depthReadOnly?: boolean
+    activationOptions?: RenderTargetActivationOptions
   ): void {
     this._endCurrentPass();
     this._renderPassLabel = gpuTimingLabel || (renderTarget ? "offscreen-render" : "main-render");
     if (renderTarget) {
       (
         renderTarget as RenderTarget & { _platformRenderTarget: IPlatformRenderTarget }
-      )._platformRenderTarget.activeRenderTarget(mipLevel, faceIndex, depthReadOnly);
+      )._platformRenderTarget.activeRenderTarget(mipLevel, faceIndex, activationOptions);
     } else {
       this._currentRenderTarget = null;
     }
