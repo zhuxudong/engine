@@ -5,7 +5,6 @@ import {
   Entity,
   MSAASamples,
   PostProcess,
-  Shader,
   TonemappingEffect,
   TonemappingMode,
   Vector3
@@ -45,6 +44,7 @@ import { loadTerrainData } from "../src/loader/TerrainDataLoader";
 import surfaceShaderSource from "../src/shaders/Surface.shader?raw";
 import terrainShaderSource from "../src/shaders/Terrain.shader?raw";
 import { registerTerrainShaderIncludes } from "../src/shaders/registerTerrainShaderIncludes";
+import { registerTerrainShaders, type TerrainShaderRegistrationSnapshot } from "../src/shaders/registerTerrainShaders";
 import { SurfaceWorld } from "../src/surface/SurfaceWorld";
 import { SurfaceDepthTiles, type SurfaceDepthTileSnapshot } from "../src/surface/SurfaceDepthTiles";
 import type { SurfaceRuntimeTuningUpdate } from "../src/surface/SurfaceRuntimeContract";
@@ -114,6 +114,10 @@ declare global {
     /** Runtime diagnostics for the deterministic Grasslands surface scene. */
     grasslandsDebug?: {
       readonly ready: true;
+      /** Returns the ShaderLab registration path and page startup timings. */
+      inspectStartup(): TerrainShaderRegistrationSnapshot & {
+        readonly sceneReadyDurationMs: number;
+      };
       inspectSurface(): ReturnType<SurfaceWorld["inspect"]>;
       /** Returns conservative same-frame depth-tile diagnostics when the candidate is enabled. */
       inspectDepthTiles(): SurfaceDepthTileSnapshot | null;
@@ -173,6 +177,7 @@ declare global {
 }
 
 const status = document.querySelector<HTMLDivElement>("#status");
+const bootStartedAt = performance.now();
 
 void boot().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
@@ -188,8 +193,13 @@ async function boot(): Promise<void> {
   engine.canvas.resizeByClientSize();
   window.addEventListener("resize", () => engine.canvas.resizeByClientSize());
   registerTerrainShaderIncludes();
-  Shader.create(terrainShaderSource);
-  Shader.create(surfaceShaderSource);
+  const shaderRegistration = await registerTerrainShaders(
+    engine,
+    backend,
+    location.search,
+    terrainShaderSource,
+    surfaceShaderSource
+  );
 
   const scene = engine.sceneManager.activeScene;
   const root = scene.createRootEntity("grasslands");
@@ -352,8 +362,13 @@ async function boot(): Promise<void> {
     clouds.setTuning({ animation: values.animation });
     applyTerrainCompositionVisibility();
   };
+  const sceneReadyDurationMs = performance.now() - bootStartedAt;
   const grasslandsDebug: NonNullable<Window["grasslandsDebug"]> = {
     ready: true,
+    inspectStartup: () => ({
+      ...shaderRegistration,
+      sceneReadyDurationMs
+    }),
     inspectSurface: () => surfaceWorld.inspect(),
     inspectDepthTiles: () => surfaceDepthTiles?.inspect() ?? null,
     inspectDepthTileOcclusion: () => surfaceWorld.inspectDepthTileOcclusion(),
