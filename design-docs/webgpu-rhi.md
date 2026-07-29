@@ -2107,6 +2107,92 @@ workload 轮换 10 个区块，每端每区块先取 7 个 one-shot GPU 样本�
 不能宣称它解决了树木或岩石 Shadow 成本。该 Metal/Chromium 结果满足本阶段保留门；移动真机
 性能仍需单独测量。
 
+### Surface range-level cascade stream 设计
+
+#### 当前 Shadow 工作量
+
+相机视锥 compaction 没有改变 Shadow。固定默认相机、关闭 animation、wind、cloud、cloud
+shadow、fog 和 post-process 后，native command probe 记录到 323 个 direct indexed Shadow
+draw，所有 draw 的 instance count 合计为 13,739。逐 category 关闭后的配对差为：
+
+| category | Shadow draw 差异 | Shadow direct instance 差异 | 结论边界 |
+| --- | ---: | ---: | --- |
+| tree | 174 | 2,686 | 主要支付不同 mesh/LOD 在四级 cascade 的重复提交 |
+| rock | 91 | 9,910 | 除重复提交外，还支付最多的 cascade instance 工作 |
+| grass | 0 | 0 | 不投射阴影，不是本阶段 Shadow consumer |
+
+这里的 `direct instance` 是 native `drawIndexed` 参数乘积的命令统计，不是 GPU 实际执行的
+vertex invocation。前述逐 pass 10×7 样本已经把 tree、rock 的稳定增量定位到 Shadow；本表只
+补充命令和实例边界，不能单独代替 GPU timestamp。
+
+#### 现有语义与业界源码事实
+
+Galacean WebGL2 finite Surface 为每个 range、prototype LOD 和 source primitive 保留独立
+renderer。方向光每级 cascade 使用 `ShadowUtils.cullingRenderBounds` 对该 renderer 的完整
+world AABB 做 plane-positive-vertex 测试。当前 WebGPU static batch 把同一 prototype LOD 的
+所有 range 合成一个 renderer；它的合并 AABB 几乎与四级 cascade 都相交，因此同一 output
+stream 被重复提交。
+
+| 实现 | 本地固定版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | 标准 mesh shadow 先拟合 shadow camera，再以每个 `MeshInstance` 的 AABB 对该 shadow camera 独立剔除；directional cascade 还逐级应用 `shadowCascadeMask` |
+| PlayCanvas GSplat | 同上 | shadow renderer 在 light camera 拟合完成后创建独立 coarse/fine stream；源码明确当前只支持单 cascade，遇到 cascaded light 会跳过，而不是复用 forward stream 猜测 |
+| Unity Core RP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `InstanceCuller` 明确区分 `Camera` 与 `Light` view，用 world AABB 产生 split visibility mask，再按 mask 生成各 view 的 direct/indirect command 与 visible instance list |
+
+这些实现共同证明 camera 与 light view 应有独立可见性结果；它们没有证明 Galacean 应采用某个
+固定 cluster 大小、per-instance sphere 半径或跨材质 mega-batch。
+
+#### 方案比较
+
+| 方案 | Shadow 可见性 | 优点 | 代价 | 决策 |
+| --- | --- | --- | --- | --- |
+| 保持 prototype LOD 合并 renderer | 合并 AABB 命中后整批重复提交 | 无新增资源 | tree/rock 几乎在四级 cascade 重复 | 基线 |
+| 恢复旧 per-instance sphere provider | compute 对每实例与自建 plane 数据测试 | survivor 最少 | 已实测把 Surface shadow effect 放大到 WebGL2 的约 3.5 倍，语义不能证明 | 不采用 |
+| 按空间阈值拆成多个 renderer | core 继续直接 AABB cull | 不需要 shadow override | 阈值会泄露设备/场景启发式，并可能增加 Forward/Shadow draw | 不采用 |
+| 保留合并 renderer，按原 range AABB 生成每级 cascade stream | CPU 复用 WebGL2 的 range renderer bounds 合同，compute 只做已判定 range copy | 不改材质、mesh、LOD 或用户 API；可同时减少 instance 与空 draw | 增加 caster-only cascade output、command 和 indirect buffer | 候选 |
+| 跨 mesh/material shadow mega-batch | 需要 geometry/material atlas 或 vertex pulling | 可能继续减少异构 draw | 同时改变 geometry、alpha clip、vertex layout 和资源绑定，无法单独归因 | 后续独立实验 |
+
+#### 候选契约
+
+1. WebGL2、engine 创建、example backend query、Surface manifest、材质和 ShaderLab render
+   source 不变。只有 finite WebGPU static caster 安装 internal shadow-view provider。
+2. 每个 range 同时保存 Forward 和 Shadow 两个 count。Forward 继续使用 camera frustum；
+   Shadow count 只服从现有 category、density、distance、LOD 和 cross-fade 状态，不能从 camera
+   frustum 结果派生，以保持 WebGL2 shadow renderer 的独立 light-view 语义。
+3. 每个 prototype LOD range 预计算 caster source bounds 的保守并集。每级 cascade 使用
+   `CollisionUtil.intersectsPlaneAndBox` 检查现有 `ShadowSliceData.cullPlanes`；只有与所有
+   plane 都不在 back side 的 range 才进入该级 stream。不得重新发明 sphere 半径或裁剪平面。
+4. CPU 只上传 range copy commands 和 batch headers。现有 ShaderLab `Compact` pass 把保留
+   range 复制到 caster-only cascade output，并把 CPU 已知 count 写入 indexed indirect
+   arguments；不新增手写 WGSL、atomic counter、per-instance test 或 readback 依赖。
+5. output、indirect record 和 command capacity 从 caster plan、最多四级 cascade 与
+   `device.limits` 推导。无 caster 的 prototype 不分配 shadow slice；不得按 tree/rock 名字写
+   特例、固定 survivor 数或固定空间阈值。
+6. provider 对 count 为 0 的 cascade binding 返回空结果，`MeshRenderer` 不生成对应
+   `RenderElement`。非空 binding 继续覆盖原 primitive 的 instance vertex binding，并使用
+   compute 写出的 indirect record；Forward 状态不被修改。
+7. camera、light、cascade plane、category/density/LOD/runtime scale 或 range count 没有变化
+   时不重新上传 command，也不重复 dispatch。变化后必须在 Shadow pass 编码前完成全部 stream。
+8. provider 和新增资源保持 internal；销毁 renderer/group 时不能留下 provider 计数、buffer
+   引用或 pending compute。public API 与 WebGPU 后端选择方式不变。
+
+#### 验收与保留门槛
+
+- focused tests 覆盖 range AABB 的 inside/intersect/outside、四级 output offset、LOD
+  cross-fade metadata、零 count binding、省略非 caster、状态不变不 dispatch、camera/light
+  变化重新 dispatch，以及超出 device limit 的显式失败。
+- native probe 必须读取 Shadow indirect records，报告 tree/rock 每级 survivor、draw 和
+  indexed instance 总数；Forward 的 443 direct、6 indirect 及既有 35,280 survivor 不能改变。
+- WebGL2 与 WebGPU 使用独立 reload。至少 default、hero、valley-overview、terrain-horizon
+  四个固定相机执行 shadow on/off 截图；candidate 相对 WebGL2 的 shadow-effect 差异不得高于
+  当前 default direct 路径，页面/GPU diagnostic、category、LOD 和可见几何必须为 0 回归。
+- E2E 移动相机并切换 category、LOD distance 与 runtime scale，验证 cascade stream 只在输入
+  变化后重新生成，再恢复原状态；不能只验证启动帧。
+- 独立父提交/候选按 `all/no_grass/no_tree/no_rock` 轮换至少 10 个区块，每端每区块读取 7 个
+  one-shot GPU 样本并取中位数，再读取稳态 frame 窗口。保留要求完整场景 Shadow 与 total
+  improvement 中位数为正且 IQR 不跨 0，FPS 配对变化中位数为正，frame P95 不稳定退化超过
+  2%；未通过则撤销 runtime provider，只保留可独立复用的测试探针。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
