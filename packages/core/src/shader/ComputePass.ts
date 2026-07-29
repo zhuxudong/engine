@@ -3,6 +3,7 @@ import { EngineObject } from "../base/EngineObject";
 import { Engine } from "../Engine";
 import { Buffer } from "../graphic/Buffer";
 import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
+import { Texture } from "../texture/Texture";
 import { Shader } from "./Shader";
 
 /**
@@ -11,8 +12,10 @@ import { Shader } from "./Shader";
 export class ComputePass extends EngineObject {
   private readonly _shader: Shader;
   private readonly _platformProgram: IPlatformComputeProgram;
-  private readonly _bindings = new Map<string, number>();
+  private readonly _storageBindings = new Map<string, number>();
+  private readonly _textureBindings = new Map<string, number>();
   private readonly _buffers = new Map<string, Buffer>();
+  private readonly _textures = new Map<string, Texture>();
   private readonly _workgroupSize: readonly [number, number, number];
 
   /**
@@ -41,7 +44,10 @@ export class ComputePass extends EngineObject {
 
     const { source, reflection, workgroupSize } = shaderPass._compileComputeShaderSource(engine);
     for (const storageBuffer of reflection.storageBuffers ?? []) {
-      this._bindings.set(storageBuffer.name, storageBuffer.binding);
+      this._storageBindings.set(storageBuffer.name, storageBuffer.binding);
+    }
+    for (const resource of reflection.resources) {
+      this._textureBindings.set(resource.name, resource.textureBinding);
     }
 
     this._shader = shader;
@@ -57,7 +63,7 @@ export class ComputePass extends EngineObject {
    * @throws If the name is absent, the buffer belongs to another engine, or it lacks storage usage.
    */
   setBuffer(name: string, buffer: Buffer): void {
-    const binding = this._bindings.get(name);
+    const binding = this._storageBindings.get(name);
     if (binding === undefined) {
       throw new Error(`Compute shader "${this._shader.name}" has no storage buffer named "${name}".`);
     }
@@ -79,6 +85,31 @@ export class ComputePass extends EngineObject {
   }
 
   /**
+   * Bind a sampled texture by its ShaderLab property name.
+   * @param name - ShaderLab texture property name.
+   * @param texture - Texture owned by the same engine as this pass.
+   * @throws If the name is absent or the texture belongs to another engine.
+   */
+  setTexture(name: string, texture: Texture): void {
+    const binding = this._textureBindings.get(name);
+    if (binding === undefined) {
+      throw new Error(`Compute shader "${this._shader.name}" has no sampled texture named "${name}".`);
+    }
+    if (texture.engine !== this.engine) {
+      throw new Error(`Compute texture "${name}" belongs to a different engine.`);
+    }
+
+    const previous = this._textures.get(name);
+    if (previous === texture) {
+      return;
+    }
+    previous?._addReferCount(-1);
+    texture._addReferCount(1);
+    this._textures.set(name, texture);
+    this._platformProgram.setTexture(binding, texture._platformTexture);
+  }
+
+  /**
    * Encode a direct compute dispatch into the current frame.
    * @param workgroupCountX - Workgroup count on the X axis.
    * @param workgroupCountY - Workgroup count on the Y axis.
@@ -97,6 +128,10 @@ export class ComputePass extends EngineObject {
       buffer._addReferCount(-1);
     }
     this._buffers.clear();
+    for (const texture of this._textures.values()) {
+      texture._addReferCount(-1);
+    }
+    this._textures.clear();
     this._shader._addReferCount(-1);
     super._onDestroy();
   }

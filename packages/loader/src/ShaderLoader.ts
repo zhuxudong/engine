@@ -17,6 +17,8 @@ interface IPrecompiledShader {
       isUsePass: boolean;
       vertexShaderInstructions?: unknown;
       fragmentShaderInstructions?: unknown;
+      computeShaderInstructions?: unknown;
+      computeWorkgroupSize?: readonly [string, string, string];
       reflection?: unknown;
     }[];
   }[];
@@ -84,6 +86,8 @@ function applyReflection(shader: Shader, data: IPrecompiledShader, platformTarge
         fragment: "",
         vertexShaderInstructions: sourcePass.vertexShaderInstructions,
         fragmentShaderInstructions: sourcePass.fragmentShaderInstructions,
+        computeShaderInstructions: sourcePass.computeShaderInstructions,
+        computeWorkgroupSize: sourcePass.computeWorkgroupSize,
         reflection: sourcePass.reflection
       });
     }

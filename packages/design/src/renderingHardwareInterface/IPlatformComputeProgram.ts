@@ -10,6 +10,13 @@ export interface IPlatformComputeProgram {
   setBuffer(binding: number, buffer: unknown): void;
 
   /**
+   * Bind a platform texture to a reflected sampled-texture binding.
+   * @param binding - Reflected texture binding index.
+   * @param texture - Backend platform-texture object.
+   */
+  setTexture(binding: number, texture: unknown): void;
+
+  /**
    * Encode a direct compute dispatch.
    * @param workgroupCountX - Workgroup count on the X axis.
    * @param workgroupCountY - Workgroup count on the Y axis.

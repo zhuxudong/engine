@@ -28,6 +28,7 @@ import type {
   IPlatformPrimitive,
   IPlatformShaderProgram,
   IShaderReflection,
+  IShaderResourceReflection,
   IShaderStorageBufferReflection
 } from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
@@ -654,12 +655,14 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   /**
    * Reuse immutable pipeline state for identical generated compute WGSL.
    * @param source - Generated WGSL compute source.
+   * @param resources - Reflected sampled-texture declarations.
    * @param storageBuffers - Reflected storage-buffer declarations.
    * @returns Device-owned native pipeline state.
    * @internal
    */
   _getComputePipeline(
     source: string,
+    resources: readonly IShaderResourceReflection[],
     storageBuffers: readonly IShaderStorageBufferReflection[]
   ): WebGPUComputePipelineState {
     const cached = this._computePipelines.get(source);
@@ -674,14 +677,38 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     });
     this._reportComputeCompilationErrors(module, source, pipelineId);
     const bindGroupLayout = this.device.createBindGroupLayout({
-      label: `ComputePipeline ${pipelineId} storage`,
-      entries: storageBuffers.map((storageBuffer) => ({
-        binding: storageBuffer.binding,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: {
-          type: storageBuffer.access === "read" ? "read-only-storage" : "storage"
-        }
-      }))
+      label: `ComputePipeline ${pipelineId} resources`,
+      entries: [
+        ...resources.flatMap<GPUBindGroupLayoutEntry>((resource) => [
+          {
+            binding: resource.textureBinding,
+            visibility: GPUShaderStage.COMPUTE,
+            texture: {
+              sampleType: WebGPUGraphicDevice._textureSampleType(resource.textureType),
+              viewDimension: WebGPUGraphicDevice._textureViewDimension(resource.textureType),
+              multisampled: false
+            }
+          },
+          {
+            binding: resource.samplerBinding,
+            visibility: GPUShaderStage.COMPUTE,
+            sampler: {
+              type: resource.comparison
+                ? "comparison"
+                : resource.textureType.includes("depth")
+                  ? "non-filtering"
+                  : "filtering"
+            }
+          }
+        ]),
+        ...storageBuffers.map<GPUBindGroupLayoutEntry>((storageBuffer) => ({
+          binding: storageBuffer.binding,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: {
+            type: storageBuffer.access === "read" ? "read-only-storage" : "storage"
+          }
+        }))
+      ]
     });
     const state = {
       bindGroupLayout,
@@ -699,6 +726,35 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     };
     this._computePipelines.set(source, state);
     return state;
+  }
+
+  private static _textureSampleType(type: string): GPUTextureSampleType {
+    if (type.includes("depth")) {
+      return "depth";
+    }
+    if (type.includes("<u32>")) {
+      return "uint";
+    }
+    if (type.includes("<i32>")) {
+      return "sint";
+    }
+    return "float";
+  }
+
+  private static _textureViewDimension(type: string): GPUTextureViewDimension {
+    if (type.includes("cube_array")) {
+      return "cube-array";
+    }
+    if (type.includes("cube")) {
+      return "cube";
+    }
+    if (type.includes("2d_array")) {
+      return "2d-array";
+    }
+    if (type.includes("3d")) {
+      return "3d";
+    }
+    return "2d";
   }
 
   /** @internal */
