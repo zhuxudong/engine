@@ -284,7 +284,7 @@ export class WGSLVisitor extends GLESVisitor {
     if (name === "barrier" && this._stage() !== "compute") {
       throw new Error("ShaderLab barrier is only supported in compute passes.");
     }
-    if (name === "atomicAdd" || name === "atomicLoad" || name === "atomicStore") {
+    if (name === "atomicAdd" || name === "atomicMax" || name === "atomicLoad" || name === "atomicStore") {
       const expectedParameterCount = name === "atomicLoad" ? 1 : 2;
       const target = params[0] ? this._atomicReference(params[0]) : undefined;
       if (!target || params.length !== expectedParameterCount) {
@@ -963,6 +963,7 @@ export class WGSLVisitor extends GLESVisitor {
         if (
           !(call.fnSymbol instanceof FnSymbol) &&
           (identifier.lexeme === "atomicAdd" ||
+            identifier.lexeme === "atomicMax" ||
             identifier.lexeme === "atomicLoad" ||
             identifier.lexeme === "atomicStore") &&
           paramsNode instanceof ASTNode.FunctionCallParameterList

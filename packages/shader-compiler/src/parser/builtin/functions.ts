@@ -297,6 +297,8 @@ BuiltinFunction._create("intBitsToFloat", GenericType.GenType, GenericType.GenIn
 BuiltinFunction._create("uintBitsToFloat", GenericType.GenType, GenericType.GenUintType);
 BuiltinFunction._createWithScope("atomicAdd", Keyword.INT, EShaderStage.COMPUTE, Keyword.INT, Keyword.INT);
 BuiltinFunction._createWithScope("atomicAdd", Keyword.UINT, EShaderStage.COMPUTE, Keyword.UINT, Keyword.UINT);
+BuiltinFunction._createWithScope("atomicMax", Keyword.INT, EShaderStage.COMPUTE, Keyword.INT, Keyword.INT);
+BuiltinFunction._createWithScope("atomicMax", Keyword.UINT, EShaderStage.COMPUTE, Keyword.UINT, Keyword.UINT);
 BuiltinFunction._createWithScope("atomicLoad", Keyword.INT, EShaderStage.COMPUTE, Keyword.INT);
 BuiltinFunction._createWithScope("atomicLoad", Keyword.UINT, EShaderStage.COMPUTE, Keyword.UINT);
 BuiltinFunction._createWithScope("atomicStore", Keyword.VOID, EShaderStage.COMPUTE, Keyword.INT, Keyword.INT);

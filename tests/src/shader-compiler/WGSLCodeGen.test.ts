@@ -124,6 +124,31 @@ Shader "WGSL/ComputeWorkgroupAtomicAppend" {
 }
 `;
 
+const workgroupAtomicMaxComputeShader = `
+Shader "WGSL/ComputeWorkgroupAtomicMax" {
+  SubShader "Default" {
+    Pass "ReduceMax" {
+      shared uint maximum;
+      buffer uint outputValues[];
+
+      void reduceMax() {
+        if (gl_LocalInvocationID.x == 0u) {
+          atomicStore(maximum, 0u);
+        }
+        barrier();
+        atomicMax(maximum, gl_LocalInvocationID.x * 3u + 7u);
+        barrier();
+        if (gl_LocalInvocationID.x == 0u) {
+          outputValues[0u] = atomicLoad(maximum);
+        }
+      }
+
+      ComputeShader = reduceMax;
+    }
+  }
+}
+`;
+
 const halfPackingComputeShader = `
 Shader "WGSL/ComputeHalfPacking" {
   SubShader "Default" {
@@ -315,6 +340,23 @@ describe("ShaderCompiler WGSL codegen", () => {
     expect(compute).toContain("atomicAdd(&counters[0u], atomicLoad(&groupCount))");
     expect(reflection.storageBuffers?.map(({ name }) => name)).toEqual(["counters", "outputValues"]);
     expect(reflection.uniforms.some(({ name }) => name === "groupCount" || name === "groupBase")).toBe(false);
+
+    if (!navigator.gpu) {
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
+
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
+  });
+
+  it("lowers shared atomic maximum reduction to valid WGSL", async () => {
+    const { compute } = generateWGSLCompute(workgroupAtomicMaxComputeShader);
+
+    expect(compute).toContain("var<workgroup> maximum: atomic<u32>;");
+    expect(compute).toContain("atomicMax(&maximum, gl_LocalInvocationID.x * 3u + 7u)");
 
     if (!navigator.gpu) {
       return;
@@ -560,6 +602,45 @@ describe("ShaderCompiler WGSL codegen", () => {
     const result = new Uint32Array(readback.getMappedRange().slice(0));
     expect(result[0]).toBe(expected.length);
     expect(Array.from(result.slice(1, expected.length + 1)).sort((left, right) => left - right)).toEqual(expected);
+    readback.unmap();
+  });
+
+  it("executes generated workgroup atomic maximum reduction", async () => {
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const { compute } = generateWGSLCompute(workgroupAtomicMaxComputeShader);
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: device.createShaderModule({ code: compute }), entryPoint: "main" }
+    });
+    const output = device.createBuffer({
+      size: Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+      size: Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: output } }]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(output, 0, readback, 0, Uint32Array.BYTES_PER_ELEMENT);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    expect(new Uint32Array(readback.getMappedRange())[0]).toBe(196);
     readback.unmap();
   });
 
