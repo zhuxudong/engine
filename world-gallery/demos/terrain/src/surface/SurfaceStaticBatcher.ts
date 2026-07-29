@@ -9,8 +9,10 @@ import {
   GLTFResource,
   MeshRenderer,
   ModelMesh,
-  Vector3
+  Vector3,
+  VertexBufferBinding
 } from "@galacean/engine";
+import type { MeshRendererShadowViewBinding, MeshRendererShadowViewProvider, Primitive } from "@galacean/engine";
 import type { SurfaceCategory, SurfaceCellRange } from "./SurfaceContract";
 import {
   createSurfaceInstancedMesh,
@@ -81,7 +83,23 @@ interface SurfaceFineCullBatchState {
 
 interface InternalIndirectDrawRenderer extends MeshRenderer {
   _setIndirectDrawBuffer(subMeshIndex: number, buffer: Buffer | null, offset?: number): void;
+  _setShadowViewProvider(provider: MeshRendererShadowViewProvider | null): void;
 }
+
+interface InternalBufferMesh extends BufferMesh {
+  readonly _primitive: Primitive;
+}
+
+interface SurfaceShadowSlice {
+  readonly cullPlaneCount: number;
+  readonly cullPlanes: readonly {
+    readonly normal: { readonly x: number; readonly y: number; readonly z: number };
+    readonly distance: number;
+  }[];
+}
+
+const SURFACE_SHADOW_CASCADE_CAPACITY = 4;
+const SURFACE_SHADOW_PARAMETER_VECTOR_COUNT = 46;
 
 /**
  * Owns one storage atlas and one compute dispatch for all finite prototype LOD batches.
@@ -97,6 +115,7 @@ export class SurfaceStaticBatchGroup {
   private readonly _fineCullParameters = new Float32Array(4);
   private readonly _compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>;
   private readonly _batchers: readonly SurfaceStaticBatcher[];
+  private readonly _shadowViewProvider: SurfaceStaticShadowViewProvider | null;
   private _fineCullCameraX = Number.NaN;
   private _fineCullCameraY = Number.NaN;
   private _fineCullCameraZ = Number.NaN;
@@ -109,7 +128,8 @@ export class SurfaceStaticBatchGroup {
     fineCullBatchData: Float32Array,
     fineCullParameterBuffer: Buffer,
     compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>,
-    batchers: readonly SurfaceStaticBatcher[]
+    batchers: readonly SurfaceStaticBatcher[],
+    shadowViewProvider: SurfaceStaticShadowViewProvider | null
   ) {
     this._commandBuffer = commandBuffer;
     this._commands = commands;
@@ -118,6 +138,7 @@ export class SurfaceStaticBatchGroup {
     this._fineCullParameterBuffer = fineCullParameterBuffer;
     this._compactionPasses = compactionPasses;
     this._batchers = batchers;
+    this._shadowViewProvider = shadowViewProvider;
   }
 
   /**
@@ -300,6 +321,14 @@ export class SurfaceStaticBatchGroup {
         plan.fineCulling ? fineCullStates[plan.fineCullBatchIndex] : null
       )
     );
+    const shadowViewProvider = SurfaceStaticShadowViewProvider.create(
+      engine,
+      sourceBuffer,
+      plans,
+      batchers,
+      materials,
+      compactionPasses
+    );
     return new SurfaceStaticBatchGroup(
       commandBuffer,
       commands,
@@ -307,7 +336,8 @@ export class SurfaceStaticBatchGroup {
       fineCullBatchData,
       fineCullParameterBuffer,
       compactionPasses,
-      batchers
+      batchers,
+      shadowViewProvider
     );
   }
 
@@ -343,6 +373,7 @@ export class SurfaceStaticBatchGroup {
     parameters[2] = cameraPosition.z;
     parameters[3] = distanceScale;
     this._fineCullParameterBuffer.setData(parameters);
+    this._shadowViewProvider?.setFineCullingState(cameraPosition, distanceScale);
     for (const batcher of this._batchers) {
       batcher._invalidateFineCulling();
     }
@@ -409,6 +440,356 @@ export class SurfaceStaticBatchGroup {
   }
 }
 
+interface SurfaceShadowBatch {
+  readonly plan: SurfaceStaticBatchPlan;
+  readonly batcher: SurfaceStaticBatcher;
+  readonly outputInstanceOffset: number;
+  readonly indirectWordOffset: number;
+  readonly indirectRecordCount: number;
+  readonly materials: readonly SurfaceMaterial[];
+}
+
+/**
+ * Produces four independent instance and indirect streams before directional shadow rendering starts.
+ *
+ * @internal
+ */
+class SurfaceStaticShadowViewProvider implements MeshRendererShadowViewProvider {
+  private readonly _shadowDataBuffer: Buffer;
+  private readonly _shadowData: Float32Array;
+  private readonly _shadowDataSnapshot: Float32Array;
+  private readonly _shadowParameterBuffer: Buffer;
+  private readonly _shadowParameters: Float32Array;
+  private readonly _shadowParameterSnapshot: Float32Array;
+  private readonly _shadowOutputBuffer: Buffer;
+  private readonly _shadowCounterBuffer: Buffer;
+  private readonly _shadowIndirectBuffer: Buffer;
+  private readonly _shadowBatches: readonly SurfaceShadowBatch[];
+  private readonly _bindings = new Map<MeshRenderer, readonly (readonly MeshRendererShadowViewBinding[])[]>();
+  private readonly _compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>;
+  private readonly _outputInstanceCapacity: number;
+  private readonly _indirectWordCapacity: number;
+  private readonly _fineCullCamera = new Vector3();
+  private _fineCullDistanceScale = 1;
+  private _shadowDataWordCount = 0;
+  private _prepared = false;
+
+  /**
+   * Creates a provider only when at least one compacted renderer casts directional shadows.
+   * @param engine Engine owning the shared shadow resources.
+   * @param sourceBuffer Immutable source instance atlas.
+   * @param plans Static prototype LOD plans.
+   * @param batchers Runtime visibility state aligned with `plans`.
+   * @param materials Shared surface materials keyed by manifest id.
+   * @param compactionPasses Shared ShaderLab compute passes.
+   * @returns A configured provider, or null when no static renderer casts shadows.
+   */
+  static create(
+    engine: Engine,
+    sourceBuffer: Buffer,
+    plans: readonly SurfaceStaticBatchPlan[],
+    batchers: readonly SurfaceStaticBatcher[],
+    materials: ReadonlyMap<string, SurfaceMaterial>,
+    compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>
+  ): SurfaceStaticShadowViewProvider | null {
+    const shadowPlanCount = plans.reduce(
+      (count, plan) => count + (plan.renderSources.some((source) => source.rendererSpec.castShadows) ? 1 : 0),
+      0
+    );
+    return shadowPlanCount > 0
+      ? new SurfaceStaticShadowViewProvider(engine, sourceBuffer, plans, batchers, materials, compactionPasses)
+      : null;
+  }
+
+  private constructor(
+    engine: Engine,
+    sourceBuffer: Buffer,
+    plans: readonly SurfaceStaticBatchPlan[],
+    batchers: readonly SurfaceStaticBatcher[],
+    materials: ReadonlyMap<string, SurfaceMaterial>,
+    compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>
+  ) {
+    this._compactionPasses = compactionPasses;
+    const shadowBatches: SurfaceShadowBatch[] = [];
+    let outputInstanceCapacity = 0;
+    let indirectRecordCapacity = 0;
+    let commandCapacity = 0;
+    const workgroupSize = compactionPasses.cullShadowInstances.workgroupSize[0];
+    for (let index = 0; index < plans.length; index++) {
+      const plan = plans[index];
+      const casterSources = plan.renderSources.filter((source) => source.rendererSpec.castShadows);
+      if (casterSources.length === 0) continue;
+      const batchCapacity = plan.ranges.reduce((count, item) => count + item.range.count, 0);
+      const batchIndirectRecordCapacity = casterSources.reduce(
+        (count, source) => count + source.sourceMesh.subMeshes.length,
+        0
+      );
+      const batchMaterials = new Set<SurfaceMaterial>();
+      for (const source of casterSources) {
+        const materialId =
+          source.rendererSpec.materials[Math.min(source.primitiveIndex, source.rendererSpec.materials.length - 1)];
+        const material = materials.get(materialId);
+        if (!material) {
+          throw new Error(`[SurfaceStaticShadowViewProvider] unknown material ${materialId}`);
+        }
+        batchMaterials.add(material);
+      }
+      shadowBatches.push({
+        plan,
+        batcher: batchers[index],
+        outputInstanceOffset: outputInstanceCapacity,
+        indirectWordOffset: indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
+        indirectRecordCount: batchIndirectRecordCapacity,
+        materials: Array.from(batchMaterials)
+      });
+      outputInstanceCapacity += batchCapacity;
+      indirectRecordCapacity += batchIndirectRecordCapacity;
+      commandCapacity += plan.ranges.reduce((count, item) => count + Math.ceil(item.range.count / workgroupSize), 0);
+    }
+
+    validateShadowCapacity(
+      engine,
+      outputInstanceCapacity,
+      indirectRecordCapacity,
+      shadowBatches.length,
+      commandCapacity
+    );
+    this._shadowBatches = shadowBatches;
+    this._outputInstanceCapacity = outputInstanceCapacity;
+    this._indirectWordCapacity = indirectRecordCapacity * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
+    this._shadowData = new Float32Array(
+      (1 + shadowBatches.length * 2 + commandCapacity) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE
+    );
+    this._shadowDataSnapshot = new Float32Array(this._shadowData.length);
+    this._shadowDataBuffer = new Buffer(engine, BufferBindFlag.StorageBuffer, this._shadowData, BufferUsage.Dynamic);
+    this._shadowOutputBuffer = new Buffer(
+      engine,
+      BufferBindFlag.VertexBuffer | BufferBindFlag.StorageBuffer,
+      outputInstanceCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_INSTANCE_STRIDE,
+      BufferUsage.Dynamic
+    );
+    this._shadowCounterBuffer = new Buffer(
+      engine,
+      BufferBindFlag.StorageBuffer,
+      new Uint32Array(shadowBatches.length * SURFACE_SHADOW_CASCADE_CAPACITY),
+      BufferUsage.Dynamic
+    );
+    this._shadowParameters = new Float32Array(SURFACE_SHADOW_PARAMETER_VECTOR_COUNT * 4);
+    this._shadowParameterSnapshot = new Float32Array(this._shadowParameters.length);
+    this._shadowParameterBuffer = new Buffer(
+      engine,
+      BufferBindFlag.StorageBuffer,
+      this._shadowParameters,
+      BufferUsage.Dynamic
+    );
+
+    const indirectArguments = new Uint32Array(
+      indirectRecordCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE
+    );
+    for (let cascadeIndex = 0; cascadeIndex < SURFACE_SHADOW_CASCADE_CAPACITY; cascadeIndex++) {
+      for (const batch of shadowBatches) {
+        let wordOffset = cascadeIndex * this._indirectWordCapacity + batch.indirectWordOffset;
+        for (const source of batch.plan.renderSources) {
+          if (!source.rendererSpec.castShadows) continue;
+          for (const subMesh of source.sourceMesh.subMeshes) {
+            indirectArguments[wordOffset] = subMesh.count;
+            indirectArguments[wordOffset + 2] = subMesh.start;
+            wordOffset += SURFACE_COMPACTION_INDIRECT_WORD_STRIDE;
+          }
+        }
+      }
+    }
+    this._shadowIndirectBuffer = new Buffer(
+      engine,
+      BufferBindFlag.StorageBuffer | BufferBindFlag.IndirectBuffer,
+      indirectArguments,
+      BufferUsage.Dynamic
+    );
+
+    this._createRendererBindings();
+    compactionPasses.resetShadowCounters.setBuffer("shadowData", this._shadowDataBuffer);
+    compactionPasses.resetShadowCounters.setBuffer("shadowParameters", this._shadowParameterBuffer);
+    compactionPasses.resetShadowCounters.setBuffer("shadowCounters", this._shadowCounterBuffer);
+    compactionPasses.cullShadowInstances.setBuffer("sourceInstances", sourceBuffer);
+    compactionPasses.cullShadowInstances.setBuffer("shadowData", this._shadowDataBuffer);
+    compactionPasses.cullShadowInstances.setBuffer("shadowParameters", this._shadowParameterBuffer);
+    compactionPasses.cullShadowInstances.setBuffer("shadowInstances", this._shadowOutputBuffer);
+    compactionPasses.cullShadowInstances.setBuffer("shadowCounters", this._shadowCounterBuffer);
+    compactionPasses.finalizeShadowCulling.setBuffer("shadowData", this._shadowDataBuffer);
+    compactionPasses.finalizeShadowCulling.setBuffer("shadowParameters", this._shadowParameterBuffer);
+    compactionPasses.finalizeShadowCulling.setBuffer("shadowCounters", this._shadowCounterBuffer);
+    compactionPasses.finalizeShadowCulling.setBuffer("shadowIndirectArguments", this._shadowIndirectBuffer);
+  }
+
+  /**
+   * Keeps shadow distance culling identical to the Forward compaction boundary.
+   * @param cameraPosition Current world-space camera position.
+   * @param distanceScale Live LOD distance multiplier.
+   */
+  setFineCullingState(cameraPosition: Vector3, distanceScale: number): void {
+    this._fineCullCamera.copyFrom(cameraPosition);
+    this._fineCullDistanceScale = distanceScale;
+  }
+
+  /** @inheritdoc */
+  prepareShadowViews(_context: unknown, shadowSlices: unknown, shadowSliceCount: number): void {
+    if (shadowSliceCount > SURFACE_SHADOW_CASCADE_CAPACITY) {
+      throw new RangeError(
+        `[SurfaceStaticShadowViewProvider] ${shadowSliceCount} cascades exceed ` +
+          `${SURFACE_SHADOW_CASCADE_CAPACITY} prepared streams.`
+      );
+    }
+    const data = this._shadowData;
+    const batchCount = this._shadowBatches.length;
+    data[0] = batchCount;
+    let commandCount = 0;
+    const commandWordOffset = (1 + batchCount * 2) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
+    const workgroupSize = this._compactionPasses.cullShadowInstances.workgroupSize[0];
+    for (let index = 0; index < batchCount; index++) {
+      const batch = this._shadowBatches[index];
+      const batchWordOffset = (1 + index * 2) * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
+      data[batchWordOffset] = batch.outputInstanceOffset;
+      data[batchWordOffset + 1] = batch.indirectWordOffset;
+      data[batchWordOffset + 2] = batch.indirectRecordCount;
+      data[batchWordOffset + 3] = index;
+      data[batchWordOffset + 4] = batch.plan.fineCullRadius;
+      data[batchWordOffset + 5] = batch.batcher._getRuntimeScale();
+      data[batchWordOffset + 6] = batch.materials.reduce(
+        (radius, material) => Math.max(radius, material.windDisplacementRadius),
+        0
+      );
+      data[batchWordOffset + 7] = batch.plan.prototype.maxDistance * this._fineCullDistanceScale;
+      commandCount += batch.batcher._writeShadowCommands(
+        data,
+        commandWordOffset + commandCount * SURFACE_COMPACTION_COMMAND_WORD_STRIDE,
+        index,
+        workgroupSize
+      );
+    }
+    data[1] = commandCount;
+    const usedWordCount = commandWordOffset + commandCount * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
+    let shadowDataChanged = !this._prepared || usedWordCount !== this._shadowDataWordCount;
+    if (!shadowDataChanged) {
+      const snapshot = this._shadowDataSnapshot;
+      for (let index = 0; index < usedWordCount; index++) {
+        if (data[index] !== snapshot[index]) {
+          shadowDataChanged = true;
+          break;
+        }
+      }
+    }
+    if (shadowDataChanged) {
+      this._shadowDataSnapshot.set(data.subarray(0, usedWordCount));
+      this._shadowDataBuffer.setData(data, 0, 0, usedWordCount);
+      this._shadowDataWordCount = usedWordCount;
+    }
+
+    const resetWorkgroupSize = this._compactionPasses.resetShadowCounters.workgroupSize[0];
+    const slices = shadowSlices as readonly SurfaceShadowSlice[];
+    const parameters = this._shadowParameters;
+    parameters[0] = shadowSliceCount;
+    parameters[1] = this._outputInstanceCapacity;
+    parameters[2] = this._indirectWordCapacity;
+    parameters[3] = batchCount;
+    parameters[4] = this._fineCullCamera.x;
+    parameters[5] = this._fineCullCamera.y;
+    parameters[6] = this._fineCullCamera.z;
+    parameters[7] = 0;
+    for (let cascadeIndex = 0; cascadeIndex < shadowSliceCount; cascadeIndex++) {
+      const slice = slices[cascadeIndex];
+      const cascadeWordOffset = (2 + cascadeIndex * 11) * 4;
+      parameters[cascadeWordOffset] = slice.cullPlaneCount;
+      parameters[cascadeWordOffset + 1] = 0;
+      parameters[cascadeWordOffset + 2] = 0;
+      parameters[cascadeWordOffset + 3] = 0;
+      for (let planeIndex = 0; planeIndex < slice.cullPlaneCount; planeIndex++) {
+        const plane = slice.cullPlanes[planeIndex];
+        const offset = cascadeWordOffset + (1 + planeIndex) * 4;
+        parameters[offset] = plane.normal.x;
+        parameters[offset + 1] = plane.normal.y;
+        parameters[offset + 2] = plane.normal.z;
+        parameters[offset + 3] = plane.distance;
+      }
+    }
+    let parametersChanged = !this._prepared;
+    if (!parametersChanged) {
+      const snapshot = this._shadowParameterSnapshot;
+      for (let index = 0; index < parameters.length; index++) {
+        if (parameters[index] !== snapshot[index]) {
+          parametersChanged = true;
+          break;
+        }
+      }
+    }
+    if (!shadowDataChanged && !parametersChanged) return;
+    if (parametersChanged) {
+      this._shadowParameterSnapshot.set(parameters);
+      this._shadowParameterBuffer.setData(parameters);
+    }
+    this._compactionPasses.resetShadowCounters.dispatch(
+      Math.ceil((batchCount * shadowSliceCount) / resetWorkgroupSize)
+    );
+    if (commandCount > 0) {
+      this._compactionPasses.cullShadowInstances.dispatch(commandCount);
+    }
+    this._compactionPasses.finalizeShadowCulling.dispatch(batchCount);
+    this._prepared = true;
+  }
+
+  /** @inheritdoc */
+  getShadowViewBinding(
+    renderer: MeshRenderer,
+    shadowCascadeIndex: number,
+    subMeshIndex: number
+  ): MeshRendererShadowViewBinding {
+    const binding = this._bindings.get(renderer)?.[shadowCascadeIndex]?.[subMeshIndex];
+    if (!binding) {
+      throw new Error(
+        `[SurfaceStaticShadowViewProvider] missing cascade ${shadowCascadeIndex}, sub-mesh ${subMeshIndex} binding.`
+      );
+    }
+    return binding;
+  }
+
+  private _createRendererBindings(): void {
+    for (const batch of this._shadowBatches) {
+      const renderers = batch.batcher._getRenderers();
+      let batchRecordIndex = 0;
+      for (let sourceIndex = 0; sourceIndex < batch.plan.renderSources.length; sourceIndex++) {
+        const source = batch.plan.renderSources[sourceIndex];
+        if (!source.rendererSpec.castShadows) continue;
+        const renderer = renderers[sourceIndex] as InternalIndirectDrawRenderer;
+        const forwardMesh = renderer.mesh as InternalBufferMesh;
+        const instanceBindingIndex = forwardMesh.vertexBufferBindings.length - 1;
+        const cascadeBindings: MeshRendererShadowViewBinding[][] = [];
+        for (let cascadeIndex = 0; cascadeIndex < SURFACE_SHADOW_CASCADE_CAPACITY; cascadeIndex++) {
+          const vertexBufferBindings: Array<VertexBufferBinding | undefined> = new Array(instanceBindingIndex + 1);
+          vertexBufferBindings[instanceBindingIndex] = new VertexBufferBinding(
+            this._shadowOutputBuffer,
+            SURFACE_INSTANCE_STRIDE,
+            (cascadeIndex * this._outputInstanceCapacity + batch.outputInstanceOffset) * SURFACE_INSTANCE_STRIDE
+          );
+          cascadeBindings.push(
+            source.sourceMesh.subMeshes.map((_subMesh, subMeshIndex) => ({
+              primitive: forwardMesh._primitive,
+              indirectBuffer: this._shadowIndirectBuffer,
+              indirectOffset:
+                (cascadeIndex * this._indirectWordCapacity +
+                  batch.indirectWordOffset +
+                  (batchRecordIndex + subMeshIndex) * SURFACE_COMPACTION_INDIRECT_WORD_STRIDE) *
+                Uint32Array.BYTES_PER_ELEMENT,
+              vertexBufferBindings
+            }))
+          );
+        }
+        batchRecordIndex += source.sourceMesh.subMeshes.length;
+        this._bindings.set(renderer, cascadeBindings);
+        renderer._setShadowViewProvider(this);
+      }
+    }
+  }
+}
+
 /**
  * Retains visibility and renderer state for one prototype LOD inside a shared compaction group.
  *
@@ -439,6 +820,7 @@ export class SurfaceStaticBatcher {
   private readonly _fineCullState: SurfaceFineCullBatchState | null;
   private _dirty = true;
   private _instanceCount = 0;
+  private _runtimeScale = 1;
 
   /**
    * Creates one prototype LOD view into a shared compaction group.
@@ -555,6 +937,43 @@ export class SurfaceStaticBatcher {
     }
   }
 
+  /** @internal */
+  _getRenderers(): readonly MeshRenderer[] {
+    return this._renderers;
+  }
+
+  /** @internal */
+  _getRuntimeScale(): number {
+    return this._runtimeScale;
+  }
+
+  /**
+   * Writes workgroup-sized source ranges consumed by cascade shadow compaction.
+   * @param output Shared f32 command storage.
+   * @param wordOffset First available scalar word.
+   * @param batchIndex Shadow batch receiving the compacted records.
+   * @param workgroupSize Maximum source records described by one command.
+   * @returns Number of commands written.
+   * @internal
+   */
+  _writeShadowCommands(output: Float32Array, wordOffset: number, batchIndex: number, workgroupSize: number): number {
+    let commandCount = 0;
+    for (const state of this._ranges.values()) {
+      let rangeOffset = 0;
+      while (rangeOffset < state.visibleCount) {
+        const commandOffset = wordOffset + commandCount * SURFACE_COMPACTION_COMMAND_WORD_STRIDE;
+        const metadataCode = this._packedMetadata ? encodeLodFade(state.lodFade) + 1 : 0;
+        output[commandOffset] = state.sourceInstanceOffset + rangeOffset;
+        output[commandOffset + 1] = Math.min(workgroupSize, state.visibleCount - rangeOffset);
+        output[commandOffset + 2] = batchIndex;
+        output[commandOffset + 3] = state.fineCulling ? -metadataCode - 1 : metadataCode;
+        rangeOffset += workgroupSize;
+        commandCount++;
+      }
+    }
+    return commandCount;
+  }
+
   /**
    * Writes this batch's indirect header and updates its renderer state.
    * @param commands Shared u32 command array.
@@ -641,6 +1060,7 @@ export class SurfaceStaticBatcher {
    * @param scale Uniform prototype scale multiplier.
    */
   setTuning(tint: readonly [number, number, number], scale: number): void {
+    this._runtimeScale = scale;
     if (this._fineCullState && this._fineCullState.runtimeScale !== scale) {
       this._fineCullState.runtimeScale = scale;
       this._dirty = true;
@@ -796,6 +1216,48 @@ function validateGroupCapacity(
   if (dispatchWorkgroups > limits.maxWorkgroupsPerDimension) {
     throw new RangeError(
       `[SurfaceStaticBatchGroup] compaction requires ${dispatchWorkgroups} workgroups, exceeding ` +
+        `${limits.maxWorkgroupsPerDimension}.`
+    );
+  }
+}
+
+function validateShadowCapacity(
+  engine: Engine,
+  outputInstanceCapacity: number,
+  indirectRecordCapacity: number,
+  batchCapacity: number,
+  commandCapacity: number
+): void {
+  const limits = engine.computeCapabilities;
+  const storageBindings = [
+    ["shadow output instance", outputInstanceCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * SURFACE_INSTANCE_STRIDE],
+    [
+      "shadow indirect argument",
+      indirectRecordCapacity *
+        SURFACE_SHADOW_CASCADE_CAPACITY *
+        SURFACE_COMPACTION_INDIRECT_WORD_STRIDE *
+        Uint32Array.BYTES_PER_ELEMENT
+    ],
+    [
+      "shadow command",
+      (1 + batchCapacity * 2 + commandCapacity) *
+        SURFACE_COMPACTION_COMMAND_WORD_STRIDE *
+        Float32Array.BYTES_PER_ELEMENT
+    ],
+    ["shadow counter", batchCapacity * SURFACE_SHADOW_CASCADE_CAPACITY * Uint32Array.BYTES_PER_ELEMENT],
+    ["shadow parameter", SURFACE_SHADOW_PARAMETER_VECTOR_COUNT * 4 * Float32Array.BYTES_PER_ELEMENT]
+  ] as const;
+  for (const [name, byteLength] of storageBindings) {
+    if (byteLength > limits.maxStorageBufferBindingSize) {
+      throw new RangeError(
+        `[SurfaceStaticShadowViewProvider] ${name} storage requires ${byteLength} bytes, exceeding ` +
+          `${limits.maxStorageBufferBindingSize}.`
+      );
+    }
+  }
+  if (commandCapacity > limits.maxWorkgroupsPerDimension) {
+    throw new RangeError(
+      `[SurfaceStaticShadowViewProvider] shadow compaction requires ${commandCapacity} workgroups, exceeding ` +
         `${limits.maxWorkgroupsPerDimension}.`
     );
   }

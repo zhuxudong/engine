@@ -136,11 +136,14 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     body: Buffer.from(JSON.stringify(computeCounts, null, 2)),
     contentType: "application/json"
   });
-  expect(computeCounts.createComputePipeline).toBe(4);
+  expect(computeCounts.createComputePipeline).toBe(7);
   expect(computeCounts.dispatchWorkgroups).toBeGreaterThan(0);
   expect(computeCounts.dispatchedWorkgroups).toBeGreaterThan(computeCounts.dispatchWorkgroups);
-  expect(computeCounts.beginComputePass).toBeLessThanOrEqual(computeCounts.dispatchWorkgroups);
-  expect(computeCounts.dispatchWorkgroups).toBeLessThan(surface.rendererBatches);
+  expect(computeCounts.beginComputePass).toBeLessThan(computeCounts.dispatchWorkgroups);
+  expect(computeCounts.maxWorkgroupCountX).toBeGreaterThan(1);
+  const settledDispatchCount = computeCounts.dispatchWorkgroups;
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(settledDispatchCount);
 
   await page.waitForTimeout(1_000);
   const screenshot = await page.locator("#canvas").screenshot();

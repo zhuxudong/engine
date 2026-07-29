@@ -112,6 +112,15 @@ export class SurfaceMaterial extends BaseMaterial {
   readonly kind: SurfaceMaterialSpec["kind"];
   private readonly _baseWindForce: number;
   private readonly _baseWindEnabled: boolean;
+  private _windDisplacementRadius = 0;
+
+  /**
+   * Maximum live vertex displacement contributed by this material's wind.
+   * @returns Conservative world-space displacement radius.
+   */
+  get windDisplacementRadius(): number {
+    return this._windDisplacementRadius;
+  }
 
   private constructor(engine: Engine, spec: SurfaceMaterialSpec) {
     const shader = Shader.find("Terrain/Surface");
@@ -238,6 +247,7 @@ export class SurfaceMaterial extends BaseMaterial {
    * @param direction Normalized world-space wind direction.
    */
   setWind(time: number, enabled: boolean, strength: number, direction: readonly [number, number, number]): void {
+    this._windDisplacementRadius = enabled && this._baseWindEnabled ? Math.abs(this._baseWindForce * strength) : 0;
     this.shaderData.setFloat(SurfaceMaterial._time, time);
     this.shaderData.setInt(SurfaceMaterial._windEnabled, enabled && this._baseWindEnabled ? 1 : 0);
     this.shaderData.setFloat(SurfaceMaterial._windForce, this._baseWindForce * strength);

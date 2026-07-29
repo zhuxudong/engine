@@ -172,6 +172,177 @@ Shader "${SHADER_NAME}" {
 
       ComputeShader = finalizeFineCull;
     }
+
+    Pass "ResetShadowCounters" {
+      readonly buffer vec4 shadowData[];
+      readonly buffer vec4 shadowParameters[];
+      buffer uint shadowCounters[];
+
+      void resetShadowCounters() {
+        uint index =
+          gl_WorkGroupID.x * uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X) + gl_LocalInvocationID.x;
+        uint batchCount = uint(shadowData[0].x);
+        uint counterCount = batchCount * uint(shadowParameters[0].x);
+        if (index < counterCount) {
+          atomicStore(shadowCounters[index], 0u);
+        }
+      }
+
+      ComputeShader = resetShadowCounters;
+    }
+
+    Pass "CullShadowInstances" {
+      shared uint groupCounts[4];
+      shared uint groupBases[4];
+      readonly buffer vec4 sourceInstances[];
+      readonly buffer vec4 shadowData[];
+      readonly buffer vec4 shadowParameters[];
+      buffer vec4 shadowInstances[];
+      buffer uint shadowCounters[];
+
+      bool intersectsShadowSlice(vec3 position, float radius, uint cascadeIndex) {
+        uint parameterOffset = uint(2) + cascadeIndex * uint(11);
+        uint planeCount = uint(shadowParameters[parameterOffset].x);
+        for (uint planeIndex = 0u; planeIndex < planeCount; planeIndex++) {
+          vec4 plane = shadowParameters[parameterOffset + uint(1) + planeIndex];
+          if (dot(plane.xyz, position) + plane.w < -radius) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      void cullShadowInstances() {
+        uint batchCount = uint(shadowData[0].x);
+        uint commandIndex = gl_WorkGroupID.x;
+        uint commandStart = uint(1) + batchCount * uint(2);
+        vec4 command = shadowData[commandStart + commandIndex];
+        uint batchIndex = uint(command.z);
+        vec4 batch = shadowData[uint(1) + batchIndex * uint(2)];
+        vec4 geometry = shadowData[uint(2) + batchIndex * uint(2)];
+        if (gl_LocalInvocationID.x == 0u) {
+          for (uint cascadeIndex = 0u; cascadeIndex < uint(4); cascadeIndex++) {
+            atomicStore(groupCounts[cascadeIndex], 0u);
+          }
+        }
+        barrier();
+
+        uint localIndex = gl_LocalInvocationID.x;
+        uint sourceVector = 0u;
+        vec4 positionMetadata = vec4(0.0);
+        vec4 instanceScale = vec4(0.0);
+        float metadataCode = command.w;
+        bool fineCulling = metadataCode < 0.0;
+        if (fineCulling) {
+          metadataCode = -metadataCode - 1.0;
+        }
+        bool candidateVisible = localIndex < uint(command.y);
+        float instanceRadius = 0.0;
+        if (candidateVisible) {
+          sourceVector =
+            (uint(command.x) + localIndex) * uint(${SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE});
+          positionMetadata = sourceInstances[sourceVector];
+          instanceScale = sourceInstances[sourceVector + uint(2)];
+          instanceRadius =
+            geometry.x *
+              max(abs(instanceScale.x), max(abs(instanceScale.y), abs(instanceScale.z))) *
+              geometry.y +
+            geometry.z;
+          if (fineCulling) {
+            vec3 cameraDelta = positionMetadata.xyz - shadowParameters[uint(1)].xyz;
+            float distanceRadius =
+              geometry.x *
+              max(abs(instanceScale.x), max(abs(instanceScale.y), abs(instanceScale.z))) *
+              geometry.y;
+            float distanceLimit = geometry.w + distanceRadius;
+            candidateVisible = dot(cameraDelta, cameraDelta) <= distanceLimit * distanceLimit;
+          }
+        }
+
+        uint localSlots[4];
+        bool visibleByCascade[4];
+        uint cascadeCount = uint(shadowParameters[0].x);
+        for (uint cascadeIndex = 0u; cascadeIndex < uint(4); cascadeIndex++) {
+          bool visible =
+            candidateVisible &&
+            cascadeIndex < cascadeCount &&
+            intersectsShadowSlice(positionMetadata.xyz, instanceRadius, cascadeIndex);
+          visibleByCascade[cascadeIndex] = visible;
+          localSlots[cascadeIndex] = visible
+            ? atomicAdd(groupCounts[cascadeIndex], 1u)
+            : uint(0);
+        }
+        barrier();
+
+        if (gl_LocalInvocationID.x == 0u) {
+          uint outputCapacity = uint(shadowParameters[0].y);
+          uint batchCount = uint(shadowParameters[0].w);
+          for (uint cascadeIndex = 0u; cascadeIndex < uint(4); cascadeIndex++) {
+            uint survivorCount = atomicLoad(groupCounts[cascadeIndex]);
+            uint outputBase = cascadeIndex * outputCapacity + uint(batch.x);
+            if (cascadeIndex < cascadeCount && survivorCount > 0u) {
+              uint counterIndex = cascadeIndex * batchCount + uint(batch.w);
+              outputBase += atomicAdd(shadowCounters[counterIndex], survivorCount);
+            }
+            groupBases[cascadeIndex] = outputBase;
+          }
+        }
+        barrier();
+
+        if (candidateVisible) {
+          if (metadataCode > 0.0) {
+            uint encodedHue = uint(round(clamp(positionMetadata.w, 0.0, 1.0) * 255.0));
+            positionMetadata.w =
+              float(encodedHue * uint(65536) + uint(metadataCode) - uint(1));
+          }
+          for (uint cascadeIndex = 0u; cascadeIndex < uint(4); cascadeIndex++) {
+            if (visibleByCascade[cascadeIndex]) {
+              uint outputVector =
+                (groupBases[cascadeIndex] + localSlots[cascadeIndex]) *
+                uint(${SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE});
+              shadowInstances[outputVector] = positionMetadata;
+              shadowInstances[outputVector + uint(1)] = sourceInstances[sourceVector + uint(1)];
+              shadowInstances[outputVector + uint(2)] = instanceScale;
+              shadowInstances[outputVector + uint(3)] = sourceInstances[sourceVector + uint(3)];
+            }
+          }
+        }
+      }
+
+      ComputeShader = cullShadowInstances;
+    }
+
+    Pass "FinalizeShadowCulling" {
+      readonly buffer vec4 shadowData[];
+      readonly buffer vec4 shadowParameters[];
+      buffer uint shadowCounters[];
+      buffer uint shadowIndirectArguments[];
+
+      void finalizeShadowCulling() {
+        uint batchIndex = gl_WorkGroupID.x;
+        uint batchCount = uint(shadowData[0].x);
+        if (batchIndex < batchCount) {
+          vec4 batch = shadowData[uint(1) + batchIndex * uint(2)];
+          uint cascadeCount = uint(shadowParameters[0].x);
+          uint indirectWordCapacity = uint(shadowParameters[0].z);
+          for (uint cascadeIndex = 0u; cascadeIndex < cascadeCount; cascadeIndex++) {
+            uint counterIndex = cascadeIndex * batchCount + uint(batch.w);
+            uint instanceCount = atomicLoad(shadowCounters[counterIndex]);
+            uint indirectIndex = gl_LocalInvocationID.x;
+            while (indirectIndex < uint(batch.z)) {
+              uint wordOffset =
+                cascadeIndex * indirectWordCapacity +
+                uint(batch.y) +
+                indirectIndex * uint(${SURFACE_COMPACTION_INDIRECT_WORD_STRIDE});
+              shadowIndirectArguments[wordOffset + uint(1)] = instanceCount;
+              indirectIndex += uint(GALACEAN_COMPUTE_WORKGROUP_SIZE_X);
+            }
+          }
+        }
+      }
+
+      ComputeShader = finalizeShadowCulling;
+    }
   }
 }
 `;
@@ -189,6 +360,12 @@ export interface SurfaceStaticCompactionPasses {
   readonly fineCull: ComputePass;
   /** Writes fine-cull survivor counts into indexed indirect records. */
   readonly finalizeFineCull: ComputePass;
+  /** Clears the per-cascade shadow compaction counters. */
+  readonly resetShadowCounters: ComputePass;
+  /** Compacts one cascade's conservative shadow-caster stream. */
+  readonly cullShadowInstances: ComputePass;
+  /** Writes one cascade's survivor counts into indexed indirect records. */
+  readonly finalizeShadowCulling: ComputePass;
 }
 
 /**
@@ -202,6 +379,9 @@ export function createSurfaceStaticCompactionPasses(engine: Engine): SurfaceStat
     copy: new ComputePass(engine, shader, 0, 0),
     resetFineCullCounters: new ComputePass(engine, shader, 0, 1),
     fineCull: new ComputePass(engine, shader, 0, 2),
-    finalizeFineCull: new ComputePass(engine, shader, 0, 3)
+    finalizeFineCull: new ComputePass(engine, shader, 0, 3),
+    resetShadowCounters: new ComputePass(engine, shader, 0, 4),
+    cullShadowInstances: new ComputePass(engine, shader, 0, 5),
+    finalizeShadowCulling: new ComputePass(engine, shader, 0, 6)
   };
 }
