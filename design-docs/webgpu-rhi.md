@@ -2762,6 +2762,44 @@ storage，则需要每帧按 mesh vertex 扩张数据与 dispatch，且仍要在
 4. 分别报告 Terrain/Surface 的 `.shaderc`、`.wgslc` raw/gzip 体积。性能结果只保留客观数据；
    即使预构建启动更慢也不绕过 loader 或修改默认模式。
 
+#### 桌面 Chromium/Metal 验证检查点
+
+功能 E2E 用 WebGL2/WebGPU × runtime/precompiled 四个独立页面，逐页关闭 animation、
+architecture、cloud 和 wind，并检查 `first-person/hero/terrain-horizon/valley-overview`。
+两种注册模式的 category、LOD、visible instance 和 renderer batch 完全一致；WebGL2 runtime
+没有 artifact 请求，precompiled 请求两份 `.shaderc`；WebGPU runtime 没有 artifact 请求，
+precompiled 从相同 `.shaderc` 调用入口实际请求两份 `.wgslc`。页面与 GPU diagnostic 为 0。
+
+runtime/precompiled 的四相机截图 normalized RMSE 和超过 5/255 的像素如下：
+
+| backend | first-person | hero | terrain-horizon | valley-overview |
+| --- | ---: | ---: | ---: | ---: |
+| WebGL2 | `0.000550 / 61` | `0.000516 / 36` | `0.000377 / 0` | `0.000501 / 0` |
+| WebGPU | `0.000725 / 34` | `0.000780 / 31` | `0.000336 / 3` | `0.000584 / 11` |
+
+启动基准使用 Chromium 140 / ANGLE Metal、1024×576 CSS、DPR 2。每个 backend 交替执行
+runtime/precompiled 各 10 轮；每个样本新建 browser context，HTTP cache 为 cold。下表每格为
+`median / p95`：
+
+| backend / mode | shader registration | scene ready | navigation ready |
+| --- | ---: | ---: | ---: |
+| WebGL2 runtime | `160.3 / 168.0 ms` | `1006.8 / 1042.2 ms` | `2025.2 / 2114.8 ms` |
+| WebGL2 precompiled | `5.1 / 7.1 ms` | `860.2 / 878.8 ms` | `1873.2 / 1899.2 ms` |
+| WebGPU runtime | `183.3 / 190.6 ms` | `943.9 / 971.4 ms` | `1856.6 / 1913.5 ms` |
+| WebGPU precompiled | `5.3 / 5.9 ms` | `779.0 / 806.9 ms` | `1704.1 / 1737.3 ms` |
+
+按中位数计算，预构建使 ShaderLab 注册耗时降低 96.8%（WebGL2）和 97.1%（WebGPU）；
+从 module boot 到 scene ready 降低 14.6% 和 17.5%；外部 navigation-to-ready 降低 7.5% 和
+8.2%。40 个样本的实例/LOD/batch 均与同 backend 的 runtime 一致，diagnostic 全部为 0。
+该结果只证明当前桌面冷启动路径，不是稳态 FPS 或移动端收益。
+
+| artifact | raw | gzip |
+| --- | ---: | ---: |
+| `Terrain.shaderc` | 94,309 B | 16,852 B |
+| `Surface.shaderc` | 141,482 B | 24,225 B |
+| `Terrain.wgslc` | 167,537 B | 25,344 B |
+| `Surface.wgslc` | 243,084 B | 40,801 B |
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
