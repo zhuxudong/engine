@@ -246,6 +246,10 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
         return "snorm16x4";
       case VertexElementFormat.NormalizedUShort4:
         return "unorm16x4";
+      case VertexElementFormat.Float16Vector2:
+        return "float16x2";
+      case VertexElementFormat.Float16Vector4:
+        return "float16x4";
     }
   }
 

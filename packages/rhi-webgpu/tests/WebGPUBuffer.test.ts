@@ -1,6 +1,17 @@
-import { BufferBindFlag, BufferUsage, IndexFormat, MeshTopology, type Primitive, SubMesh } from "@galacean/engine-core";
+import {
+  BufferBindFlag,
+  BufferUsage,
+  DataType,
+  IndexFormat,
+  MeshTopology,
+  type Primitive,
+  SubMesh,
+  VertexElement,
+  VertexElementFormat
+} from "@galacean/engine-core";
 import { describe, expect, it, vi } from "vitest";
 import { GLBuffer } from "../../rhi-webgl/src/GLBuffer";
+import { GLPrimitive } from "../../rhi-webgl/src/GLPrimitive";
 import type { WebGLGraphicDevice } from "../../rhi-webgl/src/WebGLGraphicDevice";
 import { WebGPUBuffer } from "../src/WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "../src/WebGPUGraphicDevice";
@@ -78,6 +89,55 @@ describe("WebGPU buffer bindings", () => {
           BufferUsage.Dynamic
         )
     ).toThrow("Storage and indirect buffer bindings are not supported by the WebGL backend.");
+  });
+
+  it("maps half-float vertex attributes on WebGPU", () => {
+    const packed2 = new VertexElement("PACKED2", 0, VertexElementFormat.Float16Vector2, 0, 1);
+    const packed4 = new VertexElement("PACKED4", 4, VertexElementFormat.Float16Vector4, 0, 1);
+    const primitive = new WebGPUPrimitive(
+      {
+        device: { limits: { maxVertexBuffers: 8 } }
+      } as unknown as WebGPUGraphicDevice,
+      {
+        vertexBufferBindings: [{ stride: 12 }],
+        vertexElements: [packed2, packed4]
+      } as unknown as Primitive
+    );
+
+    const state = primitive._getVertexState([
+      { name: "PACKED2", location: 0, type: "vec2" },
+      { name: "PACKED4", location: 1, type: "vec4" }
+    ]);
+
+    expect(packed2._formatMetaInfo).toMatchObject({ size: 2, type: DataType.HALF_FLOAT, normalized: false });
+    expect(packed4._formatMetaInfo).toMatchObject({ size: 4, type: DataType.HALF_FLOAT, normalized: false });
+    expect(state.buffers[0]?.attributes).toEqual([
+      { shaderLocation: 0, offset: 0, format: "float16x2" },
+      { shaderLocation: 1, offset: 4, format: "float16x4" }
+    ]);
+  });
+
+  it("rejects half-float vertex attributes on WebGL1", () => {
+    const packed = new VertexElement("PACKED", 0, VertexElementFormat.Float16Vector4, 0, 1);
+    const glPrimitive = new GLPrimitive(
+      {
+        canIUse: () => false,
+        isWebGL2: false,
+        gl: {
+          bindBuffer: vi.fn(),
+          enableVertexAttribArray: vi.fn()
+        }
+      } as unknown as WebGLGraphicDevice,
+      {
+        enableVAO: false,
+        vertexBufferBindings: [{ buffer: { _platformBuffer: { _glBuffer: {} } }, stride: 8, offset: 0 }],
+        _vertexElementMap: { PACKED: packed }
+      } as unknown as Primitive
+    );
+
+    expect(() => glPrimitive.draw({ attributeLocation: { PACKED: 0 } } as never, new SubMesh(0, 3))).toThrow(
+      "Half-float vertex attributes require WebGL2."
+    );
   });
 
   it("encodes indexed and non-indexed indirect draws", () => {

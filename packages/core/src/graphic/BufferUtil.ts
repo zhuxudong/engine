@@ -118,6 +118,14 @@ export class BufferUtil {
         normalized = true;
         normalizedScaleFactor = 1 / 65535;
         break;
+      case VertexElementFormat.Float16Vector2:
+        size = 2;
+        type = DataType.HALF_FLOAT;
+        break;
+      case VertexElementFormat.Float16Vector4:
+        size = 4;
+        type = DataType.HALF_FLOAT;
+        break;
       default:
         break;
     }

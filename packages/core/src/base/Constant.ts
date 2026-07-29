@@ -79,6 +79,8 @@ export enum DataType {
   SHORT = 5122, // gl.SHORT
   /** Unsigned short */
   UNSIGNED_SHORT = 5123, // gl.UNSIGNED_SHORT
+  /** Half float */
+  HALF_FLOAT = 5131, // gl.HALF_FLOAT
   /** Unsigned int */
   UNSIGNED_INT = 5125 // gl.UNSIGNED_INT
 }

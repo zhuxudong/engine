@@ -1,4 +1,4 @@
-import { GLCapabilityType, Logger, Primitive } from "@galacean/engine-core";
+import { DataType, GLCapabilityType, Logger, Primitive } from "@galacean/engine-core";
 import { SubPrimitive } from "@galacean/engine-core/types/graphic/SubPrimitive";
 import { IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
 import { WebGLGraphicDevice } from "./WebGLGraphicDevice";
@@ -17,6 +17,7 @@ export class GLPrimitive implements IPlatformPrimitive {
   private _attribLocArray: number[] = [];
   private readonly _primitive: Primitive;
   private readonly _canUseInstancedArrays: boolean;
+  private readonly _isWebGL2: boolean;
 
   private _gl: (WebGLRenderingContext & WebGLExtension) | WebGL2RenderingContext;
   private _vaoMap: Map<number, WebGLVertexArrayObject> = new Map();
@@ -26,6 +27,7 @@ export class GLPrimitive implements IPlatformPrimitive {
     this._primitive = primitive;
     this._canUseInstancedArrays = rhi.canIUse(GLCapabilityType.instancedArrays);
     this._isSupportVAO = rhi.canIUse(GLCapabilityType.vertexArrayObject);
+    this._isWebGL2 = rhi.isWebGL2;
     this._gl = rhi.gl;
   }
 
@@ -128,6 +130,9 @@ export class GLPrimitive implements IPlatformPrimitive {
 
         gl.enableVertexAttribArray(loc);
         const elementInfo = element._formatMetaInfo;
+        if (elementInfo.type === DataType.HALF_FLOAT && !this._isWebGL2) {
+          throw new Error("Half-float vertex attributes require WebGL2.");
+        }
         gl.vertexAttribPointer(
           loc,
           elementInfo.size,
