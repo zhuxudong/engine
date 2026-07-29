@@ -408,6 +408,141 @@ async function compareScreenshots(
   );
 }
 
+test("loads Grasslands runtime and precompiled ShaderLab through the same API", async ({ page }, testInfo) => {
+  test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to validate both shader backends.");
+
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (
+      message.type() === "error" ||
+      (message.type() === "warning" &&
+        /webgpu|gpu|renderpipeline|commandbuffer|vertex buffer|validation|invalid|exceeds/i.test(text))
+    ) {
+      diagnostics.push(`${message.type()}: ${text}`);
+    }
+  });
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+
+  const artifactRequests: string[] = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (/\.(shaderc|wgslc)$/.test(pathname)) artifactRequests.push(pathname);
+  });
+
+  const capture = async (backend: "webgl2" | "webgpu", mode: "runtime" | "precompiled") => {
+    artifactRequests.length = 0;
+    await page.goto(`/demos/terrain/grasslands/?backend=${backend}&shaderMode=${mode}&pose=terrain-horizon`, {
+      waitUntil: "networkidle"
+    });
+    await page.waitForFunction(() => window.grasslandsDebug?.ready === true);
+    await page.evaluate(() => {
+      window.grasslandsDebug!.setScene({ animation: false, architecture: false, clouds: false });
+      window.grasslandsDebug!.setSurface({ wind: { enabled: false } });
+    });
+    await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+    const screenshots: Record<string, Buffer> = {};
+    for (const pose of ["first-person", "hero", "terrain-horizon", "valley-overview"] as const) {
+      await page.evaluate((nextPose) => window.terrainDebug!.setPose(nextPose), pose);
+      await page.waitForTimeout(100);
+      await expect
+        .poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges))
+        .toBe(0);
+      await page.waitForTimeout(100);
+      screenshots[pose] = await page.locator("#canvas").screenshot();
+    }
+    return {
+      startup: await page.evaluate(() => window.grasslandsDebug!.inspectStartup()),
+      surface: await page.evaluate(() => window.grasslandsDebug!.inspectSurface()),
+      screenshots,
+      artifactRequests: [...artifactRequests]
+    };
+  };
+
+  const results: Record<string, Awaited<ReturnType<typeof capture>>> = {};
+  const comparisons: Record<string, { readonly normalizedRmse: number; readonly changedPixels: number }> = {};
+  for (const backend of ["webgl2", "webgpu"] as const) {
+    const runtime = await capture(backend, "runtime");
+    const precompiled = await capture(backend, "precompiled");
+    results[`${backend}-runtime`] = runtime;
+    results[`${backend}-precompiled`] = precompiled;
+
+    expect(runtime.startup).toMatchObject({
+      mode: "runtime",
+      backend,
+      artifactUrls: []
+    });
+    expect(runtime.startup.durationMs).toBeGreaterThanOrEqual(0);
+    expect(runtime.startup.sceneReadyDurationMs).toBeGreaterThan(runtime.startup.durationMs);
+    expect(runtime.artifactRequests).toEqual([]);
+
+    const extension = backend === "webgpu" ? "wgslc" : "shaderc";
+    const expectedArtifactUrls = [
+      `/compiledShaders/terrain/Terrain.${extension}`,
+      `/compiledShaders/terrain/Surface.${extension}`
+    ];
+    expect(precompiled.startup).toMatchObject({
+      mode: "precompiled",
+      backend,
+      artifactUrls: expectedArtifactUrls
+    });
+    expect(precompiled.startup.durationMs).toBeGreaterThanOrEqual(0);
+    expect(precompiled.startup.sceneReadyDurationMs).toBeGreaterThan(precompiled.startup.durationMs);
+    expect(precompiled.artifactRequests.sort()).toEqual(expectedArtifactUrls.sort());
+
+    expect(precompiled.surface.visibleCategoryCounts).toEqual(runtime.surface.visibleCategoryCounts);
+    expect(precompiled.surface.lodCounts).toEqual(runtime.surface.lodCounts);
+    expect(precompiled.surface.visibleInstances).toBe(runtime.surface.visibleInstances);
+    expect(precompiled.surface.visibleRendererBatches).toBe(runtime.surface.visibleRendererBatches);
+    expect(precompiled.surface.indirectRendererBatches).toBe(runtime.surface.indirectRendererBatches);
+
+    for (const pose of Object.keys(runtime.screenshots)) {
+      const screenshotComparison = await compareScreenshots(
+        page,
+        runtime.screenshots[pose],
+        precompiled.screenshots[pose]
+      );
+      comparisons[`${backend}-${pose}`] = screenshotComparison;
+      await testInfo.attach(`${backend}-${pose}-runtime.png`, {
+        body: runtime.screenshots[pose],
+        contentType: "image/png"
+      });
+      await testInfo.attach(`${backend}-${pose}-precompiled.png`, {
+        body: precompiled.screenshots[pose],
+        contentType: "image/png"
+      });
+    }
+  }
+
+  await testInfo.attach("grasslands-shader-startup.json", {
+    body: Buffer.from(
+      JSON.stringify(
+        {
+          samples: Object.fromEntries(
+            Object.entries(results).map(([name, result]) => [
+              name,
+              {
+                startup: result.startup,
+                artifactRequests: result.artifactRequests
+              }
+            ])
+          ),
+          comparisons
+        },
+        null,
+        2
+      )
+    ),
+    contentType: "application/json"
+  });
+  console.log(`SHADER_STARTUP_VISUAL_SUMMARY ${JSON.stringify(comparisons)}`);
+  for (const comparison of Object.values(comparisons)) {
+    expect(comparison.normalizedRmse).toBeLessThan(0.005);
+    expect(comparison.changedPixels).toBeLessThan(1_000);
+  }
+  expect(diagnostics).toEqual([]);
+});
+
 test("Grasslands reloads into WebGPU and renders terrain surface categories", async ({ page }, testInfo) => {
   test.skip(!webgpuEnabled, "Set TERRAIN_E2E_WEBGPU=1 to launch Chromium with WebGPU.");
 
