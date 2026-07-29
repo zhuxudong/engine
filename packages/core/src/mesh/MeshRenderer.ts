@@ -1,4 +1,5 @@
 import { BoundingBox } from "@galacean/engine-math";
+import type { Engine } from "../Engine";
 import { Entity } from "../Entity";
 import { RenderContext } from "../RenderPipeline/RenderContext";
 import { RenderElement } from "../RenderPipeline/RenderElement";
@@ -7,7 +8,49 @@ import { Logger } from "../base/Logger";
 import { ignoreClone } from "../clone/CloneManager";
 import { Buffer, BufferBindFlag } from "../graphic";
 import { Mesh, MeshModifyFlags } from "../graphic/Mesh";
+import type { Primitive } from "../graphic/Primitive";
 import { ShaderMacro } from "../shader/ShaderMacro";
+import type { ShadowSliceData } from "../shadow/ShadowSliceData";
+
+/**
+ * Draw resources prepared for one renderer in one directional shadow cascade.
+ * @internal
+ */
+export interface MeshRendererShadowViewBinding {
+  /** Primitive whose instance stream belongs to the cascade. */
+  readonly primitive: Primitive;
+  /** Indirect arguments generated for the cascade. */
+  readonly indirectBuffer: Buffer;
+  /** Byte offset of this sub-mesh's indirect record. */
+  readonly indirectOffset: number;
+}
+
+/**
+ * Prepares and resolves cascade-specific draw streams without modifying the renderer's Forward state.
+ * @internal
+ */
+export interface MeshRendererShadowViewProvider {
+  /**
+   * Prepares all active directional shadow views before any cascade is rendered.
+   * @param context Render context that owns the active camera.
+   * @param shadowSlices Stable storage containing the active slices at the beginning of the array.
+   * @param shadowSliceCount Number of active slices.
+   */
+  prepareShadowViews(context: RenderContext, shadowSlices: readonly ShadowSliceData[], shadowSliceCount: number): void;
+
+  /**
+   * Resolves the draw resources for one renderer sub-mesh and cascade.
+   * @param renderer Renderer requesting the binding.
+   * @param shadowCascadeIndex Active directional shadow cascade.
+   * @param subMeshIndex Renderer sub-mesh index.
+   * @returns Prepared draw resources for the cascade.
+   */
+  getShadowViewBinding(
+    renderer: MeshRenderer,
+    shadowCascadeIndex: number,
+    subMeshIndex: number
+  ): MeshRendererShadowViewBinding;
+}
 
 /**
  * MeshRenderer Component.
@@ -15,6 +58,7 @@ import { ShaderMacro } from "../shader/ShaderMacro";
 export class MeshRenderer extends Renderer {
   /** @internal */
   static _enableVertexColorMacro = ShaderMacro.getByName("RENDERER_ENABLE_VERTEXCOLOR");
+  private static _shadowViewProviderCounts: WeakMap<Engine, number> = new WeakMap();
 
   private static _uvMacro = ShaderMacro.getByName("RENDERER_HAS_UV");
   private static _uv1Macro = ShaderMacro.getByName("RENDERER_HAS_UV1");
@@ -25,6 +69,10 @@ export class MeshRenderer extends Renderer {
 
   @ignoreClone
   private _indirectDrawBindings: Array<MeshRendererIndirectDrawBinding | undefined> = [];
+
+  /** @internal */
+  @ignoreClone
+  _shadowViewProvider: MeshRendererShadowViewProvider | null = null;
 
   /** @internal */
   @ignoreClone
@@ -86,6 +134,32 @@ export class MeshRenderer extends Renderer {
     }
   }
 
+  /** @internal */
+  _setShadowViewProvider(provider: MeshRendererShadowViewProvider | null): void {
+    const previous = this._shadowViewProvider;
+    if (provider === previous) return;
+
+    const engine = this.engine;
+    const counts = MeshRenderer._shadowViewProviderCounts;
+    const previousCount = counts.get(engine) ?? 0;
+    if (previous) {
+      if (previousCount === 1) {
+        counts.delete(engine);
+      } else {
+        counts.set(engine, previousCount - 1);
+      }
+    }
+    if (provider) {
+      counts.set(engine, (counts.get(engine) ?? 0) + 1);
+    }
+    this._shadowViewProvider = provider;
+  }
+
+  /** @internal */
+  static _hasShadowViewProviders(engine: Engine): boolean {
+    return MeshRenderer._shadowViewProviderCounts.has(engine);
+  }
+
   /**
    * @internal
    */
@@ -102,6 +176,7 @@ export class MeshRenderer extends Renderer {
       if (binding && !binding.buffer.destroyed) this._addResourceReferCount(binding.buffer, -1);
     }
     this._indirectDrawBindings.length = 0;
+    this._setShadowViewProvider(null);
     const mesh = this._mesh;
     if (mesh) {
       mesh.destroyed || this._addResourceReferCount(mesh, -1);
@@ -193,6 +268,8 @@ export class MeshRenderer extends Renderer {
     const distanceForSort = this._distanceForSort;
     const renderElementPool = engine._renderElementPool;
     const renderPipeline = context.camera._renderPipeline;
+    const shadowCascadeIndex = context.shadowCascadeIndex;
+    const shadowViewProvider = shadowCascadeIndex >= 0 ? this._shadowViewProvider : null;
     for (let i = 0, n = subMeshes.length; i < n; i++) {
       let material = materials[i];
       if (!material) {
@@ -203,11 +280,21 @@ export class MeshRenderer extends Renderer {
       }
 
       const renderElement = renderElementPool.get();
-      renderElement.set(this, material, mesh._primitive, subMeshes[i]);
-      const indirectBinding = this._indirectDrawBindings[i];
-      if (indirectBinding) {
-        renderElement.indirectBuffer = indirectBinding.buffer;
-        renderElement.indirectOffset = indirectBinding.offset;
+      if (shadowViewProvider) {
+        const shadowBinding = shadowViewProvider.getShadowViewBinding(this, shadowCascadeIndex, i);
+        if (!shadowBinding) {
+          throw new Error(`Missing shadow-view draw binding for cascade ${shadowCascadeIndex}, sub-mesh ${i}.`);
+        }
+        renderElement.set(this, material, shadowBinding.primitive, subMeshes[i]);
+        renderElement.indirectBuffer = shadowBinding.indirectBuffer;
+        renderElement.indirectOffset = shadowBinding.indirectOffset;
+      } else {
+        renderElement.set(this, material, mesh._primitive, subMeshes[i]);
+        const indirectBinding = this._indirectDrawBindings[i];
+        if (indirectBinding) {
+          renderElement.indirectBuffer = indirectBinding.buffer;
+          renderElement.indirectOffset = indirectBinding.offset;
+        }
       }
       renderElement.priority = priority;
       renderElement.distanceForSort = distanceForSort;

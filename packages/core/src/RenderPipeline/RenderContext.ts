@@ -37,6 +37,9 @@ export class RenderContext {
   projectionMatrix: Matrix;
   viewProjectionMatrix: Matrix;
 
+  /** @internal Index of the active directional shadow cascade, or `-1` outside shadow rendering. */
+  shadowCascadeIndex = -1;
+
   applyVirtualCamera(virtualCamera: VirtualCamera, flipProjection: boolean): void {
     this.virtualCamera = virtualCamera;
     this.flipProjection = flipProjection;

@@ -8,6 +8,8 @@ import { PipelineStage } from "../RenderPipeline/index";
 import { GLCapabilityType } from "../base/Constant";
 import { CameraClearFlags } from "../enums/CameraClearFlags";
 import { DirectLight } from "../lighting";
+import { MeshRenderer } from "../mesh/MeshRenderer";
+import type { MeshRendererShadowViewProvider } from "../mesh/MeshRenderer";
 import { ShaderProperty } from "../shader";
 import { TextureFilterMode } from "../texture";
 import { RenderTarget } from "../texture/RenderTarget";
@@ -49,9 +51,14 @@ export class CascadedShadowCasterPass extends PipelinePass {
   private _shadowBias: Vector2 = new Vector2();
   private _shadowMapFormat: TextureFormat;
   private _shadowCascadeMode: ShadowCascadesMode;
-  private _shadowSliceData: ShadowSliceData = new ShadowSliceData();
+  private _shadowSliceData: ShadowSliceData[] = Array.from(
+    { length: CascadedShadowCasterPass._maxCascades },
+    () => new ShadowSliceData()
+  );
+  private _shadowViewProviders: Set<MeshRendererShadowViewProvider> = new Set();
   private _lightUp: Vector3 = new Vector3();
   private _lightSide: Vector3 = new Vector3();
+  private _lightForward: Vector3 = new Vector3();
 
   private _splitBoundSpheres = new Float32Array(CascadedShadowCasterPass._maxCascades * 4);
   /** The end is project precision problem in shader. */
@@ -67,7 +74,9 @@ export class CascadedShadowCasterPass extends PipelinePass {
     this._camera = camera;
 
     this._supportDepthTexture = camera.engine._hardwareRenderer.canIUse(GLCapabilityType.depthTexture);
-    this._shadowSliceData.virtualCamera.isOrthographic = true;
+    for (const shadowSliceData of this._shadowSliceData) {
+      shadowSliceData.virtualCamera.isOrthographic = true;
+    }
   }
 
   /**
@@ -85,7 +94,7 @@ export class CascadedShadowCasterPass extends PipelinePass {
       engine,
       _camera: camera,
       _viewportOffsets: viewports,
-      _shadowSliceData: shadowSliceData,
+      _shadowSliceData: shadowSlices,
       _splitBoundSpheres: splitBoundSpheres,
       _shadowMatrices: shadowMatrices
     } = this;
@@ -97,12 +106,11 @@ export class CascadedShadowCasterPass extends PipelinePass {
     const rhi = engine._hardwareRenderer;
     const shadowCascades = scene.shadowCascades;
     const splitDistance = CascadedShadowCasterPass._cascadesSplitDistance;
-    const boundSphere = shadowSliceData.splitBoundSphere;
     const lightWorld = CascadedShadowCasterPass._tempMatrix0;
     const lightWorldE = lightWorld.elements;
     const lightUp = this._lightUp;
     const lightSide = this._lightSide;
-    const lightForward = shadowSliceData.virtualCamera.forward;
+    const lightForward = this._lightForward;
 
     // Prepare render target
     const { z: width, w: height } = this._shadowMapSize;
@@ -150,14 +158,6 @@ export class CascadedShadowCasterPass extends PipelinePass {
     this._renderTarget = renderTarget;
     this._depthTexture = shadowTexture;
 
-    // @todo: shouldn't set viewport and scissor in activeRenderTarget
-    context.setRenderTarget(renderTarget, CascadedShadowCasterPass._viewport, 0);
-    if (this._supportDepthTexture) {
-      rhi.clearRenderTarget(engine, CameraClearFlags.Depth, null);
-    } else {
-      rhi.clearRenderTarget(engine, CameraClearFlags.All, CascadedShadowCasterPass._clearColor);
-    }
-
     // prepare light and camera direction
     Matrix.rotationQuaternion(light.entity.transform.worldRotationQuaternion, lightWorld);
     lightSide.set(lightWorldE[0], lightWorldE[1], lightWorldE[2]);
@@ -169,6 +169,8 @@ export class CascadedShadowCasterPass extends PipelinePass {
     const shadowTileResolution = this._shadowTileResolution;
 
     for (let j = 0; j < shadowCascades; j++) {
+      const shadowSliceData = shadowSlices[j];
+      shadowSliceData.virtualCamera.forward.copyFrom(lightForward);
       ShadowUtils.getBoundSphereByFrustum(
         splitDistance[j],
         splitDistance[j + 1],
@@ -205,9 +207,8 @@ export class CascadedShadowCasterPass extends PipelinePass {
           shadowMatrices
         );
       }
-      this._updateSingleShadowCasterShaderData(light, shadowSliceData, context);
-
       // upload pre-cascade infos.
+      const boundSphere = shadowSliceData.splitBoundSphere;
       const center = boundSphere.center;
       const radius = boundSphere.radius;
       const offset = j * 4;
@@ -215,34 +216,68 @@ export class CascadedShadowCasterPass extends PipelinePass {
       splitBoundSpheres[offset + 1] = center.y;
       splitBoundSpheres[offset + 2] = center.z;
       splitBoundSpheres[offset + 3] = radius * radius;
-      opaqueQueue.clear();
-      alphaTestQueue.clear();
-      const renderers = componentsManager._renderers;
-      const elements = renderers._elements;
-      for (let k = renderers.length - 1; k >= 0; --k) {
-        ShadowUtils.shadowCullFrustum(context, light, elements[k], shadowSliceData);
+    }
+
+    const renderers = componentsManager._renderers;
+    const elements = renderers._elements;
+    const shadowViewProviders = this._shadowViewProviders;
+    shadowViewProviders.clear();
+    if (MeshRenderer._hasShadowViewProviders(engine)) {
+      for (let i = renderers.length - 1; i >= 0; --i) {
+        const renderer = elements[i];
+        if (renderer instanceof MeshRenderer) {
+          const provider = renderer._shadowViewProvider;
+          if (provider) shadowViewProviders.add(provider);
+        }
       }
-
-      if (opaqueQueue.elements.length || alphaTestQueue.elements.length) {
-        // @todo: It is more appropriate to prevent duplication based on `virtualCamera` at `RenderQueue#render`.
-        engine._renderCount++;
-
-        const batcherManager = engine._batcherManager;
-        opaqueQueue.sortBatch(RenderQueue.compareForOpaque, batcherManager);
-        alphaTestQueue.sortBatch(RenderQueue.compareForOpaque, batcherManager);
-
-        const { x, y } = viewports[j];
-
-        rhi.setGlobalDepthBias(1.0, 1.0);
-
-        rhi.viewport(x, y, shadowTileResolution, shadowTileResolution);
-        // for no cascade is for the edge,for cascade is for the beyond maxCascade pixel can use (0,0,0) trick sample the shadowMap
-        rhi.scissor(x + 1, y + 1, shadowTileResolution - 2, shadowTileResolution - 2);
-
-        opaqueQueue.render(context, PipelineStage.ShadowCaster);
-        alphaTestQueue.render(context, PipelineStage.ShadowCaster);
-        rhi.setGlobalDepthBias(0, 0);
+      for (const provider of shadowViewProviders) {
+        provider.prepareShadowViews(context, shadowSlices, shadowCascades);
       }
+    }
+
+    // @todo: shouldn't set viewport and scissor in activeRenderTarget
+    context.setRenderTarget(renderTarget, CascadedShadowCasterPass._viewport, 0);
+    if (this._supportDepthTexture) {
+      rhi.clearRenderTarget(engine, CameraClearFlags.Depth, null);
+    } else {
+      rhi.clearRenderTarget(engine, CameraClearFlags.All, CascadedShadowCasterPass._clearColor);
+    }
+
+    try {
+      for (let j = 0; j < shadowCascades; j++) {
+        const shadowSliceData = shadowSlices[j];
+        context.shadowCascadeIndex = j;
+        this._updateSingleShadowCasterShaderData(light, shadowSliceData, context);
+
+        opaqueQueue.clear();
+        alphaTestQueue.clear();
+        for (let k = renderers.length - 1; k >= 0; --k) {
+          ShadowUtils.shadowCullFrustum(context, light, elements[k], shadowSliceData);
+        }
+
+        if (opaqueQueue.elements.length || alphaTestQueue.elements.length) {
+          // @todo: It is more appropriate to prevent duplication based on `virtualCamera` at `RenderQueue#render`.
+          engine._renderCount++;
+
+          const batcherManager = engine._batcherManager;
+          opaqueQueue.sortBatch(RenderQueue.compareForOpaque, batcherManager);
+          alphaTestQueue.sortBatch(RenderQueue.compareForOpaque, batcherManager);
+
+          const { x, y } = viewports[j];
+
+          rhi.setGlobalDepthBias(1.0, 1.0);
+
+          rhi.viewport(x, y, shadowTileResolution, shadowTileResolution);
+          // for no cascade is for the edge,for cascade is for the beyond maxCascade pixel can use (0,0,0) trick sample the shadowMap
+          rhi.scissor(x + 1, y + 1, shadowTileResolution - 2, shadowTileResolution - 2);
+
+          opaqueQueue.render(context, PipelineStage.ShadowCaster);
+          alphaTestQueue.render(context, PipelineStage.ShadowCaster);
+          rhi.setGlobalDepthBias(0, 0);
+        }
+      }
+    } finally {
+      context.shadowCascadeIndex = -1;
     }
   }
 

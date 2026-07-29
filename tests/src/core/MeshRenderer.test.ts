@@ -7,8 +7,11 @@ import {
   Entity,
   Camera,
   ModelMesh,
-  RenderElement
+  RenderElement,
+  DirectLight,
+  ShadowType
 } from "@galacean/engine-core";
+import type { Buffer, MeshRendererShadowViewProvider } from "@galacean/engine-core";
 import { Vector3 } from "@galacean/engine-math";
 import { WebGLEngine } from "@galacean/engine";
 import { describe, beforeAll, expect, it } from "vitest";
@@ -18,6 +21,7 @@ describe("MeshRenderer", async function () {
   let rootEntity: Entity;
   let cubeEntity: Entity;
   let cubeMesh: ModelMesh;
+  let camera: Camera;
 
   beforeAll(async function () {
     engine = await WebGLEngine.create({ canvas: document.createElement("canvas") });
@@ -27,7 +31,7 @@ describe("MeshRenderer", async function () {
     const cameraEntity = rootEntity.createChild("Camera");
     cameraEntity.transform.setPosition(0, 0, 10);
     cameraEntity.transform.lookAt(new Vector3(0, 0, 0));
-    cameraEntity.addComponent(Camera);
+    camera = cameraEntity.addComponent(Camera);
 
     // create a cube entity and add a mesh renderer component.
     cubeEntity = rootEntity.createChild("Cube");
@@ -78,6 +82,106 @@ describe("MeshRenderer", async function () {
 
     expect(renderer._canBatch(indirect, direct)).toBe(false);
     expect(renderer._canBatch(direct, indirect)).toBe(false);
+  });
+
+  it("selects cascade bindings without changing the forward primitive", () => {
+    const entity = rootEntity.createChild("ShadowViewBinding");
+    const renderer = entity.addComponent(MeshRenderer);
+    const forwardMesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
+    const shadowMesh = PrimitiveMesh.createCuboid(engine, 2, 2, 2);
+    renderer.mesh = forwardMesh;
+    renderer.setMaterial(new UnlitMaterial(engine));
+
+    const shadowBuffer = {} as Buffer;
+    const provider: MeshRendererShadowViewProvider = {
+      prepareShadowViews: () => {},
+      getShadowViewBinding: (_renderer, shadowCascadeIndex, subMeshIndex) => {
+        expect(shadowCascadeIndex).toBe(2);
+        expect(subMeshIndex).toBe(0);
+        return {
+          primitive: shadowMesh._primitive,
+          indirectBuffer: shadowBuffer,
+          indirectOffset: 40
+        };
+      }
+    };
+    renderer._setShadowViewProvider(provider);
+
+    const context = engine._renderContext;
+    context.camera = camera;
+    context.applyVirtualCamera(camera._virtualCamera, false);
+    const cullingResults = camera._renderPipeline._cullingResults;
+
+    cullingResults.reset();
+    context.shadowCascadeIndex = -1;
+    renderer._prepareRender(context);
+    const forwardElement = cullingResults.opaqueQueue.elements.find((element) => element.component === renderer);
+    expect(forwardElement.primitive).toBe(forwardMesh._primitive);
+    expect(forwardElement.indirectBuffer).toBeNull();
+
+    cullingResults.reset();
+    context.shadowCascadeIndex = 2;
+    renderer._prepareRender(context);
+    const shadowElement = cullingResults.opaqueQueue.elements.find((element) => element.component === renderer);
+    expect(shadowElement.primitive).toBe(shadowMesh._primitive);
+    expect(shadowElement.indirectBuffer).toBe(shadowBuffer);
+    expect(shadowElement.indirectOffset).toBe(40);
+
+    context.shadowCascadeIndex = -1;
+    renderer._setShadowViewProvider(null);
+    entity.destroy();
+    shadowMesh.destroy();
+  });
+
+  it("prepares each shared shadow-view provider once before rendering cascades", () => {
+    const scene = engine.sceneManager.activeScene;
+    const lightEntity = rootEntity.createChild("ShadowViewLight");
+    const light = lightEntity.addComponent(DirectLight);
+    light.shadowType = ShadowType.Hard;
+    scene.sun = light;
+
+    const rendererEntityA = rootEntity.createChild("ShadowViewA");
+    const rendererEntityB = rootEntity.createChild("ShadowViewB");
+    const rendererA = rendererEntityA.addComponent(MeshRenderer);
+    const rendererB = rendererEntityB.addComponent(MeshRenderer);
+    rendererA.castShadows = false;
+    rendererB.castShadows = false;
+
+    let prepareCount = 0;
+    let preparedSliceCount = 0;
+    const provider: MeshRendererShadowViewProvider = {
+      prepareShadowViews: (_context, shadowSlices, shadowSliceCount) => {
+        prepareCount++;
+        preparedSliceCount = shadowSliceCount;
+        for (let i = 0; i < shadowSliceCount; i++) {
+          const forward = shadowSlices[i].virtualCamera.forward;
+          const lightDirection = light.direction;
+          expect(forward.x).toBeCloseTo(lightDirection.x, 6);
+          expect(forward.y).toBeCloseTo(lightDirection.y, 6);
+          expect(forward.z).toBeCloseTo(lightDirection.z, 6);
+        }
+      },
+      getShadowViewBinding: () => {
+        throw new Error("Non-casting renderers must not request a shadow-view binding.");
+      }
+    };
+    rendererA._setShadowViewProvider(provider);
+    rendererB._setShadowViewProvider(provider);
+
+    try {
+      engine.update();
+      prepareCount = 0;
+      camera.render();
+
+      expect(prepareCount).toBe(1);
+      expect(preparedSliceCount).toBe(scene.shadowCascades);
+      expect(engine._renderContext.shadowCascadeIndex).toBe(-1);
+    } finally {
+      rendererEntityA.destroy();
+      rendererEntityB.destroy();
+      scene.sun = null;
+      lightEntity.destroy();
+    }
   });
 
   it("bounds", () => {
