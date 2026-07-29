@@ -87,6 +87,7 @@ interface DepthPrimingPipelineCapture {
 
 interface DepthPrimingPassCapture {
   readonly label: string;
+  readonly colorAttachmentCount: number;
   readonly depthTextureId: number | null;
   readonly depthReadOnly: boolean;
   readonly depthLoadOp?: string;
@@ -143,6 +144,7 @@ async function installDepthPrimingCapture(page: Page): Promise<void> {
         prototype: {
           beginRenderPass(descriptor: {
             readonly label?: string;
+            readonly colorAttachments: readonly (object | null)[];
             readonly depthStencilAttachment?: {
               readonly view: object;
               readonly depthReadOnly?: boolean;
@@ -195,6 +197,7 @@ async function installDepthPrimingCapture(page: Page): Promise<void> {
       let drawIndexedIndirectCount = 0;
       const capture = {
         label: descriptor.label ?? "render",
+        colorAttachmentCount: descriptor.colorAttachments.length,
         depthTextureId: depthAttachment ? (viewTextureIds.get(depthAttachment.view) ?? null) : null,
         depthReadOnly: depthAttachment?.depthReadOnly ?? false,
         depthLoadOp: depthAttachment?.depthLoadOp,
@@ -806,13 +809,16 @@ test("primes Grasslands Forward with the prepass depth attachment", async ({ pag
   ).toBe(true);
 
   expect(candidatePair.depth.depthTextureId).toBe(candidatePair.forward.depthTextureId);
+  expect(candidatePair.depth.colorAttachmentCount).toBe(0);
   expect(candidatePair.depth.depthReadOnly).toBe(false);
   expect(candidatePair.depth.depthLoadOp).toBe("clear");
   expect(candidatePair.depth.depthStoreOp).toBe("store");
   expect(candidatePair.depth.indirectPipelines).toHaveLength(6);
+  expect(candidatePair.depth.indirectPipelines.every((pipeline) => pipeline.colorWriteMasks.length === 0)).toBe(true);
   expect(candidatePair.depth.pipelines.every((pipeline) => pipeline.colorWriteMasks.every((mask) => mask === 0))).toBe(
     true
   );
+  expect(candidatePair.forward.colorAttachmentCount).toBeGreaterThan(0);
   expect(candidatePair.forward.depthReadOnly).toBe(true);
   expect(candidatePair.forward.depthLoadOp).toBeUndefined();
   expect(candidatePair.forward.depthStoreOp).toBeUndefined();
