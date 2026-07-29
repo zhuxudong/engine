@@ -325,7 +325,8 @@ export class WGSLVisitor extends GLESVisitor {
       return `(${args[0]} ${this._relationalOperator(name)} ${args[1]})`;
     }
     if (mapped === "bitcast") {
-      return `bitcast<${this._typeFromDataType(node.type)}>(${args[0]})`;
+      const argumentType = this._topLevelExpressionType(params[0], args[0]);
+      return `bitcast<${this._bitcastTargetType(name, argumentType)}>(${args[0]})`;
     }
     if ((mapped === "min" || mapped === "max" || mapped === "clamp") && args.length >= 2) {
       const returnType = this._topLevelExpressionType(params[0], args[0]);
@@ -1363,6 +1364,12 @@ ${assignments.join("\n")}
       default:
         return name;
     }
+  }
+
+  private _bitcastTargetType(name: string, argumentType: string): string {
+    const componentType = name === "floatBitsToInt" ? "i32" : name === "floatBitsToUint" ? "u32" : "f32";
+    const vectorSize = /^vec([234])</.exec(argumentType)?.[1];
+    return vectorSize ? `vec${vectorSize}<${componentType}>` : componentType;
   }
 
   private _relationalOperator(name: string): string {

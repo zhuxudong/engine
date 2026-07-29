@@ -143,6 +143,26 @@ Shader "WGSL/ComputeHalfPacking" {
 }
 `;
 
+const bitcastComputeShader = `
+Shader "WGSL/ComputeBitcast" {
+  SubShader "Default" {
+    Pass "Cast" {
+      readonly buffer vec4 inputValues[];
+      buffer uint scalarValues[];
+      buffer uvec2 vectorValues[];
+
+      void castValues() {
+        uint index = gl_GlobalInvocationID.x;
+        scalarValues[index] = floatBitsToUint(inputValues[index].x);
+        vectorValues[index] = floatBitsToUint(inputValues[index].yz);
+      }
+
+      ComputeShader = castValues;
+    }
+  }
+}
+`;
+
 function generateWGSL(): { vertex: string; fragment: string } {
   return generateWGSLFromSource(basicShader);
 }
@@ -360,10 +380,29 @@ describe("ShaderCompiler WGSL codegen", () => {
     device.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPUMapMode.READ);
 
-    expect(new Uint32Array(readback.getMappedRange().slice(0))).toEqual(
-      new Uint32Array([0xc0003c00, 0x7bff3800])
-    );
+    expect(new Uint32Array(readback.getMappedRange().slice(0))).toEqual(new Uint32Array([0xc0003c00, 0x7bff3800]));
     readback.unmap();
+  });
+
+  it("lowers scalar and vector bit reinterpretation to valid WGSL targets", async () => {
+    const { compute } = generateWGSLCompute(
+      bitcastComputeShader,
+      new Map([["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1"]])
+    );
+
+    expect(compute).toContain("bitcast<u32>(inputValues[index].x)");
+    expect(compute).toContain("bitcast<vec2<u32>>(inputValues[index].yz)");
+    expect(compute).not.toContain("bitcast<3000>");
+    if (!navigator.gpu) {
+      return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    expect(adapter, "WebGPU adapter is unavailable").not.toBeNull();
+    const device = await adapter!.requestDevice();
+    const info = await device.createShaderModule({ code: compute }).getCompilationInfo();
+
+    expect(formatCompilationErrors("compute", info, compute)).toEqual([]);
   });
 
   it("executes the generated compute artifact and copies storage-buffer data", async () => {
