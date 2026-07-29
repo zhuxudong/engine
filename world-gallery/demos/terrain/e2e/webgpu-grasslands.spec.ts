@@ -188,7 +188,7 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   expect(surface.categoryCounts.tree).toBeGreaterThan(0);
   expect(surface.categoryCounts.rock).toBeGreaterThan(0);
   expect(surface.visibleRendererBatches).toBeLessThan(webglSurface.visibleRendererBatches);
-  expect(surface.indirectRendererBatches).toBeGreaterThan(1);
+  expect(surface.indirectRendererBatches).toBe(6);
   expect(webglSurface.indirectRendererBatches).toBe(0);
 
   await page.evaluate(() => window.grasslandsDebug!.setSurface({ lod: { enabled: false } }));
@@ -199,7 +199,8 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     return window.grasslandsDebug!.inspectSurface();
   });
   expect(transitioningSurface.transitioningRanges).toBeGreaterThan(0);
-  expect(transitioningSurface.indirectRendererBatches).toBeGreaterThan(lod0Surface.indirectRendererBatches);
+  expect(transitioningSurface.visibleRendererBatches).toBeGreaterThan(lod0Surface.visibleRendererBatches);
+  expect(transitioningSurface.indirectRendererBatches).toBe(lod0Surface.indirectRendererBatches);
   await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
   expect(
     await page.evaluate(() =>

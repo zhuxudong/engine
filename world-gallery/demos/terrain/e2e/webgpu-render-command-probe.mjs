@@ -4,6 +4,7 @@ const url = process.env.PROBE_URL ?? "http://127.0.0.1:5187/demos/terrain/grassl
 const screenshotPath = process.env.PROBE_SCREENSHOT;
 const requestGPUTiming = new URL(url).searchParams.get("gpuTiming") === "1";
 const compactOutput = process.env.PROBE_COMPACT === "1";
+const deterministicScene = process.env.PROBE_DETERMINISTIC_SCENE === "1";
 const disabledCategories = (process.env.PROBE_DISABLED_CATEGORIES ?? "")
   .split(",")
   .map((category) => category.trim())
@@ -57,6 +58,7 @@ await page.addInitScript(() => {
     writeBufferBytes: 0,
     bufferWrites: {},
     renderPasses: 0,
+    directInstances: { draw: 0, drawIndexed: 0 },
     commands: Object.fromEntries(commandNames.map((name) => [name, 0])),
     bundleCommands: Object.fromEntries(commandNames.map((name) => [name, 0])),
     byPass: {}
@@ -67,13 +69,20 @@ await page.addInitScript(() => {
   const getPassCounts = (label) => {
     counts.byPass[label] ??= {
       renderPasses: 0,
+      directInstances: { draw: 0, drawIndexed: 0 },
       commands: Object.fromEntries(commandNames.map((name) => [name, 0]))
     };
     return counts.byPass[label];
   };
-  const incrementCommand = (label, name) => {
+  const incrementCommand = (label, name, args) => {
     counts.commands[name]++;
-    getPassCounts(label).commands[name]++;
+    const passCounts = getPassCounts(label);
+    passCounts.commands[name]++;
+    if (name === "draw" || name === "drawIndexed") {
+      const instanceCount = args[1] ?? 1;
+      counts.directInstances[name] += instanceCount;
+      passCounts.directInstances[name] += instanceCount;
+    }
   };
   window.__webgpuRenderCommandProbe = {
     reset() {
@@ -164,7 +173,7 @@ await page.addInitScript(() => {
       const command = pass[name];
       if (typeof command !== "function") continue;
       pass[name] = (...args) => {
-        incrementCommand(label, name);
+        incrementCommand(label, name, args);
         return command.call(pass, ...args);
       };
     }
@@ -174,7 +183,15 @@ await page.addInitScript(() => {
 
 await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
 await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
-await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
+await page.evaluate((deterministic) => {
+  window.grasslandsDebug.setScene({
+    animation: false,
+    ...(deterministic ? { cloudShadows: false, clouds: false, fog: false, postProcess: false } : {})
+  });
+  if (deterministic) {
+    window.grasslandsDebug.setSurface({ wind: { enabled: false } });
+  }
+}, deterministicScene);
 if (disabledCategories.length > 0) {
   await page.evaluate(
     (categories) =>
@@ -222,6 +239,9 @@ const byPassPerSubmission = Object.fromEntries(
     label,
     {
       renderPasses: pass.renderPasses / counts.submissions,
+      directInstances: Object.fromEntries(
+        Object.entries(pass.directInstances).map(([name, count]) => [name, count / counts.submissions])
+      ),
       commands: Object.fromEntries(
         Object.entries(pass.commands).map(([name, count]) => [name, count / counts.submissions])
       )
@@ -253,6 +273,7 @@ const surface = await page.evaluate(() => window.grasslandsDebug.inspectSurface(
 const report = {
   browser: { executablePath, version: browser.version() },
   url,
+  deterministicScene,
   disabledCategories,
   frame: {
     samples: frameTimes.length,
@@ -281,6 +302,9 @@ const report = {
     writeBuffer: counts.writeBuffer / counts.submissions,
     writeBufferBytes: counts.writeBufferBytes / counts.submissions,
     renderPasses: counts.renderPasses / counts.submissions,
+    directInstances: Object.fromEntries(
+      Object.entries(counts.directInstances).map(([name, count]) => [name, count / counts.submissions])
+    ),
     commands: perSubmission,
     byPass: byPassPerSubmission
   },
@@ -292,6 +316,7 @@ console.log(
       ? {
           browser: report.browser,
           url: report.url,
+          deterministicScene: report.deterministicScene,
           disabledCategories: report.disabledCategories,
           frame: report.frame,
           surface: {
