@@ -208,7 +208,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     const pipeline = this._getPipeline(primitive, subPrimitive, vertexState);
     const { bindGroup, dynamicOffset } = this._getBindGroup();
 
-    pass.setPipeline(pipeline);
+    graphicDevice._setRenderPipeline(pass, pipeline);
     pass.setBindGroup(0, bindGroup, this._uniformLayout.byteLength > 0 ? [dynamicOffset] : []);
     if (this._instanceLayout) {
       const instanceBinding = this._getInstanceBinding();
