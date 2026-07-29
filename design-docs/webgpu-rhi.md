@@ -2513,8 +2513,9 @@ range。Grasslands 当前 `MSAASamples.None` 且明确请求 `DepthTextureMode.P
 | Three.js WebGPU | `c6620cee323838ead14035b37008f401edbc2ea1` | 同一 depth attachment 在 clear 时使用 `loadOp=clear/store`，后续不清理时使用 `loadOp=load/store`；只提供 attachment 生命周期事实，不实现自动 depth priming |
 | PlayCanvas WebGPU | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | render-pass depth ops 显式映射 `clear/load` 与 `store/discard`；transient depth 若后续要求 load/store 会报告错误并强制回 clear/discard |
 
-这些源码支持“同一非 transient depth attachment 跨 pass store/load，Forward 使用 Equal”的
-基础合同，也给出了不能默认启用的移动端反例。桌面 Chromium/Metal 成功不能覆盖 Apple ARM
+这些源码支持“同一非 transient depth attachment 跨 pass 复用，Forward 禁止 depth write”的
+候选方向，也给出了不能默认启用的移动端反例。Unity 的 Equal 策略不是 Galacean 独立
+ShaderLab pass 在 WebGPU 上的画面证明；桌面 Chromium/Metal 成功也不能覆盖 Apple ARM
 WebGPU 风险。
 
 #### 实验契约
@@ -2526,23 +2527,62 @@ WebGPU 风险。
    复用 attachment；其他情况严格走现有独立 depth target。
 3. Depth prepass 只清 depth 并 store；SAO/after-depth consumer 可在 pass 结束后读取同一 texture；
    Forward 对 depth 使用 load，清理 flags 只移除 Depth、保留 Color/Stencil 语义。
-4. opaque 与 alpha-test Forward 统一覆盖为 `DepthWrite=false`、`DepthCompare=Equal`。覆盖通过
+4. opaque 与 alpha-test Forward 统一覆盖为 `DepthWrite=false`、`DepthCompare=LessEqual`。覆盖通过
    RenderQueue 的通用 internal render-state map 合并，不修改材质 ShaderData，不增加
    Surface/category/backend 特例。
-5. `Terrain/Surface` 增加同一 ShaderLab source 的标准 `DepthOnly` pass。vertex placement、
-   billboard、wind、world grounding、distance fine-cull、LOD dither 和 alpha cutoff 必须与
-   Forward 一致；`.shaderc`/`.wgslc` 都由现有构建导出，禁止 raw WGSL。
-6. native probe 必须证明 depth-prepass 与 Forward 使用同一 `GPUTexture` view，前者
-   `depthLoadOp=clear`、后者 `depthLoadOp=load`；Forward pipeline 为 Equal/no-write，且新增
-   Surface depth indirect draw 数与 Forward 的 6 个 record 对齐。
+5. `Terrain/Surface` 增加同一 ShaderLab source 的内部 `DepthPrimingOnly` pass。默认 depth
+   prepass 不执行该阶段，WebGL2 和未开启实验的 WebGPU 不承担新增 Terrain/Surface 深度工作。
+   vertex placement、billboard、wind、world grounding、distance fine-cull、LOD dither 和
+   alpha cutoff 必须与 Forward 一致；`.shaderc`/`.wgslc` 都由现有构建导出，禁止 raw WGSL。
+6. native probe 必须证明 depth-prepass 与 Forward 使用同一 `GPUTexture`，前者
+   `depthLoadOp=clear/depthStoreOp=store`；Forward attachment 为 `depthReadOnly=true`，按 WebGPU
+   合同省略 depth load/store op。Forward pipeline 为 LessEqual/no-write，且新增 Surface depth
+   indirect draw 数与 Forward 的 6 个 record 对齐。
 7. 功能门包含 WebGL2 默认回归、WebGPU option off 回归、option on 的 backend reload、四个固定
    相机、移动/LOD/wind/category 压力、截图、Surface/indirect count 和零 page/GPU diagnostic。
 8. 性能按父提交与候选独立页面轮换 `all/no_grass/no_tree/no_rock`，每区块读取逐 pass timestamp
    和稳态 frame。保留要求完整场景 Forward 与 total improvement 中位数为正且 IQR 不跨 0，
    FPS 为正、P95 不稳定退化超过 2%；`no_grass` 应显著缩小收益才能归因到草。
 9. 即使桌面门通过，本候选仍保持默认关闭，直到 Apple Silicon Safari/Chrome 与至少一台 Android
-   WebGPU 真机通过画面和性能门。任一目标出现 Equal 漏像素、depth load/store validation 或
+   WebGPU 真机通过画面和性能门。任一目标出现 depth compare 漏像素、attachment validation 或
    移动端退化，撤销 runtime consumer，只保留通用附件测试与本检查点。
+
+#### 桌面 Chromium/Metal 实验检查点：保留为 opt-in
+
+原始 Equal 候选通过 WebGPU validation，但 `terrain-horizon` 出现一处远景树漏像素：
+normalized RGB RMSE `0.020516`。改为 LessEqual 后该缺口消失；四个固定相机的候选差异都不超过
+固定门。`first-person / hero / terrain-horizon / valley-overview` 的候选 RMSE 分别为
+`0.004331 / 0.004040 / 0.003035 / 0.004182`，超过 5/255 的像素分别为
+`869 / 827 / 447 / 792`；同一 baseline 重载 RMSE 为 `0.000189–0.000693`。测试在切换相机后
+先等待一帧触发 LOD 更新，再等待 `transitioningRanges=0`，避免把未开始的 transition 当作稳态。
+
+native capture 同时证明：
+
+- 默认关闭且只保留 Terrain/Surface 时没有 `depth-prepass`，6 个 Forward indirect pipeline
+  仍为 Less/write；WebGL2 和默认 WebGPU 的新增 Surface 深度成本为零。
+- 开启后 depth-prepass 与 Forward 的 depth texture id 相同，前者 clear/store，后者
+  `depthReadOnly=true` 且省略 load/store；两个 pass 都执行 6 个 Surface indirect record。
+- Depth pass 的 color write mask 为 0；Forward 的 6 个 indirect pipeline 均为
+  LessEqual/no-write；页面和 WebGPU diagnostic 为 0。
+
+同一 1024×576、`terrain-horizon`、关闭云动画与 Surface wind 的桌面 Chromium/Metal 采样如下。
+每格为 20 个 GPU timestamp 的中位数；页面 rAF 被 60 Hz 锁帧。
+
+| workload | total baseline | total priming | total 变化 | Forward baseline | Forward priming | Forward 变化 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| all | 10.894 ms | 7.078 ms | -35.03% | 5.348 ms | 3.055 ms | -42.88% |
+| no grass | 6.659 ms | 4.592 ms | -31.04% | 3.202 ms | 2.347 ms | -26.70% |
+| no tree | 7.873 ms | 6.254 ms | -20.57% | 4.079 ms | 2.482 ms | -39.15% |
+| no rock | 7.575 ms | 5.733 ms | -24.31% | 4.683 ms | 2.401 ms | -48.72% |
+
+完整场景 total IQR 从 `8.624–12.150 ms` 变为 `5.958–8.418 ms`，Forward IQR 从
+`4.847–6.717 ms` 变为 `2.732–3.866 ms`，两项区间均不重叠；depth-prepass 中位数由
+`0.725 ms` 增到 `1.821 ms`。去掉 grass 后，Forward 绝对收益从 `2.293 ms` 缩到
+`0.855 ms`；去掉 tree 后缩到 `1.597 ms`；去掉 rock 后仍为 `2.282 ms`。该固定视角中 grass
+和 tree 对收益有可测贡献，rock 没有形成可测归因。
+
+baseline/candidate 的 rAF 中位数都是 `16.7 ms`，这是 vsync 上限，不是 FPS 提升证据。当前只保留
+默认关闭的桌面实验能力；移动端结论仍等待真机。
 
 ### 移动端约束与验收
 
