@@ -2326,6 +2326,46 @@ instance；因此现有 depth 只包含 terrain/architecture，可作为 Surface
    improvement 中位数为正且 IQR 不跨 0，FPS 为正，P95 不稳定退化超过 2%；失败则撤销
    Surface consumer，只保留已独立验收的 sampled-texture RHI。
 
+#### Hi-Z 第零阶段：同帧 far-depth tile
+
+现有 `SurfaceWorld.update()` 在 render pipeline 之前完成视锥 compaction。Depth prepass 的
+attachment 只在 `BasicRenderPipeline.render()` 内部存在，SAO 和 Forward 也由同一 pipeline
+继续消费。首个实现必须在 Depth pass 结束后、SAO/Forward 开始前编码 compute，不能让
+Surface example 取得 `GPUCommandEncoder` 或主动提交 command buffer。
+
+| 调度方案 | 生命周期 | 对现有 API 的影响 | 决策 |
+| --- | --- | --- | --- |
+| `BasicRenderPipeline` 内部 after-depth consumer | 与 camera pipeline 同生共死；只在真实 Depth pass 后调用 | 只增加 `_` 前缀的中立内部订阅契约 | 第零阶段采用 |
+| `Script.onAfterDepthPrepass` | 把特定渲染阶段暴露为所有用户可覆写的公开生命周期 | public API 面过大，且 WebGL2 无对应计算能力 | 不采用 |
+| Surface example 直接 flush/取得 native encoder | 生命周期由 demo 猜测 | 绕过 RHI 与 pass ownership | 禁止 |
+
+第一版不直接构建完整 mip chain，而构建一个保守的屏幕 tile far-depth buffer：
+
+| 深度结构 | dispatch/资源 | 保守性 | 第零阶段用途 |
+| --- | --- | --- | --- |
+| 完整 mip pyramid | 每级都需要独立 source/destination view 和尺寸参数；当前 compute 尚无 uniform/texture view 契约 | 可按投影 rect 选择 mip | 留到 tile 数据与遮挡判定正确后 |
+| 单层 far-depth tile | 每个 tile 一个 workgroup；输出一个 `uint` depth bit pattern | tile 外扩只会提高 far depth，使实例更可能保留 | 采用，先验证同帧 depth 数据 |
+| 固定点位 depth probe | 成本低 | 无法代表实例投影 rect，不能用于遮挡判定 | 只用于测试，不进入 runtime |
+
+tile 边长从实际 `ComputePass.workgroupSize[0]` 取平方根上取整。每个 local invocation 遍历
+tile 内等步长的像素，以 shared `atomicMax` 合并 `[0, 1]` 正深度的 IEEE 754 `uint` bit
+pattern；dispatch 使用 `ceil(width / tileEdge) × ceil(height / tileEdge)`，每个维度继续由
+RHI 对照 `maxWorkgroupsPerDimension`。不写 Grasslands 分辨率、实例数或桌面 GPU 专用阈值。
+
+第零阶段按以下顺序独立验收：
+
+1. ShaderLab compiler 为 shared/storage scalar `int`/`uint` 生成合法 WGSL `atomicMax`，
+   native WebGPU 执行后读回真实最大值。
+2. compute 编译路径对 `camera_DepthTexture` 使用与 vertex/fragment 相同的
+   `lowerWGSLDepthTextures`，reflection 必须变为 `texture_depth_2d`。
+3. after-depth consumer 只在成功完成 Depth prepass 后执行；无 prepass、consumer 移除和
+   pipeline destroy 后不得回调。
+4. far-depth tile 首先只输出诊断 buffer。用已知遮挡几何读取若干 tile，并与同一 depth
+   attachment 的预期近/远关系核对；此时不切换 renderer buffer、不改 indirect count，也不
+   报告 Grasslands 性能提升。
+5. 只有 tile 正确后才新增独立 occlusion output atlas，把现有视锥 survivor 作为输入。关闭
+   occlusion 必须恢复现有 atlas 与 indirect records，避免通过 copy 或清零伪造基线。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
