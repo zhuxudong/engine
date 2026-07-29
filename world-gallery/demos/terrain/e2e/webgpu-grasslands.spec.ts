@@ -216,7 +216,7 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
     body: Buffer.from(JSON.stringify(computeCounts, null, 2)),
     contentType: "application/json"
   });
-  expect(computeCounts.createComputePipeline).toBe(7);
+  expect(computeCounts.createComputePipeline).toBe(4);
   expect(computeCounts.dispatchWorkgroups).toBeGreaterThan(0);
   expect(computeCounts.dispatchedWorkgroups).toBeGreaterThan(computeCounts.dispatchWorkgroups);
   expect(computeCounts.beginComputePass).toBeLessThan(computeCounts.dispatchWorkgroups);
