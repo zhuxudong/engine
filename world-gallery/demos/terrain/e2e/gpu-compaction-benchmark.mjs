@@ -5,6 +5,11 @@ const variants = {
   gpuCompaction: process.env.CANDIDATE_URL ?? "http://127.0.0.1:5187/demos/terrain/grasslands/?backend=webgpu"
 };
 const churnLods = process.env.BENCHMARK_LOD_CHURN === "1";
+const compactOutput = process.env.BENCHMARK_COMPACT === "1";
+const disabledCategories = (process.env.BENCHMARK_DISABLED_CATEGORIES ?? "")
+  .split(",")
+  .map((category) => category.trim())
+  .filter(Boolean);
 const executablePath = process.env.BENCHMARK_BROWSER_EXECUTABLE ?? chromium.executablePath();
 const labels = {
   beforeCompute: process.env.BASELINE_LABEL ?? "beforeCompute",
@@ -46,6 +51,15 @@ for (let round = 0; round < orders.length; round++) {
     await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
     const readyMs = performance.now() - navigationStartedAt;
     await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
+    if (disabledCategories.length > 0) {
+      await page.evaluate(
+        (categories) =>
+          window.grasslandsDebug.setSurface({
+            enabled: Object.fromEntries(categories.map((category) => [category, false]))
+          }),
+        disabledCategories
+      );
+    }
     await page.waitForFunction(() => window.grasslandsDebug.inspectSurface().transitioningRanges === 0);
     await page.waitForTimeout(1_800);
     const frameTimes = await page.evaluate(
@@ -100,4 +114,32 @@ for (let round = 0; round < orders.length; round++) {
 }
 
 await browser.close();
-console.log(JSON.stringify({ browser: { executablePath, version: browserVersion }, churnLods, results }, null, 2));
+const outputResults = compactOutput
+  ? results.map(({ round, label, fps, p50, p95, surface, diagnostics }) => ({
+      round,
+      label,
+      fps,
+      p50,
+      p95,
+      surface: {
+        visibleRendererBatches: surface.visibleRendererBatches,
+        indirectRendererBatches: surface.indirectRendererBatches,
+        visibleInstances: surface.visibleInstances,
+        visibleCategoryCounts: surface.visibleCategoryCounts,
+        lodCounts: surface.lodCounts
+      },
+      diagnostics
+    }))
+  : results;
+console.log(
+  JSON.stringify(
+    {
+      browser: { executablePath, version: browserVersion },
+      churnLods,
+      disabledCategories,
+      results: outputResults
+    },
+    null,
+    2
+  )
+);

@@ -3,6 +3,11 @@ import { chromium } from "@playwright/test";
 const url = process.env.PROBE_URL ?? "http://127.0.0.1:5187/demos/terrain/grasslands/?backend=webgpu";
 const screenshotPath = process.env.PROBE_SCREENSHOT;
 const requestGPUTiming = new URL(url).searchParams.get("gpuTiming") === "1";
+const compactOutput = process.env.PROBE_COMPACT === "1";
+const disabledCategories = (process.env.PROBE_DISABLED_CATEGORIES ?? "")
+  .split(",")
+  .map((category) => category.trim())
+  .filter(Boolean);
 const executablePath = process.env.PROBE_BROWSER_EXECUTABLE ?? chromium.executablePath();
 const browser = await chromium.launch({
   executablePath,
@@ -50,12 +55,15 @@ await page.addInitScript(() => {
     finishRenderBundle: 0,
     writeBuffer: 0,
     writeBufferBytes: 0,
+    bufferWrites: {},
     renderPasses: 0,
     commands: Object.fromEntries(commandNames.map((name) => [name, 0])),
     bundleCommands: Object.fromEntries(commandNames.map((name) => [name, 0])),
     byPass: {}
   });
   let counts = createEmptyCounts();
+  const bufferIds = new WeakMap();
+  let nextBufferId = 1;
   const getPassCounts = (label) => {
     counts.byPass[label] ??= {
       renderPasses: 0,
@@ -124,7 +132,24 @@ await page.addInitScript(() => {
     const sourceByteLength = data.byteLength;
     const bytesPerElement = data.BYTES_PER_ELEMENT ?? 1;
     const sourceOffset = (dataOffset ?? 0) * bytesPerElement;
-    counts.writeBufferBytes += size === undefined ? sourceByteLength - sourceOffset : size * bytesPerElement;
+    const byteLength = size === undefined ? sourceByteLength - sourceOffset : size * bytesPerElement;
+    counts.writeBufferBytes += byteLength;
+    let bufferId = bufferIds.get(buffer);
+    if (bufferId === undefined) {
+      bufferId = nextBufferId++;
+      bufferIds.set(buffer, bufferId);
+    }
+    const key = `${bufferId}:${buffer.label || "unlabeled"}`;
+    const bufferWrite = (counts.bufferWrites[key] ??= {
+      calls: 0,
+      bytes: 0,
+      minOffset: bufferOffset,
+      maxEnd: bufferOffset
+    });
+    bufferWrite.calls++;
+    bufferWrite.bytes += byteLength;
+    bufferWrite.minOffset = Math.min(bufferWrite.minOffset, bufferOffset);
+    bufferWrite.maxEnd = Math.max(bufferWrite.maxEnd, bufferOffset + byteLength);
     return writeBuffer.call(this, buffer, bufferOffset, data, dataOffset, size);
   };
 
@@ -150,6 +175,15 @@ await page.addInitScript(() => {
 await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
 await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
 await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
+if (disabledCategories.length > 0) {
+  await page.evaluate(
+    (categories) =>
+      window.grasslandsDebug.setSurface({
+        enabled: Object.fromEntries(categories.map((category) => [category, false]))
+      }),
+    disabledCategories
+  );
+}
 await page.waitForFunction(() => window.grasslandsDebug.inspectSurface().transitioningRanges === 0);
 await page.waitForTimeout(1_800);
 let gpuTiming = null;
@@ -197,44 +231,82 @@ const byPassPerSubmission = Object.fromEntries(
 const selectedPasses = ["shadow", "depth-prepass", "forward", "grasslands-exposure", "post-process-uber", "final-srgb"];
 const selectPassCounts = (byPass) =>
   Object.fromEntries(selectedPasses.filter((label) => byPass[label]).map((label) => [label, byPass[label]]));
+const summarizeBufferWrites = (bufferWrites, submissions) => {
+  const writes = Object.entries(bufferWrites);
+  const perSubmission = Math.max(1, submissions);
+  return {
+    targetBuffers: writes.length,
+    calls: writes.reduce((sum, [, write]) => sum + write.calls, 0) / perSubmission,
+    bytes: writes.reduce((sum, [, write]) => sum + write.bytes, 0) / perSubmission,
+    coalescedCalls: writes.length,
+    coalescedBytes: writes.reduce((sum, [, write]) => sum + write.maxEnd - write.minOffset, 0),
+    hottest: writes
+      .sort(([, left], [, right]) => right.calls - left.calls)
+      .slice(0, 12)
+      .map(([buffer, write]) => ({ buffer, ...write }))
+  };
+};
 if (screenshotPath) {
   await page.locator("#canvas").screenshot({ path: screenshotPath });
 }
+const surface = await page.evaluate(() => window.grasslandsDebug.inspectSurface());
+const report = {
+  browser: { executablePath, version: browser.version() },
+  url,
+  disabledCategories,
+  frame: {
+    samples: frameTimes.length,
+    fps: (frameTimes.length * 1000) / totalDuration,
+    p50: sorted[Math.floor(sorted.length * 0.5)],
+    p95: sorted[Math.floor(sorted.length * 0.95)]
+  },
+  surface,
+  gpuTiming,
+  screenshotPath: screenshotPath ?? null,
+  warmup: {
+    ...warmupCounts,
+    bufferWrites: summarizeBufferWrites(warmupCounts.bufferWrites, warmupCounts.submissions),
+    byPass: selectPassCounts(warmupCounts.byPass)
+  },
+  totals: {
+    ...counts,
+    bufferWrites: summarizeBufferWrites(counts.bufferWrites, counts.submissions),
+    byPass: selectPassCounts(counts.byPass)
+  },
+  perSubmission: {
+    createRenderPipeline: counts.createRenderPipeline / counts.submissions,
+    createBindGroup: counts.createBindGroup / counts.submissions,
+    createRenderBundleEncoder: counts.createRenderBundleEncoder / counts.submissions,
+    finishRenderBundle: counts.finishRenderBundle / counts.submissions,
+    writeBuffer: counts.writeBuffer / counts.submissions,
+    writeBufferBytes: counts.writeBufferBytes / counts.submissions,
+    renderPasses: counts.renderPasses / counts.submissions,
+    commands: perSubmission,
+    byPass: byPassPerSubmission
+  },
+  diagnostics
+};
 console.log(
   JSON.stringify(
-    {
-      browser: { executablePath, version: browser.version() },
-      url,
-      frame: {
-        samples: frameTimes.length,
-        fps: (frameTimes.length * 1000) / totalDuration,
-        p50: sorted[Math.floor(sorted.length * 0.5)],
-        p95: sorted[Math.floor(sorted.length * 0.95)]
-      },
-      surface: await page.evaluate(() => window.grasslandsDebug.inspectSurface()),
-      gpuTiming,
-      screenshotPath: screenshotPath ?? null,
-      warmup: {
-        ...warmupCounts,
-        byPass: selectPassCounts(warmupCounts.byPass)
-      },
-      totals: {
-        ...counts,
-        byPass: selectPassCounts(counts.byPass)
-      },
-      perSubmission: {
-        createRenderPipeline: counts.createRenderPipeline / counts.submissions,
-        createBindGroup: counts.createBindGroup / counts.submissions,
-        createRenderBundleEncoder: counts.createRenderBundleEncoder / counts.submissions,
-        finishRenderBundle: counts.finishRenderBundle / counts.submissions,
-        writeBuffer: counts.writeBuffer / counts.submissions,
-        writeBufferBytes: counts.writeBufferBytes / counts.submissions,
-        renderPasses: counts.renderPasses / counts.submissions,
-        commands: perSubmission,
-        byPass: byPassPerSubmission
-      },
-      diagnostics
-    },
+    compactOutput
+      ? {
+          browser: report.browser,
+          url: report.url,
+          disabledCategories: report.disabledCategories,
+          frame: report.frame,
+          surface: {
+            visibleRendererBatches: surface.visibleRendererBatches,
+            indirectRendererBatches: surface.indirectRendererBatches,
+            visibleInstances: surface.visibleInstances,
+            visibleCategoryCounts: surface.visibleCategoryCounts,
+            lodCounts: surface.lodCounts
+          },
+          gpuTiming: report.gpuTiming,
+          bufferWrites: report.totals.bufferWrites,
+          perSubmission: report.perSubmission,
+          diagnostics: report.diagnostics
+        }
+      : report,
     null,
     2
   )
