@@ -1386,6 +1386,41 @@ format 不改变 ShaderLab attribute 类型或 public renderer/material API。
    稳定退化超过 2%；未通过则撤销 Surface consumer，只保留有独立测试的中立 RHI format 与
    ShaderLab codegen 能力。
 
+#### 实验检查点：Surface consumer 未保留
+
+实验把 WebGPU finite static 的 Forward 与四级 Shadow output 从 64-byte 改为 40-byte，
+source atlas 仍为 64-byte。按既有显式分配量折算，Forward output 预算可从约 18.08 MiB 降到
+11.30 MiB，Shadow output 从约 2.27 MiB 降到 1.42 MiB，二者均减少 37.5%；source atlas
+17.77 MiB 不变。
+
+首次真实 Grasslands 启动暴露了 ShaderLab WGSL codegen 的通用缺陷：标量 swizzle 传入
+`floatBitsToUint` 时，generic return type 退化为 `TypeAny`，产物包含非法
+`bitcast<3000>`。修复改为按 GLSL bit reinterpretation builtin 和输入向量宽度推导 WGSL
+target；修复后 Grasslands WebGPU E2E 1/1 通过，compute dispatch、GPU timing、LOD、截图
+像素门和 diagnostic 均恢复。
+
+固定 1024×576 hero camera、关闭 animation/wind/architecture/cloud/post-process 后，独立
+baseline/candidate 页面各执行两轮、每轮 10 组 enable/disable 配对。下表为重复轮的 category
+增量；`paired improvement` 为 baseline 减 candidate，正数表示候选更快。
+
+| workload / pass | baseline 中位数 | candidate 中位数 | paired improvement 中位数与 IQR | 正样本 |
+| --- | ---: | ---: | ---: | ---: |
+| grass / Forward | 1.526 ms | 2.093 ms | -0.032 ms，-1.007～+0.678 | 10/20 |
+| tree / Shadow | 1.385 ms | 1.145 ms | -0.065 ms，-0.650～+0.511 | 9/20 |
+| rock / Shadow | 1.172 ms | 0.825 ms | -0.016 ms，-0.502～+0.540 | 9/20 |
+| all / total | 5.335 ms | 3.962 ms | +0.608 ms，-0.937～+3.021 | 13/20 |
+| all / Forward | 3.958 ms | 3.077 ms | +0.763 ms，-0.891～+2.308 | 13/20 |
+| all / Shadow | 2.165 ms | 1.860 ms | +0.288 ms，-0.569～+0.835 | 15/20 |
+
+第一轮配对聚合曾显示 all/total -31.6%、all/Forward -30.7%，但重复轮中 grass 方向反转，
+且所有目标 pass 的 improvement IQR 都跨 0，因此不能形成稳定性能结论。
+
+静态截图肉眼一致；像素审计在默认 0.1 color threshold 下差 979 像素（0.1660%），开启
+antialias filtering 后为 926 像素（0.1570%）；差异集中在量化后植被和岩石边缘。性能门未
+通过，所以已撤销 40-byte Surface consumer。中立 `Float16Vector2/Float16Vector4` RHI
+format、`packHalf2x16`/`unpackHalf2x16` WGSL lowering 和 bit reinterpretation 修复保留，
+不改变当前 Grasslands 64-byte output。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
