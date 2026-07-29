@@ -32,6 +32,14 @@ export interface ComputeCapabilities {
 }
 
 /**
+ * Backend-neutral shader arithmetic capabilities.
+ */
+export interface ShaderCapabilities {
+  /** Whether shaders can use native 16-bit floating-point arithmetic. */
+  readonly float16: boolean;
+}
+
+/**
  * Backend-neutral native pass kind reported by GPU timestamp profiling.
  */
 export type GPUTimingPassKind = "render" | "compute";
@@ -93,6 +101,8 @@ export interface IHardwareRenderer {
   readonly maxUniformBlockSize: number;
   /** Compute support and device limits. */
   readonly computeCapabilities: ComputeCapabilities;
+  /** Shader arithmetic features enabled on the active device. */
+  readonly shaderCapabilities: ShaderCapabilities;
   /** Optional GPU timestamp collection state. */
   readonly gpuTiming: GPUTiming;
   /** Whether eligible single-sample depth prepasses are reused by the forward pass. */

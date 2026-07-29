@@ -6,7 +6,8 @@ export type {
   GPUTimingPassSample,
   GPUTimingSample,
   IHardwareRenderer,
-  RenderTargetOrigin
+  RenderTargetOrigin,
+  ShaderCapabilities
 } from "./IHardwareRenderer";
 export type { IPlatformComputeProgram } from "./IPlatformComputeProgram";
 export type { IPlatformPrimitive } from "./IPlatformPrimitive";

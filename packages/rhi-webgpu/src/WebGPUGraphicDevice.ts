@@ -29,7 +29,8 @@ import type {
   IPlatformShaderProgram,
   IShaderReflection,
   IShaderResourceReflection,
-  IShaderStorageBufferReflection
+  IShaderStorageBufferReflection,
+  ShaderCapabilities
 } from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { WebGPUBuffer } from "./WebGPUBuffer";
@@ -103,6 +104,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly maxUniformBlockSize: number;
   /** Compute support and native device limits. */
   readonly computeCapabilities: ComputeCapabilities;
+  /** Shader arithmetic features enabled on the WebGPU device. */
+  readonly shaderCapabilities: ShaderCapabilities;
   /** Adapter description exposed for diagnostics. */
   readonly renderer: string;
   /** Optional GPU timestamp collection state. */
@@ -204,6 +207,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
         Math.min(64, device.limits.maxComputeWorkgroupSizeX, device.limits.maxComputeInvocationsPerWorkgroup)
       )
     };
+    this.shaderCapabilities = {
+      float16: device.features.has("shader-f16")
+    };
     this.renderer = adapter.info?.description || adapter.info?.device || "WebGPU";
     context.configure({
       device,
@@ -239,6 +245,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
 
     const preferredFeatures: GPUFeatureName[] = [
+      "shader-f16",
       "float32-filterable",
       "float32-blendable",
       "rg11b10ufloat-renderable",

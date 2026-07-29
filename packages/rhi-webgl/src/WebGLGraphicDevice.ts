@@ -31,7 +31,8 @@ import type {
   IHardwareRenderer,
   IPlatformComputeProgram,
   IPlatformPrimitive,
-  IPlatformShaderProgram
+  IPlatformShaderProgram,
+  ShaderCapabilities
 } from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { GLBuffer } from "./GLBuffer";
@@ -112,6 +113,10 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     maxStorageBufferBindingSize: 0,
     maxStorageBuffersPerStage: 0,
     recommendedWorkgroupSizeX: 1
+  };
+  /** WebGL shaders use the existing GLSL precision path rather than native WGSL f16. */
+  readonly shaderCapabilities: ShaderCapabilities = {
+    float16: false
   };
   /** Timestamp collection is not implemented by the WebGL backend. */
   readonly gpuTiming: GPUTiming = {

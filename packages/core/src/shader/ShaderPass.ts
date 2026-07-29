@@ -209,6 +209,9 @@ export class ShaderPass extends ShaderPart {
       ["GRAPHICS_API_WEBGL2", ""],
       ["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", renderer.computeCapabilities.recommendedWorkgroupSizeX.toString()]
     ]);
+    if (renderer.shaderCapabilities.float16) {
+      macros.set("GRAPHICS_FEATURE_SHADER_F16", "");
+    }
     const discoveredMacros = new Map<string, string>();
     ShaderMacroProcessor.evaluate(target.computeShaderInstructions, macros, discoveredMacros);
     const macroSeed = ShaderPass._createWGSLMacroSeed(macros, discoveredMacros, target.reflection);
@@ -270,6 +273,9 @@ export class ShaderPass extends ShaderPart {
     if (isWebGPU) {
       // Existing built-in shader branches use this as a modern integer/texture capability gate.
       shaderMacroList.push(ShaderMacro.getByName("GRAPHICS_API_WEBGL2"));
+    }
+    if (engine._hardwareRenderer.shaderCapabilities.float16) {
+      shaderMacroList.push(ShaderMacro.getByName("GRAPHICS_FEATURE_SHADER_F16"));
     }
     if (isWebGPU || engine._hardwareRenderer.canIUse(GLCapabilityType.shaderTextureLod)) {
       shaderMacroList.push(ShaderMacro.getByName("HAS_TEX_LOD"));
