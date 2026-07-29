@@ -1990,6 +1990,77 @@ category ablation 的变化接近采样噪声，不能覆盖完整 workload 的�
 已撤销；native redundancy probe 保留。这个检查点证明 native command 数量减少本身不是
 Grasslands 移动端性能提升证据。
 
+### Surface 视锥细筛 compute compaction 设计
+
+#### 当前数据边界
+
+finite Surface 的 CPU 先用扩张后的 cell AABB 做 camera-frustum 相交测试，再把整个可见 range
+交给 shared compaction atlas。现有 `FineCull` 只对跨相机距离边界的 range 做逐实例球体距离
+测试；与视锥相交但没有完全被视锥包含的 cell，内部视锥外实例仍进入 Forward instance stream。
+
+probe 在固定 Grasslands 页面读取 native `drawIndexedIndirect` 实际使用的 20-byte records。
+通过逐 category 关闭页面确定六个 active records 的归属：
+
+| category | indirect records | GPU survivor count |
+| --- | ---: | ---: |
+| grass | 3 | 52,068 |
+| flower | 2 | 8,506 |
+| tree | 1 | 3,898 |
+| 合计 | 6 | 64,472 |
+
+这些 record 全部属于现有 one-LOD、无 LOD crossfade、无 shadow caster 的 fine-cull 闭包。CPU
+inspector 同帧仍按 coarse range 报告 grass 136,466、flower 14,234、tree 14,878；它不是 GPU
+survivor count，不能再用来代替 indirect arguments 的真实值。
+
+#### 固定上游源码事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas GSplat | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | CPU 从 frustum 写入 6 个 `vec4(normal, distance)`；WGSL compute 对 world bounding sphere 逐 plane 测试，`dot(normal, center) + distance <= -radius` 时拒绝 |
+| Unity Core GPUDriven | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `InstanceCuller` 先用 world AABB 计算 frustum split visibility mask，再在仍可见时执行 receiver-sphere 和 occlusion 测试；camera 与 light view 使用独立 culling view 语义 |
+| webgpu-samples | `4181da1b8d4e3d4fe5ea52fc1150fe5200b87515` | `bundleCulling` 元数据明确描述 frustum culling 与 indirect instanced draw；固定本地 sample 只链接外部实现，没有可直接复用的 shader 源码 |
+
+上游结构支持“coarse bounds 后再做细粒度 frustum compaction”，但没有证据允许把 camera frustum
+复用于 shadow caster。本阶段仍限定在不投影的既有 fine-cull prototype。
+
+#### 方案比较
+
+| 方案 | GPU 工作 | 正确性边界 | 决策 |
+| --- | --- | --- | --- |
+| vertex shader 把视锥外实例移出 clip space | 所有实例仍执行 vertex shader | 不减少草地 vertex/attribute 带宽 | 不采用 |
+| 引入 depth pyramid 与上一帧 Hi-Z occlusion | 可继续剔除遮挡实例 | 新增深度历史、重投影、迟滞与 false-negative 合同 | 后续独立阶段 |
+| 扩展现有 fine-cull compute，range 相交时执行 sphere-frustum test | 只增加 6 个 plane dot tests，并减少 output/Forward 实例 | 保持 coarse AABB 与 conservative sphere 两级边界 | 候选 |
+
+#### 候选契约
+
+1. `SurfaceWorld` 继续以现有 `BoundingFrustum` 判定 range：`Disjoint` 输出 0，`Contains` 且不跨
+   距离边界时直接 copy，`Intersects` 或跨距离边界时进入同一个 fine-cull pass。
+2. compaction parameter buffer 保存 camera/distance 和六个归一化 world-space plane。只有 camera
+   位置、距离倍率、frustum enable 或 plane 数值变化时上传并 invalidates fine-cull batch。
+3. 逐实例只有同时通过现有 distance sphere 与六个 frustum plane 才参与 workgroup-local
+   atomic compaction。sphere center 使用 instance placement；半径使用已变换 LOD bounds、
+   authored instance scale 和 runtime category scale，必须 conservative。
+4. 只改变 `isSurfaceFineCullingEligible` 已允许的 one-LOD、无 crossfade、全部 renderer
+   `castShadows=false` prototype。tree/rock caster、Shadow pass、LOD transition、WebGL2、
+   streamed/coverage Surface、public API 和 ShaderLab 用户源码均不变。
+5. compute 仍由同一 ShaderLab 生成 WGSL，不新增 raw WGSL。indirect record 数、draw 顺序和
+   buffer ownership 不变，只允许 instance count 下降。
+
+#### 验收与性能门
+
+- package/terrain typecheck、module build 和预编译 `.wgslc` 必须通过；产物中必须存在六平面
+  sphere test，不接受只改 CPU 状态。
+- native probe 分别记录固定 hero、左右转向与移动相机的六个 indirect instance counts。
+  candidate 不得增加任何 record，至少一个稳定视角必须减少 survivor；关闭 camera frustum 后
+  必须恢复仅距离筛选的结果。
+- 父提交与候选固定相机截图执行逐像素审计；可见像素、category/LOD、Shadow、compute、
+  backend reload 和 diagnostic 必须通过。视锥边缘用最大 runtime scale 和 wind 状态做压力测试。
+- 独立父提交/候选按 `all/no_grass/no_flower/no_tree` 轮换 10 个区块，每个区块读取 7 个 one-shot
+  GPU samples。完整场景 Forward 配对 improvement 中位数必须为正且 IQR 不跨 0；稳态 frame
+  P95 不得稳定退化超过 2%。category ablation 只用于归因，不能覆盖完整 workload 失败。
+- 若 survivor 没有下降、出现可见像素缺失或性能门失败，撤销 Surface consumer，只保留
+  indirect readback probe 与客观检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
