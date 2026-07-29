@@ -159,6 +159,7 @@ await page.addInitScript(() => {
           bufferLabel: descriptor?.label ?? target.buffer.label ?? "unlabeled",
           bufferSize: descriptor?.size ?? null,
           offset: target.offset,
+          viewport: target.viewport,
           indexCount: words[wordOffset],
           instanceCount: words[wordOffset + 1],
           firstIndex: words[wordOffset + 2],
@@ -258,6 +259,7 @@ await page.addInitScript(() => {
     const label = descriptor?.label || "unlabeled";
     const pass = beginRenderPass.call(this, descriptor);
     const stateCommandSignatures = new Map();
+    let activeViewport = null;
     counts.renderPasses++;
     getPassCounts(label).renderPasses++;
     for (const name of commandNames) {
@@ -265,6 +267,9 @@ await page.addInitScript(() => {
       if (typeof command !== "function") continue;
       pass[name] = (...args) => {
         incrementCommand(label, name, args);
+        if (name === "setViewport") {
+          activeViewport = args.map(Number);
+        }
         if (name === "drawIndexedIndirect") {
           let bufferId = bufferIds.get(args[0]);
           if (bufferId === undefined) {
@@ -276,7 +281,8 @@ await page.addInitScript(() => {
             pass: label,
             buffer: args[0],
             bufferId,
-            offset
+            offset,
+            viewport: activeViewport
           });
         }
         if (stateCommandKeys.has(name)) {
@@ -313,6 +319,12 @@ await page.evaluate(
   },
   { deterministic: deterministicScene, disableShadows, cameraPose }
 );
+await page.evaluate(
+  () =>
+    new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    })
+);
 if (disabledCategories.length > 0) {
   await page.evaluate(
     (categories) =>
@@ -320,6 +332,12 @@ if (disabledCategories.length > 0) {
         enabled: Object.fromEntries(categories.map((category) => [category, false]))
       }),
     disabledCategories
+  );
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      })
   );
 }
 await page.waitForFunction(() => window.grasslandsDebug.inspectSurface().transitioningRanges === 0);

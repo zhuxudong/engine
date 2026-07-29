@@ -244,16 +244,25 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   await page.waitForTimeout(250);
   expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(scaledDispatchCount);
 
+  await page.evaluate(() => window.grasslandsDebug!.setSurface({ enabled: { rock: false } }));
+  await expect
+    .poll(() => page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups))
+    .toBeGreaterThan(scaledDispatchCount);
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+  const rockDisabledDispatchCount = await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups);
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(rockDisabledDispatchCount);
+
   await page.evaluate(
     ({ camera, grassScale }) => {
       window.terrainDebug!.setCamera(camera);
-      window.grasslandsDebug!.setSurface({ scale: { grass: grassScale } });
+      window.grasslandsDebug!.setSurface({ enabled: { rock: true }, scale: { grass: grassScale } });
     },
     { camera: initialCamera, grassScale: initialGrassScale }
   );
   await expect
     .poll(() => page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups))
-    .toBeGreaterThan(scaledDispatchCount);
+    .toBeGreaterThan(rockDisabledDispatchCount);
   await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
 
   await page.waitForTimeout(1_000);
