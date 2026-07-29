@@ -847,6 +847,19 @@ prototype 共 4,132 个实例，使用 20 个材质；其中 15 个材质的 `al
    保持一致；WebGPU 对父提交执行固定相机和连续移动 ABBA。任一画面差异或 WebGPU 整帧没有
    稳定收益时撤销实现，只保留检查点。
 
+#### 实验检查点：不保留
+
+候选只在 `MATERIAL_IS_ALPHA_CUTOFF` 存在时声明 albedo sampler、输出 UV 和执行 alpha
+discard。固定相机截图对父提交的 WebGPU normalized RMSE 为 0.000192，921,600 个像素中
+6 个超过 2% 通道差异；WebGL2 逐像素一致。两个后端的 Surface category、LOD、可见实例与
+renderer batch 计数一致，GPU/page diagnostic 为 0。
+
+WebGPU 固定相机三轮 ABBA 中，候选/父提交中位 FPS 为 35.65/36.82（-3.19%），P50 为
+26.2/25.7 ms，P95 为 40.4/34.5 ms（+17.10%）。六个候选样本中五个低于配对附近的父提交；
+固定场景已经未通过性能门，因此不追加移动或 WebGL2 性能测试来稀释失败结果。现有证据不能
+定位回退来自 shader variant、resource layout 或 GPU 调度中的哪一项，也不能仅凭静态指令
+减少推断实际更快。实现代码全部撤销，仅保留本检查点。
+
 ### Alpha-test vegetation range ordering 设计
 
 #### Grasslands 上限与现状
