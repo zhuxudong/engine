@@ -5,6 +5,7 @@ const screenshotPath = process.env.PROBE_SCREENSHOT;
 const requestGPUTiming = new URL(url).searchParams.get("gpuTiming") === "1";
 const compactOutput = process.env.PROBE_COMPACT === "1";
 const deterministicScene = process.env.PROBE_DETERMINISTIC_SCENE === "1";
+const disableShadows = process.env.PROBE_DISABLE_SHADOWS === "1";
 const disabledCategories = (process.env.PROBE_DISABLED_CATEGORIES ?? "")
   .split(",")
   .map((category) => category.trim())
@@ -183,15 +184,16 @@ await page.addInitScript(() => {
 
 await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
 await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
-await page.evaluate((deterministic) => {
+await page.evaluate(({ deterministic, disableShadows }) => {
   window.grasslandsDebug.setScene({
     animation: false,
+    ...(disableShadows ? { shadows: false } : {}),
     ...(deterministic ? { cloudShadows: false, clouds: false, fog: false, postProcess: false } : {})
   });
   if (deterministic) {
     window.grasslandsDebug.setSurface({ wind: { enabled: false } });
   }
-}, deterministicScene);
+}, { deterministic: deterministicScene, disableShadows });
 if (disabledCategories.length > 0) {
   await page.evaluate(
     (categories) =>
@@ -274,6 +276,7 @@ const report = {
   browser: { executablePath, version: browser.version() },
   url,
   deterministicScene,
+  disableShadows,
   disabledCategories,
   frame: {
     samples: frameTimes.length,
@@ -317,6 +320,7 @@ console.log(
           browser: report.browser,
           url: report.url,
           deterministicScene: report.deterministicScene,
+          disableShadows: report.disableShadows,
           disabledCategories: report.disabledCategories,
           frame: report.frame,
           surface: {
