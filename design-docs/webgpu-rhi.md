@@ -1938,7 +1938,7 @@ cache。
 | --- | --- | --- | --- |
 | `WebGPUShaderProgram` 保存最后 pipeline | shader program | 同一 pass 会在多个 program 间切换；program-local 值不能代表 native pass 的 current pipeline | 不采用 |
 | core 重排 draw 以减少 pipeline transition | render queue | 当前排序已经形成大量相邻等值 pipeline；改变透明、priority、material 与 shadow 顺序超出本实验 | 不采用 |
-| native pass + pipeline identity | `WebGPUGraphicDevice` | 需要在 pass 结束时清空两个引用；未来增加 `executeBundles` 时必须同步 invalidation | 候选 |
+| native pass + pipeline identity | `WebGPUGraphicDevice` | 需要在 pass 结束时清空两个引用；未来增加 `executeBundles` 时必须同步 invalidation | 候选；性能门否决 |
 
 候选新增一个 internal pipeline binding 方法，由 `WebGPUShaderProgram.draw` 调用。方法只比较当前
 `GPURenderPassEncoder` 与 `GPURenderPipeline` identity；新 pass 的第一次调用必定编码，等值
@@ -1955,6 +1955,40 @@ draw 顺序、ShaderLab、WebGL2 和所有 public API 不变。
   LOD transition、compute 和零 diagnostic E2E 必须通过。
 - 独立父提交与候选按 `all/no_grass/no_tree/no_rock` 交替三轮。完整场景 FPS 配对变化中位数
   必须为正、至少两轮同向且 P95 中位数不退化；category ablation 只用于归因。
+
+#### 实验检查点：拒绝 pipeline identity cache
+
+候选严格命中预期的 command 边界：
+
+| 每 submission 命令 | 基线 | 候选 | 差异 |
+| --- | ---: | ---: | ---: |
+| `setPipeline` | 450 | 114 | -74.7% |
+| Shadow `setPipeline` | 323 | 75 | -76.8% |
+| Depth prepass `setPipeline` | 19 | 8 | -57.9% |
+| Forward `setPipeline` | 107 | 30 | -72.0% |
+| Final sRGB `setPipeline` | 1 | 1 | 0% |
+
+`setBindGroup=492`、`setVertexBuffer=2,807`、`setIndexBuffer=449`、`drawIndexed=443` 和
+`drawIndexedIndirect=6` 均不变；可见实例仍为 169,199，六个 indirect renderer batch 和 LOD
+计数 `[165087, 3197, 915]` 均不变，diagnostic 为 0。
+
+候选阶段的 19 个 focused RHI tests、package typecheck、完整 module build 和 Grasslands WebGPU
+E2E 均通过。固定父提交与候选截图的归一化 RGB RMSE 为 0.000209，仅 15 个像素不同。
+
+同一浏览器 context、固定 1280×720 CSS viewport、DPR 2、3 秒采样，按 `B→C / C→B / B→C`
+交替三轮。每轮列为候选相对基线的 FPS 变化：
+
+| workload | 第 1 轮 | 第 2 轮 | 第 3 轮 | 配对变化中位数 | frame P95 中位数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | -5.11% | -0.79% | +0.26% | -0.79% | 17.0 → 17.1 ms |
+| no_grass | -0.33% | +0.65% | +0.62% | +0.62% | 16.7 → 16.7 ms |
+| no_tree | +0.027% | -0.246% | +0.007% | +0.007% | 16.8 → 16.7 ms |
+| no_rock | +0.36% | +0.05% | -0.20% | +0.05% | 16.7 → 16.7 ms |
+
+完整场景只有一轮为正，配对变化中位数为负且 P95 退化，未通过预先定义的保留门槛。
+category ablation 的变化接近采样噪声，不能覆盖完整 workload 的结果。runtime cache 和对应测试
+已撤销；native redundancy probe 保留。这个检查点证明 native command 数量减少本身不是
+Grasslands 移动端性能提升证据。
 
 ### 移动端约束与验收
 
