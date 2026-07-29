@@ -46,6 +46,7 @@ import surfaceShaderSource from "../src/shaders/Surface.shader?raw";
 import terrainShaderSource from "../src/shaders/Terrain.shader?raw";
 import { registerTerrainShaderIncludes } from "../src/shaders/registerTerrainShaderIncludes";
 import { SurfaceWorld } from "../src/surface/SurfaceWorld";
+import { SurfaceDepthTiles, type SurfaceDepthTileSnapshot } from "../src/surface/SurfaceDepthTiles";
 import type { SurfaceRuntimeTuningUpdate } from "../src/surface/SurfaceRuntimeContract";
 import { bindTerrainBackendSelector, createTerrainEngine } from "../src/TerrainEngineBootstrap";
 import { loadGrasslandsArchitecture, type GrasslandsArchitectureSpec } from "./src/GrasslandsArchitecture";
@@ -114,6 +115,8 @@ declare global {
     grasslandsDebug?: {
       readonly ready: true;
       inspectSurface(): ReturnType<SurfaceWorld["inspect"]>;
+      /** Returns conservative same-frame depth-tile diagnostics when the candidate is enabled. */
+      inspectDepthTiles(): SurfaceDepthTileSnapshot | null;
       /** Returns deterministic cloud batches and animation time. */
       inspectClouds(): ReturnType<GrasslandsCloudSystem["inspect"]>;
       /** Returns authored architecture placement and renderer counts. */
@@ -259,6 +262,8 @@ async function boot(): Promise<void> {
 
   setStatus("loading 291,069 deterministic surface instances");
   const surfaceWorld = await SurfaceWorld.create(engine, root.createChild("surface-world"), camera, surfaceManifestUrl);
+  const surfaceDepthTiles =
+    backend === "webgpu" && query.get("surfaceHiZ") === "depth-tiles" ? new SurfaceDepthTiles(engine, camera) : null;
   performancePanel.setSceneMetricsProvider(() => {
     const surface = surfaceWorld.inspect();
     return {
@@ -339,6 +344,7 @@ async function boot(): Promise<void> {
   const grasslandsDebug: NonNullable<Window["grasslandsDebug"]> = {
     ready: true,
     inspectSurface: () => surfaceWorld.inspect(),
+    inspectDepthTiles: () => surfaceDepthTiles?.inspect() ?? null,
     inspectClouds: () => clouds.inspect(),
     inspectArchitecture: () => ({
       placements: architecture.placements,
