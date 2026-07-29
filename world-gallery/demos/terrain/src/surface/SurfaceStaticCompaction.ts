@@ -10,6 +10,8 @@ export const SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE = SURFACE_COMPACTION_INSTA
 export const SURFACE_COMPACTION_INDIRECT_WORD_STRIDE = 5;
 /** @internal Number of uint values in one compaction command. */
 export const SURFACE_COMPACTION_COMMAND_WORD_STRIDE = 4;
+/** @internal Number of vec4 values carrying camera and frustum fine-cull parameters. */
+export const SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT = 8;
 
 const SHADER_SOURCE = `
 Shader "${SHADER_NAME}" {
@@ -86,6 +88,21 @@ Shader "${SHADER_NAME}" {
       buffer vec4 outputInstances[];
       buffer uint fineCullCounters[];
 
+      bool isFineCullSphereInsideFrustum(vec3 center, float radius) {
+        if (fineCullParameters[uint(7)].x < 0.5) {
+          return true;
+        }
+        uint planeIndex = uint(0);
+        while (planeIndex < uint(6)) {
+          vec4 plane = fineCullParameters[planeIndex + uint(1)];
+          if (dot(plane.xyz, center) + plane.w < -radius) {
+            return false;
+          }
+          planeIndex++;
+        }
+        return true;
+      }
+
       bool isFineCullCandidateVisible(vec4 positionMetadata, vec4 instanceScale, vec4 batch) {
         float instanceRadius =
           batch.y *
@@ -93,7 +110,9 @@ Shader "${SHADER_NAME}" {
           batch.z;
         float distanceLimit = batch.x * fineCullParameters[0].w + instanceRadius;
         vec3 delta = positionMetadata.xyz - fineCullParameters[0].xyz;
-        return dot(delta, delta) <= distanceLimit * distanceLimit;
+        return
+          dot(delta, delta) <= distanceLimit * distanceLimit &&
+          isFineCullSphereInsideFrustum(positionMetadata.xyz, instanceRadius);
       }
 
       void fineCullInstances() {

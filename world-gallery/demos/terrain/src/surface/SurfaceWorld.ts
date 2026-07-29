@@ -7,6 +7,8 @@ import {
   BufferMesh,
   BufferUsage,
   Camera,
+  CollisionUtil,
+  ContainmentType,
   Engine,
   Entity,
   GLTFResource,
@@ -617,11 +619,16 @@ export class SurfaceWorld {
     }
     const cameraPosition = this._camera.entity.transform.worldPosition;
     const tangent = Math.tan((this._camera.fieldOfView * Math.PI) / 360);
-    if (this._staticBatchers.length > 0 && this._camera.enableFrustumCulling) {
+    const frustumCullingEnabled = this._staticBatchers.length > 0 && this._camera.enableFrustumCulling;
+    if (frustumCullingEnabled) {
       Matrix.multiply(this._camera.projectionMatrix, this._camera.viewMatrix, this._viewProjection);
       this._frustum.calculateFromMatrix(this._viewProjection);
     }
-    this._staticBatchGroup?.setCullingState(cameraPosition, this._tuning.lod.distanceScale);
+    this._staticBatchGroup?.setCullingState(
+      cameraPosition,
+      this._tuning.lod.distanceScale,
+      frustumCullingEnabled ? this._frustum : null
+    );
     for (const batch of this._batches) {
       const categoryEnabled = this._tuning.enabled[batch.range.category];
       const density = this._tuning.density[batch.range.category];
@@ -646,14 +653,24 @@ export class SurfaceWorld {
         deltaTime,
         this._manifest.lodCrossfadeDuration
       );
+      let frustumContainment = ContainmentType.Contains;
+      let intersectsCameraFrustum = true;
+      if (this._camera.enableFrustumCulling) {
+        if (frustumCullingEnabled) {
+          frustumContainment = CollisionUtil.frustumContainsBox(this._frustum, batch.renderBounds);
+          intersectsCameraFrustum = frustumContainment !== ContainmentType.Disjoint;
+        } else {
+          intersectsCameraFrustum = this._frustum.intersectsBox(batch.renderBounds);
+          frustumContainment = intersectsCameraFrustum ? ContainmentType.Contains : ContainmentType.Disjoint;
+        }
+      }
       const visibleInstanceCount =
-        batch.activeLod >= 0 && (!this._camera.enableFrustumCulling || this._frustum.intersectsBox(batch.renderBounds))
-          ? batch.instanceCount
-          : 0;
+        batch.activeLod >= 0 && intersectsCameraFrustum ? batch.instanceCount : 0;
       const fineCulling =
         visibleInstanceCount > 0 &&
-        centreDistance + batch.placementRadius + batch.fineCullRadius * batch.maxInstanceScale * runtimeScale >
-          batch.prototype.maxDistance * this._tuning.lod.distanceScale;
+        (frustumContainment === ContainmentType.Intersects ||
+          centreDistance + batch.placementRadius + batch.fineCullRadius * batch.maxInstanceScale * runtimeScale >
+            batch.prototype.maxDistance * this._tuning.lod.distanceScale);
       setStaticBatchLodState(batch, visibleInstanceCount, this._manifest.lodCrossfadeDuration, fineCulling);
     }
     this._staticBatchGroup?.flush();

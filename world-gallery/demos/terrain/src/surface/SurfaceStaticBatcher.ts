@@ -1,11 +1,13 @@
 import {
   BoundingBox,
+  BoundingFrustum,
   Buffer,
   BufferBindFlag,
   BufferMesh,
   BufferUsage,
   Engine,
   Entity,
+  FrustumFace,
   GLTFResource,
   MeshRenderer,
   ModelMesh,
@@ -25,7 +27,8 @@ import {
   SURFACE_COMPACTION_COMMAND_WORD_STRIDE,
   SURFACE_COMPACTION_INDIRECT_WORD_STRIDE,
   SURFACE_COMPACTION_INSTANCE_FLOAT_STRIDE,
-  SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE
+  SURFACE_COMPACTION_INSTANCE_VECTOR_STRIDE,
+  SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT
 } from "./SurfaceStaticCompaction";
 import {
   SURFACE_RUNTIME_SCALE_MAX,
@@ -94,13 +97,10 @@ export class SurfaceStaticBatchGroup {
   private readonly _fineCullBatchBuffer: Buffer;
   private readonly _fineCullBatchData: Float32Array;
   private readonly _fineCullParameterBuffer: Buffer;
-  private readonly _fineCullParameters = new Float32Array(4);
+  private readonly _fineCullParameters = new Float32Array(SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT * 4);
   private readonly _compactionPasses: ReturnType<typeof createSurfaceStaticCompactionPasses>;
   private readonly _batchers: readonly SurfaceStaticBatcher[];
-  private _fineCullCameraX = Number.NaN;
-  private _fineCullCameraY = Number.NaN;
-  private _fineCullCameraZ = Number.NaN;
-  private _fineCullDistanceScale = Number.NaN;
+  private _fineCullParametersInitialized = false;
 
   private constructor(
     commandBuffer: Buffer,
@@ -256,7 +256,7 @@ export class SurfaceStaticBatchGroup {
     const fineCullParameterBuffer = new Buffer(
       engine,
       BufferBindFlag.StorageBuffer,
-      new Float32Array(4),
+      new Float32Array(SURFACE_FINE_CULL_PARAMETER_VECTOR_COUNT * 4),
       BufferUsage.Dynamic
     );
     const fineCullCounterBuffer = new Buffer(
@@ -320,28 +320,29 @@ export class SurfaceStaticBatchGroup {
   }
 
   /**
-   * Updates camera-relative fine-culling inputs and invalidates only eligible batches.
+   * Updates camera-relative distance and frustum inputs, then invalidates only eligible batches.
    * @param cameraPosition Current world-space camera position.
    * @param distanceScale Live LOD distance multiplier shared with CPU range selection.
+   * @param frustum Current world-space camera frustum, or null when camera frustum culling is disabled.
    */
-  setCullingState(cameraPosition: Vector3, distanceScale: number): void {
-    if (
-      this._fineCullCameraX === cameraPosition.x &&
-      this._fineCullCameraY === cameraPosition.y &&
-      this._fineCullCameraZ === cameraPosition.z &&
-      this._fineCullDistanceScale === distanceScale
-    ) {
-      return;
-    }
-    this._fineCullCameraX = cameraPosition.x;
-    this._fineCullCameraY = cameraPosition.y;
-    this._fineCullCameraZ = cameraPosition.z;
-    this._fineCullDistanceScale = distanceScale;
+  setCullingState(cameraPosition: Vector3, distanceScale: number, frustum: BoundingFrustum | null): void {
     const parameters = this._fineCullParameters;
-    parameters[0] = cameraPosition.x;
-    parameters[1] = cameraPosition.y;
-    parameters[2] = cameraPosition.z;
-    parameters[3] = distanceScale;
+    let changed = !this._fineCullParametersInitialized;
+    changed = setFineCullParameter(parameters, 0, cameraPosition.x) || changed;
+    changed = setFineCullParameter(parameters, 1, cameraPosition.y) || changed;
+    changed = setFineCullParameter(parameters, 2, cameraPosition.z) || changed;
+    changed = setFineCullParameter(parameters, 3, distanceScale) || changed;
+    for (let planeIndex = 0; planeIndex < 6; planeIndex++) {
+      const plane = frustum?.getPlane(planeIndex as FrustumFace);
+      const offset = 4 + planeIndex * 4;
+      changed = setFineCullParameter(parameters, offset, plane?.normal.x ?? 0) || changed;
+      changed = setFineCullParameter(parameters, offset + 1, plane?.normal.y ?? 0) || changed;
+      changed = setFineCullParameter(parameters, offset + 2, plane?.normal.z ?? 0) || changed;
+      changed = setFineCullParameter(parameters, offset + 3, plane?.distance ?? 0) || changed;
+    }
+    changed = setFineCullParameter(parameters, 28, frustum ? 1 : 0) || changed;
+    if (!changed) return;
+    this._fineCullParametersInitialized = true;
     this._fineCullParameterBuffer.setData(parameters);
     for (const batcher of this._batchers) {
       batcher._invalidateFineCulling();
@@ -854,6 +855,13 @@ function writeFineCullBatchData(output: Float32Array, states: readonly SurfaceFi
 
 function encodeLodFade(lodFade: number): number {
   return Math.round((lodFade * 0.5 + 0.5) * 65535);
+}
+
+function setFineCullParameter(parameters: Float32Array, index: number, value: number): boolean {
+  const rounded = Math.fround(value);
+  if (parameters[index] === rounded) return false;
+  parameters[index] = rounded;
+  return true;
 }
 
 /**
