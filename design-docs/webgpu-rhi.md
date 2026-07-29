@@ -728,17 +728,18 @@ cascade 会重复消费主相机 stream 中的整批索引。
 | 关闭树木/岩石阴影或降低 cascade 数 | 直接省时，但改变 world 资产与画质语义 | 不采用 |
 | 按 cell 恢复 shadow renderer | 引擎现有 bounds culling 可用，但重新引入上千 draw/renderer | 不采用 |
 | Forward stream 不变；四级 cascade 共用一个 shadow output，每级 compute 后立即 draw | shadow-only output 实测只有 595,456 B | 实测淘汰，见下方检查点 |
-| Forward stream 不变；四级 cascade 使用四个长期驻留的 shadow-only slot | 4 份 output 共约 2.27 MiB；每级有独立参数、counter 与 indirect 区域，可缓存静止视图 | 本阶段采用 |
+| Forward stream 不变；四级 cascade 使用四个长期驻留的 shadow-only slot | 4 份 output 共约 2.27 MiB；每级有独立参数、counter 与 indirect 区域，可缓存静止视图 | 实测淘汰，见下方检查点 |
 
-采用方案沿用 Unity Camera/Light 分离 visibility 与 PlayCanvas per-light visible-index/count 的
-源码结论，但只落地 Galacean directional cascade 所需的最小契约：
+实验方案沿用 Unity Camera/Light 分离 visibility 与 PlayCanvas per-light visible-index/count 的
+源码结论，并只落地 Galacean directional cascade 所需的最小契约：
 
-1. `Renderer` 增加 protected camera-view gate 与 shadow-view hook。默认 renderer 行为不变；
+1. `Renderer` 增加 protected camera-view 与 shadow-view preparation hook。默认 renderer 行为不变；
    GPU-driven renderer 在 shadow queue 构建时得到 cascade index，以及引擎已经计算好的最多
    10 个 `ShadowSliceData.cullPlanes`。Engine 创建方式、材质、ShaderLab 和用户渲染 API 不变。
-2. WebGPU Surface Forward renderer 不再投影；同材质、同 ShaderLab、同 LOD 的 shadow-only
-   renderer 使用独立 shadow output/indirect slot，并由 camera-view gate 排除在主相机 queue
-   外。WebGL2 保持原 renderer 路径。
+2. 新建等价 shadow-only renderer/primitive 的版本出现可见差异；最终实验复用原 Forward
+   renderer 及其同一个 `Primitive`，只在 shadow preparation 时重绑 cascade instance-buffer
+   offset 与 indirect-record offset，camera preparation 时恢复 Forward stream。WebGL2 保持
+   原 renderer 路径。
 3. CPU 仍决定 category、density、主相机 max-distance、cell LOD 与 temporal cross-fade。
    shadow command 只消费这些已选择 range 的 source prefix，因此首版不会扩大或缩小当前主
    相机可见集合；它只在每级 cascade 内按实例保守球再裁剪。
@@ -781,12 +782,35 @@ prototype/LOD batch 非零。shadow-only 资源实测如下：
 单 output 与父实现的 ABBA 稳定段约为 31.5 FPS 对 31 FPS，未形成稳定收益；Frame P95 约
 50 ms 对 42.7 ms，compute/render pass 交替增加了尾延迟。更重要的是，同一参数 buffer 在
 四级 cascade 间连续 `writeBuffer` 不提供逐 dispatch 参数快照，因此该原型不满足正确性门。
-实现不以单 output 形态提交，后续代码改为四个长期驻留 slot。
+实现不以单 output 形态提交，后续实验改为四个长期驻留 slot。
+
+#### 四 slot 检查点
+
+新建等价 `BufferMesh`/`Primitive` 的 shadow-only renderer 即使逐 draw 的 shader、uniform、
+texture、render state、vertex layout、indirect argument 与实例 multiset 均相同，截图仍有约
+6.9% 像素超过 2% 通道差异。复用原 Forward renderer 与原 `Primitive`，仅重绑 instance stream
+和 indirect record 后，`hero` 固定相机候选相对父提交的归一化 RGB RMSE 为 0.000338387，
+921,600 个像素中 15 个超过 2% 通道差异；GPU/page diagnostic 为 0。该结果只证明重绑方式的
+渲染等价性，不把未定位的 primitive identity/state 差异解释为具体引擎机制。
+
+性能测试使用 Chromium 147、Metal ANGLE、1280×720 CSS viewport、device scale factor 2；
+关闭建筑、云、云影、雾、后处理、风和场景动画，保留方向光、环境光、天空、四级阴影、地形
+与地表。父提交与候选各交替采样三轮，每轮稳定后采 4.5 秒，Surface 快照均为 169,199 个可见
+实例和 76 个 indirect renderer batch：
+
+| 场景 | 父提交 FPS 中位数 | 候选 FPS 中位数 | FPS 差值 | 父提交 P95 | 候选 P95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hero` 固定相机 | 35.96 | 36.67 | +1.98% | 40.2 ms | 33.9 ms |
+| first-person 连续前移 | 37.55 | 35.05 | -6.68% | 33.5 ms | 50.1 ms |
+
+12 次页面采样的 GPU/page diagnostic 均为 0。固定相机缓存能降低尾延迟，但相机移动会让四级 cascade
+平面每帧变化，四组 `reset → cull → finalize` 无法复用；移动场景的整帧 FPS 与 P95 均退化。
+该实现未通过性能门，代码撤销，仅保留本检查点。再次进入实现前必须先证明能够减少每帧
+per-cascade compute/pass 提交成本，并保持四组参数在同一 command buffer 内的快照语义。
 
 验收分三层：
 
-- Core/RHI：默认 renderer 的 camera/shadow 队列不变；shadow-only renderer 不进入 camera
-  queue；hook 收到每级实际 cull plane count。
+- Core/RHI：默认 renderer 的 camera/shadow 队列不变；hook 收到每级实际 cull plane count。
 - 功能：四级 cascade 各自读回 survivor/indirect count，LOD transition 正负 fade 保留；
   固定相机、移动相机和 wind 最大 inspector 值截图对父提交；GPU/page diagnostic 为 0。
 - 性能：父提交/候选按 settled 与连续相机移动交替采样；同时报告每级 survivor、实际索引工作、
