@@ -2409,6 +2409,41 @@ RHI 对照 `maxWorkgroupsPerDimension`。不写 Grasslands 分辨率、实例数
 `depth-prepass → tile compute → copy compute → forward`，且 GPU/page diagnostic 为 0。
 该切片只证明无原地竞争的输出资源契约，不报告遮挡或性能提升。
 
+固定 `terrain-horizon` 相机下，父路径和独立输出路径读回的 6 个 indexed-indirect record
+逐项一致，instance count 分别为 `3,843 / 2,390 / 1,702 / 22,235 / 2,640 / 1,176`，
+合计 33,986。第二份 atlas 的 capacity 为 286,937，仍由 manifest capacity 推导；6 个
+Forward draw、Surface/category/LOD 快照均不变。候选相对父路径的 normalized RGB RMSE
+为 0.000525，921,600 个像素中 6 个通道差超过 5/255；GPU/page diagnostic 为 0。
+
+#### Hi-Z 第二阶段：保守 world AABB tile test
+
+现有 fine-cull radius 是以 instance origin 为中心、包含 prototype renderer bounds 的 world
+sphere 半径。第二阶段不使用近似屏幕半径，而把该 sphere 的 world-axis AABB 八个角投影到
+与 DepthOnly 相同的 view-projection：
+
+1. radius 继续由 `prototype radius × max(abs(instance scale)) × runtime category scale`
+   计算；不新增 category、距离或屏幕尺寸阈值。
+2. 八个角中任一点越过 near/far clip，或 `w <= 0`，都保留实例。其余角先按 ShaderLab WGSL
+   vertex wrapper 的契约把 OpenGL NDC depth 从 `[-1, 1]` 映射到 WebGPU `[0, 1]`，取最小值
+   作为包围盒 nearest depth。
+3. DepthOnly 对 render target 使用 Y-flipped projection；compute 使用相同 flip 后求屏幕
+   rect。rect 每边外扩一个 physical pixel，再覆盖所有相交 tile；越界和无法形成有限 rect
+   的实例保留。
+4. 扫描 rect 覆盖的全部 tile，取最大的 far depth。只有
+   `nearestDepth > maxCoveredTileFarDepth` 时才拒绝实例；严格比较不加经验 epsilon。tile
+   外扩或 clear-depth `1` 只会使实例更可能保留。
+5. 一个 workgroup 负责一个 eligible batch。所有 invocation 以统一 chunk 循环扫描 input
+   survivor，通过 workgroup shared atomic 分配连续 output slot；最后把同一 survivor count
+   写入该 batch 的全部 indirect records。
+6. pass 的 8 个 storage binding 分别是 input instance、input indirect、command、现有
+   fine-cull batch 参数、camera/tile 参数、far-depth tile、output instance 和 output
+   indirect，等于 WebGPU guaranteed minimum；创建时继续用 active device limits 验证。
+
+已知深度 fixture 必须同时放置一个位于 constant depth 前方和一个位于后方的实例，真实读回
+只保留前方 record。Grasslands 至少一个固定遮挡视角的 6 个 count 必须下降；与
+`copy-survivors` 对比截图不得缺失可见植被轮廓，关闭 `surfaceHiZ=occlusion` 必须恢复原
+count。功能门通过后才进入 GPU timing 与 FPS 保留门。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
