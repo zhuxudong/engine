@@ -864,6 +864,25 @@ WebGPU static atlas 已按 prototype LOD 合并为 indirect instanced draw，但
    GPU/page diagnostic。固定相机截图须保持像素等价，WebGL2 E2E 不变。若整帧无稳定收益或
    移动尾延迟退化，撤销实现并保留实验记录。
 
+#### Range ordering 检查点
+
+实验版本在 `hero` 相机排序 403 个 alpha-test range，first-person 连续前移时排序 355–356 个；
+没有增加 draw、dispatch、buffer 或 shader variant。固定相机截图相对父提交的归一化 RGB RMSE
+为 0.000237292，921,600 个像素中 6 个超过 2% 通道差异；实例、category、LOD 和 indirect
+renderer count 相同。
+
+Chromium 147、Metal ANGLE、1280×720 CSS viewport、device scale factor 2 下，父提交与候选
+各交替采样三轮，每轮稳定后采 4.5 秒：
+
+| 场景 | 父提交 FPS 中位数 | 候选 FPS 中位数 | FPS 差值 | 父提交 P95 | 候选 P95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hero` 固定相机 | 38.67 | 38.15 | -1.33% | 33.6 ms | 34.6 ms |
+| first-person 连续前移 | 38.75 | 38.44 | -0.78% | 33.6 ms | 33.7 ms |
+
+12 次页面采样的 GPU/page diagnostic 均为 0。该设备上的 batch 内 range 顺序没有形成 hidden
+surface removal 收益，排序本身也未改善整帧尾延迟；不能把 category 消融上限归因为可由排序
+消除的 overdraw。实现未通过性能门，代码撤销，仅保留本检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
