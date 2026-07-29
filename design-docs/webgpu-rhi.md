@@ -1276,6 +1276,48 @@ span。
   不把采样帧本身当作正常运行性能；若空闲仍有固定开销或采样结果无法稳定映射到真实 pass，
   撤销实现并保留检查点。
 
+#### 实现检查点（2026-07-29）
+
+实现按上述契约为每个 native pass 分配独立 query pair，并保留 submission span。默认 Grasslands
+构成在 Chromium 147 / Metal 上实测得到 6 个 pass：`shadow`、`depth-prepass`、`forward`、
+`grasslands-exposure`、`post-process-uber`、`final-srgb`。关闭阴影后 `shadow` 消失；关闭
+post-process 后两个 post-process pass 消失；再关闭使用内置 PBR 的建筑后 `depth-prepass`
+消失，而自定义 Terrain/Surface shader 仍没有 DepthOnly pass。该结果来自真实 native pass
+是否被编码，不为满足测试伪造空 pass。
+
+固定 hero 相机、1280×720 CSS、DPR 2，关闭建筑、云、云影、雾、后处理、风和动画，保留方向光、
+阴影、环境光、天空、地形与地表。10 个区块轮换 `all/none/no_grass/no_tree/no_rock` 顺序，
+每个条件取 7 个 one-shot 样本并先求区块内中位数。共 350 个样本，丢样和页面/GPU diagnostic
+均为 0：
+
+| 条件 | submission span 中位数 | Forward 中位数 | Shadow 中位数 |
+| --- | ---: | ---: | ---: |
+| all | 11.411 ms | 10.215 ms | 1.444 ms |
+| none | 5.716 ms | 5.659 ms | 无 native pass |
+| no grass | 8.752 ms | 7.719 ms | 1.446 ms |
+| no tree | 10.532 ms | 9.963 ms | 0.812 ms |
+| no rock | 10.706 ms | 10.112 ms | 0.887 ms |
+
+| 配对差（all - condition） | submission span | Forward | Shadow |
+| --- | ---: | ---: | ---: |
+| none | +5.781 ms，IQR +5.252～+6.053，10/10 正 | +4.641 ms，IQR +4.254～+5.046，10/10 正 | +1.444 ms，IQR +1.443～+1.466，10/10 正 |
+| no grass | +2.355 ms，IQR +2.121～+2.787，10/10 正 | +2.345 ms，IQR +1.963～+2.786，10/10 正 | +0.007 ms，IQR -0.088～+0.023，6/10 正 |
+| no tree | +0.912 ms，IQR +0.780～+1.106，10/10 正 | +0.343 ms，IQR -0.127～+0.976，7/10 正 | +0.633 ms，IQR +0.626～+0.641，10/10 正 |
+| no rock | +0.848 ms，IQR +0.516～+1.473，9/10 正 | +0.341 ms，IQR -0.019～+0.715，6/10 正 | +0.563 ms，IQR +0.557～+0.578，10/10 正 |
+
+数据把此前混合的 category 成本定位到不同 native pass：草的可重复差异集中在 Forward；树和
+岩石的可重复差异集中在 Shadow，二者的 Forward 区间仍跨 0。pass timestamp 可能重叠，不能
+把表中 Forward、Shadow 与 final pass 相加，也不能把 final pass 随前序负载变化的 duration
+解释为独立 blit 成本。
+
+空闲开销用 profiler 关闭/开启但不发请求的 3 组交替页面验证，每页 180 个稳态 rAF frame。
+关闭时 P50 为 8.55/8.40/8.40 ms、P95 为 16.80/16.70/16.71 ms；开启时 P50 均为 8.40 ms、
+P95 为 16.71/16.70/16.80 ms，所有页面 `latestSample` 仍为 null，未出现固定方向变化。
+
+profiler 单测 8/8、13 个 package 类型构建、module 构建、benchmark E2E 3/3 和 Grasslands
+WebGPU E2E 1/1 通过。固定页恢复 169,199 个可见实例、76 个 indirect renderer batch，截图和
+diagnostic 验证没有发现渲染回归。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
