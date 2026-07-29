@@ -2800,6 +2800,81 @@ runtime/precompiled 各 10 轮；每个样本新建 browser context，HTTP cache
 | `Terrain.wgslc` | 167,537 B | 25,344 B |
 | `Surface.wgslc` | 243,084 B | 40,801 B |
 
+### ShaderLab 显式 half 与 WebGPU `shader-f16` 设计
+
+#### 当前边界与候选价值
+
+1. 当前 ShaderLab AST 保留 `highp/mediump/lowp` qualifier，但 `SymbolType` 只记录数据类型与原始
+   type lexeme；WGSL codegen 把 `float/vec*/mat*` 统一映射到 f32。把现有 `mediump` 自动改成 f16
+   会同时改变函数调用、texture 返回值、uniform/storage、stage IO 和 struct layout，不是局部优化。
+2. 当前 WebGPU device 会请求 adapter 支持的压缩纹理、float32 filter/blend 等 optional feature，
+   尚未请求 `shader-f16`；core 也没有后端中立的 shader 算术能力字段。
+3. Grasslands 的稳定大项仍是 grass Forward，既有固定测试中约为 `2.345 ms`；树木和岩石还承担
+   Shadow vertex 成本。f16 可能降低移动 GPU 的 ALU/register 压力，但该收益尚未在 Galacean 或
+   目标移动设备证明，本候选只建立可验证的显式精度通路，不预设稳态 FPS 提升。
+4. WebGPU/WGSL 规范要求：device 创建时必须请求 adapter 暴露的 `shader-f16`，shader 必须在所有
+   declaration 前包含 `enable f16;`；任一条件缺失时使用 f16 都是 validation error。官方 Chrome
+   示例用 feature-dependent alias 让同一 shader artifact 在 f16/f32 间回退。
+
+规范：
+
+- <https://gpuweb.github.io/gpuweb/#dom-gpudevicedescriptor-requiredfeatures>
+- <https://gpuweb.github.io/gpuweb/wgsl/#extension-f16>
+- <https://developer.chrome.com/blog/new-in-webgpu-120>
+
+#### 固定上游源码事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `webgpu-graphics-device.js` 在 adapter 支持时请求 `shader-f16`；`shader-definition-utils.js` 注入 `enable f16;`；`half-types.js` 用 `CAPS_SHADER_F16` 把 `half/half2/half3/half4` 映射到 f16 或 f32 |
+| PlayCanvas consumer | 同上 | downsample/upsample/CAS 与 Gaussian Splat 显式把 texture 或 source 数据 cast 为 `half*`，在输出或高动态范围计算前显式升回 f32；`gsplatCorner.js` 明确因 scale² 溢出而让 covariance 保持 f32 |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | WebGPU constants 暴露 `shader-f16`，WGSL node builder 有 `enableShaderF16()`；对固定源码的调用点检索只得到方法定义，没有得到实际 consumer |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | WebGPU feature enum 暴露 `ShaderF16`；对固定 core 源码的限定检索没有得到显式 f16 shader consumer |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | HLSL shader 大量使用显式 `half/half*`，但这只能证明移动 shader 的精度分区，不证明 WebGPU feature 协商或 WGSL codegen |
+
+#### 方案比较
+
+| 方案 | 用户 shader | 后端边界 | 结论 |
+| --- | --- | --- | --- |
+| 自动把 `mediump` 降为 f16 | 无改动 | 必须推断每个 interface、builtin 和混合表达式的转换 | 拒绝；现有 precision qualifier 不能表达 WGSL 的严格类型和 layout 变化 |
+| Shader 中写 WebGPU 条件与原生 WGSL 类型 | 出现 backend macro、`f16/enable` | capability 泄漏到业务 shader | 拒绝；破坏同一 ShaderLab source 和 codegen 后端职责 |
+| 显式 `half/half2/half3/half4` value type | 只在确认范围安全的局部显式使用 | compiler 生成 GLES mediump 或 WGSL feature alias | 采用；精度选择可审查，feature/fallback 对材质和 example API 隐藏 |
+
+#### 第一切片契约
+
+1. ShaderLab 新增 `half/half2/half3/half4`，语义分析继续复用 `float/vec2/vec3/vec4` 的运算与
+   builtin 规则；第一切片只允许函数局部声明和显式 constructor。uniform、storage、attribute、
+   varying、struct member、函数参数与返回值继续为 f32，使用 half 时 compiler 必须报错，不能
+   静默改变 CPU/GPU layout 或跨函数 ABI。
+2. GLES100/GLES300 codegen 把局部 half 声明输出为 `mediump float/vec*`，把 half constructor
+   输出为 `float/vec*`；WebGL1/WebGL2 默认路径和 shader 用户 API 不增加 capability 分支。
+3. WGSL codegen 只在 shader 实际使用 half 时生成一段 instruction 条件：
+   `GRAPHICS_FEATURE_SHADER_F16` 开启时先输出 `enable f16;` 并把 half aliases 指向 f16，否则
+   aliases 指向 f32。同一 runtime source 和 `.wgslc` 都保留这一个 feature 条件，不生成多 target
+   artifact。
+4. RHI 暴露只读、后端中立的 `ShaderCapabilities.float16`。WebGPU 在 adapter 支持时自动把
+   `shader-f16` 加入 device required features，并以最终 `device.features` 决定该字段；WebGL 为
+   false。ShaderPass 只据此为 render/compute macro seed 增加
+   `GRAPHICS_FEATURE_SHADER_F16`，业务 shader 不读取 backend 类型。
+5. 第一项真实 consumer 只选取值域有界、边界有显式 f32 cast 的 Surface 局部颜色/材质样本；
+   world position、camera/clip-space、depth、terrain height、wind/noise hash、shadow coordinate、
+   uniform/storage 和 stage IO 保持 f32。没有满足该条件的局部就不修改 Surface。
+
+#### 验收与保留门
+
+1. Compiler fixture 必须证明：WebGL1/WebGL2 产物无 `half` 非法 token；WGSL feature-on 含
+   `enable f16` 和真实 f16 alias；feature-off 不含 `enable f16` 且 alias 回退 f32；未使用 half
+   的现有 shader 文本不增加 alias。
+2. 两条 WGSL 都必须用匹配 required feature 的 native `createShaderModule()` 验证；非法的
+   half interface 用例必须确定性失败。runtime 与 `.wgslc` 的 macro 结果必须一致。
+3. WebGL2/WebGPU × runtime/precompiled 四种 Grasslands 页面重跑四相机、category/LOD/instance/
+   batch、截图和零 page/GPU diagnostic 门；native capture 证明 WebGPU 页面实际 device feature
+   与最终 WGSL 分支一致。
+4. consumer 性能以未改 Surface 的父提交为 baseline，轮换 `all/no_grass/no_tree/no_rock`；
+   至少报告 Forward、Shadow、total 的 GPU timestamp median/IQR 和 artifact 体积变化。只有完整
+   场景与归因 workload 的方向稳定、画面门通过才保留 consumer；compiler/RHI 基础能力是否保留
+   由独立功能门决定，不把桌面 Metal 结果写成移动端收益。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
