@@ -1701,10 +1701,10 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 
 | 方案 | Forward | Shadow | 代价 | 决策 |
 | --- | --- | --- | --- | --- |
-| 全部 compute + indirect | GPU copy/fine-cull 后 76 indirect | 四级 GPU per-instance compaction 后 277 indirect | 当前正确基线，移动端驱动需处理 353 个独立 indirect record | 基线 |
+| 全部 compute + indirect | GPU copy/fine-cull 后 76 indirect | 自定义四级 per-instance compaction 后 277 indirect | 移动端驱动需处理 353 个 record，且 Shadow 与 WebGL2 结果不一致 | 错误基线 |
 | 全部 conservative direct | CPU 已知 batch count 直接提交 | Forward stream 在四级 cascade 重复 direct | 不需要 GPU-only count，但草失去已有 distance fine-cull | 不采用 |
-| CPU 已知 count direct，GPU-only count indirect | tree/rock 等 legacy copy 走 direct，grass 等 fine-cull 继续 indirect | 保留现有 per-cascade compaction 与 indirect stream | Forward 减少 70 个 indirect，Shadow 正确性和 277 个 indirect 不变 | 保留 |
-| 上述 Forward hybrid + Shadow conservative direct | 同上 | caster 使用 Forward stream 和 CPU count | 截图显示植被投影缺失；Forward stream 不能替代 cascade stream | 拒绝 |
+| CPU 已知 count direct，GPU-only count indirect | tree/rock 等 legacy copy 走 direct，grass 等 fine-cull 继续 indirect | 保留自定义 per-cascade compaction | Forward 减少 70 个 indirect，但继承错误 Shadow 结果 | 中间检查点 |
+| 上述 Forward hybrid + default direct Shadow | 同上 | caster 使用已 compact 的 Forward stream 和 CPU count | Shadow 由既有 cascade raster clipping；与 WebGL2 shadow effect 等价 | 实验 |
 | 先做跨 mesh/material mega-batch | 合并 geometry/material 后再提交 | 同步重做 shadow geometry | 资产 attributes、alpha clip、材质贴图和 bounds 语义同时变化，无法单独定位 indirect 成本 | 后续独立实验 |
 
 #### 模块与正确性契约
@@ -1716,9 +1716,11 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
    direct draw。
 3. `fineCulling=true` 的 batch count 只能在 compute 后确定，继续绑定 indirect record。当前
    eligibility 要求单 LOD、无 crossfade、所有 renderer 不投射阴影。
-4. Shadow 继续安装现有 per-cascade override provider，保持独立的 cull plane、output instance
-   和 GPU-only count。不能把 camera/LOD 的 Forward stream 当成 cascade caster stream。
-5. 不增加隐藏开关、平台型号名单、magic threshold、RHI public API 或 demo category 特例。
+4. Shadow 不安装自定义 override provider。所有 caster 都是 `fineCulling=false`，使用与
+   Forward 相同的 compact instance stream 和 CPU 已知 count；cascade 仍由 core 的 renderer
+   bounds culling、shadow view-projection clipping、alpha clip 和 depth test 处理。
+5. 删除 shadow counter/output/indirect buffer、provider 和三个专用 compute pass；不留
+   `null` provider、死 shader、隐藏开关、平台型号名单、magic threshold 或 category 特例。
 6. `inspectSurface().indirectRendererBatches` 改为实际绑定 Forward indirect record 的 active
    renderer 数；不能继续把全部 WebGPU static renderer 计为 indirect。
 
@@ -1726,18 +1728,17 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 
 - E2E 覆盖 legacy batch 不绑定 indirect、fine-cull batch 仍绑定、debug count 与 renderer
   active/LOD transition 状态；RHI indirect 路由测试继续通过。
-- 真实命令探针预期 Forward 只剩 GPU fine-cull 的 6 个 indirect，Shadow 保持 277 个
-  indirect，总计 283；direct draw 相应增加 70。不得以减少逻辑计数代替 native prototype
-  观测。
-- 固定 wind/animation/camera 后，用父提交与候选独立页面比对 tree、rock、grass、四级 shadow、
-  category/LOD/count 和截图。移动相机、LOD churn、阴影开关与 category 开关必须无
-  validation、console error、page error 或 device lost。
+- 真实命令探针预期 Forward 只剩 GPU fine-cull 的 6 个 indirect，Shadow 为 0 indirect，
+  总计 6；direct draw 为 445。不得以减少逻辑计数代替 native prototype 观测。
+- 固定 wind/animation/camera 后，必须以 WebGL2 为裁判比对 tree、rock、grass、四级 shadow、
+  category/LOD/count 和截图；旧 WebGPU provider 结果不是正确性基线。移动相机、LOD churn、
+  阴影开关与 category 开关必须无 validation、console error、page error 或 device lost。
 - 性能按 `all/no_grass/no_tree/no_rock` 交替页面报告 frame P50/P95、FPS、Forward/Shadow
   timestamp 和 native direct/indirect count。保留条件是完整场景 frame time 配对改善中位数
   为正且 IQR 不跨 0，P95 不退化；category ablation 只用于归因，不把单类波动包装成收益。
 - 若 hybrid 不成立，整体撤销 Surface consumer 改动，只保留本检查点与通用 indirect 修复。
 
-#### 实验检查点：保留 Forward hybrid
+#### 实验检查点：Forward hybrid
 
 候选只移除 70 个 CPU 已知 count 的 Forward indirect binding，Shadow provider 未变：
 
@@ -1764,9 +1765,35 @@ core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实�
 因此当前证据只能说明完整树木+岩石+草地组合下有收益，不能把收益单独归因给某一 category。
 每 400 ms 切换 LOD distance 的压力测试也没有形成稳定提升，候选只作为稳态提交优化保留。
 
-固定相机并关闭 wind、cloud、cloud shadow、fog 和 post-process 后，候选相对基线的归一化
-RGB RMSE 为 0.027773；同一基线两次独立运行 RMSE 为 0.030204。Shadow conservative direct
-候选则产生肉眼可见的植被投影缺失，已撤销。
+固定相机并关闭 wind、cloud、cloud shadow、fog 和 post-process 后，候选相对父提交的归一化
+RGB RMSE 为 0.027773；同一父提交两次独立运行 RMSE 为 0.030204。这只能证明 Forward
+direct 没有增加旧 WebGPU 基线内的差异，不能证明旧 provider 的 Shadow 结果正确。
+
+#### 正确性更正：Shadow 必须对照 WebGL2
+
+首次比较把旧 WebGPU provider 当作基线，因此把更亮的 default direct Shadow 错判为漏投影。
+同相机、同实例/category/LOD，关闭 wind、cloud、cloud shadow、fog 和 post-process 后，
+以同一 backend 关闭 shadow 的截图衡量 shadow effect：
+
+| shadow 路径 | 开/关 shadow 归一化 RGB RMSE |
+| --- | ---: |
+| WebGL2 default renderer | 0.042248 |
+| WebGPU default direct | 0.041637 |
+| WebGPU custom per-cascade provider | 0.147057 |
+
+跨 backend 结果进一步区分基础着色差异与 Shadow 差异：
+
+| WebGL2 ↔ WebGPU | 归一化 RGB RMSE |
+| --- | ---: |
+| shadow 关闭 | 0.076469 |
+| default direct Shadow | 0.075728 |
+| custom provider Shadow | 0.162960 |
+| 所有 Surface category 关闭、保留场景 Shadow | 0.012522 |
+
+default direct 没有增加 WebGL2/WebGPU 的既有差异；custom provider 把 Surface shadow effect
+放大到 WebGL2 的约 3.5 倍。根因边界落在 `SurfaceStaticShadowViewProvider` 自建的
+per-cascade instance/count stream，而不是通用 Shadow、场景光照或 WebGPU alpha-clip
+codegen。下一候选删除整条 provider/compute 旁路，再做独立性能与 E2E 保留判断。
 
 ### 移动端约束与验收
 
