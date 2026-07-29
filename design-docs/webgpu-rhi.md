@@ -1618,6 +1618,95 @@ Grasslands/移动端一定更快。
   IQR 不跨 0，且 P95 没有超过 2% 的稳定退化才保留 runtime consumer；否则撤销实现并只保留
   本设计与探针检查点。
 
+### Surface hybrid direct/indirect 提交设计
+
+#### 正确 indirect 后的基线
+
+core 到 platform 的 indirect 路由修复后，Grasslands 每次提交真实执行 353 个
+`drawIndexedIndirect`。固定页面的 category ablation 把命令来源拆成：
+
+| category | Forward indirect | Shadow indirect | 合计 |
+| --- | ---: | ---: | ---: |
+| grass | 3 | 0 | 3 |
+| tree | 45 | 174 | 219 |
+| rock | 23 | 91 | 114 |
+| flower、shrub 与其他 Surface | 5 | 12 | 17 |
+| 合计 | 76 | 277 | 353 |
+
+树和岩石只占 18,007 个可见实例，却产生 333/353 个 indirect draw；草有 136,466 个可见实例，
+只产生 3 个 Forward indirect draw 且不投射阴影。因此草的后续目标仍是 vertex/fragment 和实例
+带宽，树和岩石的当前目标是提交与 Shadow。
+
+同一 Chromium 140、ANGLE Metal、1280×720 CSS viewport、DPR 2、hero camera 和
+291,069 个总实例下，按 WebGL2→WebGPU、WebGPU→WebGL2、WebGL2→WebGPU 交替三轮：
+
+| backend | FPS 中位数 | frame P50 中位数 | 可见 renderer batch | 实际 indirect |
+| --- | ---: | ---: | ---: | ---: |
+| WebGL2 | 66.31 | 16.60 ms | 1,411 | 0 |
+| WebGPU | 30.66 | 33.30 ms | 76 | 353 |
+
+第三轮两端都出现系统级降频，但 WebGPU 仍约为 WebGL2 的一半；逻辑 renderer batch 从
+1,411 降到 76 没有形成端到端提升。WebGPU 稳态另有每次提交 538 次 `writeBuffer`、约
+509,392 bytes，其中大部分是逐 draw uniform ring 写入；本阶段 direct 与 indirect 的 draw
+数量不变，因此不能把 uniform upload 优化混入本实验。
+
+#### 业界源码与标准接口事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| WebGPU 标准接口 | [`GPURenderPassEncoder`](https://gpuweb.github.io/types/interfaces/GPURenderPassEncoder.html) | `drawIndexedIndirect` 每次读取一个由五个 u32 组成的 20-byte record；接口列出 direct/indirect 单 draw，没有 multi-draw 方法 |
+| Unity URP/Core | `7657c7f26638` | `InstanceCuller` 同时产生 `BatchDrawCommandType.Direct` 与 `Indirect` range；是否 indirect 取决于 range 支持与 indirect allocation，分配越界会重试并回退 direct |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `BatchManager.prepare` 按 material、layer、vertex-format hash、index 兼容、shader defs、AABB、scale sign、castShadow、shadowCascadeMask 和参数拆组；`create` 的输入契约是一个 draw，static batch 把 world transform 烘进顶点 |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `Mesh.MergeMeshes` 合并变换后的 vertex/index；不同 material 可保留 MultiMaterial/submesh，保留 submesh 时仍有分段 draw |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `mergeGeometries` 要求 index 与 attributes 兼容；`useGroups` 保留 material groups；`InstancedMesh` 限定同 geometry 与 material(s) |
+| Godot | `30a0296cc25d7d62fd16e6f9ed5977c6c0ec0e3c` | `MultiMesh` 绑定一个 Mesh，并提供 instance buffer 与 visible instance count；它不是异构 geometry 的单 draw 合并 |
+| LayaAir | `1c6512779b957208a42ea8fa50b56fb967f33cd1` | `StaticBatchMesh` 烘焙 world-space vertex/index，按 Material 建 `StaticBatchSubMesh`；每个 sub-info 保留 bounds 和 draw params，视锥通过后仍逐段提交 |
+| Unreal Engine | `7deeb413d3dc1fc034f48d1aacc0861301829d32` | Landscape Grass 按 GrassVariety 创建 HISM，分别设置 mesh、cull distance、dynamic/contact shadow 与 shadow cache 行为；没有把异构 grass/tree/rock 变成一个 draw |
+
+这些实现共同证明 direct/indirect 混合、同 geometry instancing、兼容状态内的静态 geometry merge
+都是真实路径；它们不证明哪条路径在 Galacean WebGPU 上更快。
+
+#### 方案比较
+
+| 方案 | Forward | Shadow | 代价 | 决策 |
+| --- | --- | --- | --- | --- |
+| 全部 compute + indirect | GPU copy/fine-cull 后 76 indirect | 四级 GPU per-instance compaction 后 277 indirect | 当前正确基线，移动端驱动需处理 353 个独立 indirect record | 基线 |
+| 全部 conservative direct | CPU 已知 batch count 直接提交 | Forward stream 在四级 cascade 重复 direct | 不需要 GPU-only count，但草失去已有 distance fine-cull | 不采用 |
+| CPU 已知 count direct，GPU-only count indirect；Shadow conservative direct | tree/rock 等 legacy copy 走 direct，grass等 fine-cull 继续 indirect | caster 使用已 compact 的 Forward stream 和 CPU count，依赖 raster/cascade clipping 保证结果 | Shadow 会处理被单 cascade 排除的额外实例，但移除 per-cascade compaction、buffer 和 indirect 同步 | 实验 |
+| 先做跨 mesh/material mega-batch | 合并 geometry/material 后再提交 | 同步重做 shadow geometry | 资产 attributes、alpha clip、材质贴图和 bounds 语义同时变化，无法单独定位 indirect 成本 | 后续独立实验 |
+
+#### 模块与正确性契约
+
+1. 策略只存在于 `SurfaceStaticBatchGroup`。Engine 初始化、renderer/material public API、
+   ShaderLab source、WebGL2 路径和通用 RHI 不变；已经验证的 `drawIndirect` 能力继续保留。
+2. `fineCulling=false` 的 static batch 已由 CPU 得到准确可见 count，compute 只负责把可见 range
+   复制到共享 output。其 renderer 不绑定 indirect record，使用 `BufferMesh.instanceCount`
+   direct draw。
+3. `fineCulling=true` 的 batch count 只能在 compute 后确定，继续绑定 indirect record。当前
+   eligibility 要求单 LOD、无 crossfade、所有 renderer 不投射阴影，因此不会与 direct Shadow
+   stream 冲突。
+4. Shadow 不安装 per-cascade override provider。所有 caster 都是 `fineCulling=false`，直接使用
+   已填充的 Forward output 和相同 CPU instance count；单 cascade 之外的实例由既有 shadow
+   view-projection clipping 排除，不能少画任何 caster。
+5. 通过性能门后删除不再使用的 shadow counter/output/indirect buffer 和五个 shadow compute
+   binding，不保留隐藏开关、平台型号名单、magic threshold 或 demo 特例。
+6. `inspectSurface().indirectRendererBatches` 必须改为实际绑定 Forward indirect record 的 active
+   renderer 数；不能继续把全部 WebGPU static renderer 计为 indirect。
+
+#### 验收与保留门槛
+
+- 单测覆盖 legacy batch 不绑定 indirect、fine-cull batch 仍绑定、debug count 与 renderer
+  active 状态；RHI indirect 路由测试继续通过。
+- 真实命令探针预期 Forward 只剩 GPU fine-cull 的 3 个 indirect，Shadow 为 0 indirect；
+  direct draw 相应增加。不得以减少逻辑计数代替 native prototype 观测。
+- 固定 wind/animation/camera 后，用父提交与候选独立页面比对 tree、rock、grass、四级 shadow、
+  category/LOD/count 和截图。移动相机、LOD churn、阴影开关与 category 开关必须无
+  validation、console error、page error 或 device lost。
+- 性能按 `all/no_grass/no_tree/no_rock` 交替页面报告 frame P50/P95、FPS、Forward/Shadow
+  timestamp 和 native direct/indirect count。保留条件是 frame time 配对改善中位数为正且
+  IQR 不跨 0，P95 不退化；Shadow timestamp 的收益必须覆盖 conservative extra instances。
+- 若 hybrid 不成立，整体撤销 Surface consumer 改动，只保留本检查点与通用 indirect 修复。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
