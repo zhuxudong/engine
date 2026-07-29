@@ -1085,32 +1085,66 @@ compute pass descriptor 都通过 `timestampWrites` 写入 query set。规范同
 
 1. `WebGPUGraphicDeviceOptions.enableGPUTiming` 默认 `false`。仅当调用方开启且 adapter 支持
    `timestamp-query` 时才把 feature 加入 `requestDevice`；不支持时 Engine 仍正常创建。
-2. `IHardwareRenderer` 暴露只读的后端中立 `gpuTiming` snapshot，`Engine.gpuTiming` 原样转发。
-   WebGL2 当前返回 `supported=false`、`enabled=false` 和空 sample；页面无需访问
-   `_hardwareRenderer` 或判断具体 RHI class。
-3. WebGPU 每次 command submission 只使用两个 timestamp slot。首个 pass 写 begin/end，后续
-   pass 只重写 end，因此最终值是首 pass begin 到末 pass end 的 GPU span；同时记录实际
-   pass count。该边界包含 pass 间 GPU idle，但不会把 tile/pipelined GPU 上重叠的 pass
-   duration 重复相加。
+2. `IHardwareRenderer` 暴露后端中立 `gpuTiming` 状态与 `requestSample()`，`Engine.gpuTiming`
+   原样转发。WebGL2 当前返回 `supported=false`、`enabled=false` 和空 sample，且请求返回
+   `false`；页面无需访问 `_hardwareRenderer` 或判断具体 RHI class。
+3. WebGPU 只为调用方显式请求的下一次 command submission 使用两个 timestamp slot。首个 pass
+   写 begin/end，后续 pass 只重写 end，因此最终值是首 pass begin 到末 pass end 的 GPU span；
+   同时记录实际 pass count。该边界包含 pass 间 GPU idle，但不会把 tile/pipelined GPU 上重叠
+   的 pass duration 重复相加。没有 render/compute pass 的空提交不会吞掉在途请求。
 4. query 先 resolve 到 GPU-only buffer，再复制到有限的 MAP_READ staging pool。所有 staging
    都在映射时则丢弃该次 measurement，不等待 GPU、不阻塞 render loop，并递增
    `droppedSampleCount`。
 5. readback 完成后才原子替换 latest immutable sample；timestamp 结束值小于开始值时视为
    invalid sample，不把负值或零值混入统计。销毁 Engine 时 query、resolve 和空闲/在途 staging
    都释放。
-6. benchmark 继续只显示 `backend` 与 `candidates` 两个控件；inspect API 增加 WebGPU GPU-time
-   median/P95、sample count、pass count 和 dropped count。Grasslands 只在显式
-   `?gpuTiming=1` 时开启，以免普通 demo 请求不需要的 optional feature。
+6. 启用 profiler 本身不自动注入 timestamp descriptor，也不自动读取启动期提交；只有
+   `requestSample()` 成功后才测量一帧。该约束避免固定采样节奏改变浏览器/GPU 队列，也避免把
+   shader、纹理或 mipmap 上传提交误报为完整渲染帧。
+7. benchmark 继续只显示 `backend` 与 `candidates` 两个控件；inspect API 增加 WebGPU GPU-time
+   median/P95、sample count、pass count 和 dropped count，自动化通过非 UI API 逐次请求。
+   Grasslands 只在显式 `?gpuTiming=1` 时请求 optional feature，并在场景 ready 后由调试 API
+   逐次请求样本。
 
 #### 验收
 
 - 单元测试验证首 pass begin/end、后续 pass 只更新 end、resolve/copy、staging 饱和丢样、
   invalid timestamp 和 destroy。
-- 浏览器 E2E 使用真实 `timestamp-query` device，要求连续得到正数 GPU span、pass count
-  大于 0、页面/GPU diagnostic 为 0；feature 不可用时明确 skip GPU 数值断言而不是伪造结果。
+- 浏览器 E2E 使用真实 `timestamp-query` device，在场景 ready 后逐次请求并要求得到正数 GPU
+  span、递增 submission id、pass count 大于 0、页面/GPU diagnostic 为 0；feature 不可用时
+  明确 skip GPU 数值断言而不是伪造结果。
 - WebGL2 默认页和 WebGPU 未启用 profiler 页保持原创建与渲染结果；benchmark 控件数量不变。
 - Grasslands 后续优化同时报告 rAF frame p50/p95 与 GPU span p50/p95。只有 GPU 时间和整帧
   时间在固定/移动场景都形成可重复方向，才宣称某项 GPU 优化带来收益。
+
+#### 实现验证检查点（2026-07-29）
+
+固定 hero 相机、1280×720 CSS、DPR 2、关闭场景动画与 surface wind 的 Chromium 147 / Metal
+实测暴露了自动采样的扰动，不把失败方案留在实现中：
+
+| 采样方式 | 140 帧 rAF p50 / p95 | GPU 样本 | 客观结果 |
+| --- | --- | --- | --- |
+| profiler 关闭，对照两轮 | 26.7 / 41.7 ms；25.1 / 40.7 ms | 0 | 对照 |
+| 每次 submission 自动采样，两轮 | 25.1 / 58.3 ms；25.2 / 58.6 ms | 93、99 | P95 相对对应对照增加，且 staging 丢样 63、62 |
+| 每 4 次 submission 自动采样，两轮 | 8.4 / 99.9 ms；8.4 / 108.3 ms | 各 40 | 无丢样，但出现周期性短帧与长帧，改变呈现节奏 |
+| 显式 one-shot，未发请求的四轮 ABBA | 18.3 / 50.0 ms；18.2 / 42.4 ms；23.2 / 43.5 ms；23.2 / 43.4 ms | 0 | 开启 optional feature 但空闲时没有固定方向的尾延迟变化，diagnostic 为 0 |
+
+曾让构造函数自动排队首个样本时，Grasslands 两轮只得到 1 pass、0.140/0.074 ms；它命中启动期
+提交而非稳态渲染帧，因此删除。改为场景 ready 后显式请求后，Grasslands 样本覆盖 5 个 native
+pass；benchmark WebGL2/WebGPU E2E 3/3、Grasslands WebGPU E2E 1/1、profiler 单测 6/6，浏览器
+diagnostic 为 0。
+
+同一页面顺序切换 category 并各取 12 个 one-shot 样本时，全部 category 的 GPU span 中位数首轮
+16.76 ms、复测 19.10 ms；关闭全部 category 为 9.55 ms，pass count 从 5 降到 4。仅树木、仅岩石
+等样本存在明显跨轮波动，且出现非加性结果。该批数据不足以对草、树、岩石排序，也不足以据此
+选择优化实现；它只验证 submission span 能识别有无 Surface pass。
+
+随后用 10 个 block 轮换 `all/none/no_grass/no_tree/no_rock` 顺序，每个 condition 取 7 个样本并
+以 block 内中位数配对。`all - none` 的配对差中位数为 9.34 ms，10 组中 9 组为正；`all -
+no_grass` 为 3.25 ms，10 组中 6 组为正，IQR 为 -0.18–7.62 ms；`all - no_tree` 为 2.09 ms，
+10 组中 7 组为正，IQR 为 -0.43–3.49 ms；`all - no_rock` 为 -0.29 ms，正负各 5 组。所有页面
+diagnostic 为 0。只有整体 Surface pass 形成较一致方向；单 category 的区间仍跨 0，因此本检查点
+不裁定草、树、岩石的 GPU 成本排序，也不据此提交某个 category 特例。
 
 ### 移动端约束与验收
 
