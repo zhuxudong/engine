@@ -225,6 +225,37 @@ test("Grasslands reloads into WebGPU and renders terrain surface categories", as
   await page.waitForTimeout(250);
   expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(settledDispatchCount);
 
+  const initialCamera = await page.evaluate(() => window.terrainDebug!.getCamera());
+  const initialGrassScale = await page.evaluate(() => window.grasslandsDebug!.inspectSurface().tuning.scale.grass);
+  await page.evaluate(() => window.terrainDebug!.setPose("terrain-horizon"));
+  await expect
+    .poll(() => page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups))
+    .toBeGreaterThan(settledDispatchCount);
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+  const movedDispatchCount = await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups);
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(movedDispatchCount);
+
+  await page.evaluate(() => window.grasslandsDebug!.setSurface({ scale: { grass: 4 } }));
+  await expect
+    .poll(() => page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups))
+    .toBeGreaterThan(movedDispatchCount);
+  const scaledDispatchCount = await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups);
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups)).toBe(scaledDispatchCount);
+
+  await page.evaluate(
+    ({ camera, grassScale }) => {
+      window.terrainDebug!.setCamera(camera);
+      window.grasslandsDebug!.setSurface({ scale: { grass: grassScale } });
+    },
+    { camera: initialCamera, grassScale: initialGrassScale }
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.__webgpuComputeCounts.dispatchWorkgroups))
+    .toBeGreaterThan(scaledDispatchCount);
+  await expect.poll(() => page.evaluate(() => window.grasslandsDebug!.inspectSurface().transitioningRanges)).toBe(0);
+
   await page.waitForTimeout(1_000);
   const screenshot = await page.locator("#canvas").screenshot();
   await testInfo.attach("grasslands-webgpu.png", { body: screenshot, contentType: "image/png" });
