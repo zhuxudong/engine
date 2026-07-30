@@ -3137,6 +3137,42 @@ dynamic offset 在 `setBindGroup()` 时加到同一 bind group 的 buffer bindin
    明确下降；GPU pass 不应因 CPU-only 改动形成超过测量噪声的稳定退化。否则撤销 runtime
    consumer，只保留设计、探针和检查点。
 
+#### 实现检查点
+
+候选按上述契约实现过 hash 分桶、完整字节比较、submission reset、buffer generation 隔离和
+destroy 清理。focused fake-GPU 测试 6/6、WebGPU RHI 测试 23/23，以及 WebGL2/WebGPU
+runtime/precompiled 四路径截图均通过。
+
+固定 Grasslands 命令探针中，场景的 169,199 个可见实例、450 次 `setPipeline`、492 次
+`setBindGroup`、443 次直接 indexed draw 和 6 次 indirect draw 未变。每个 submission 的
+`writeBuffer` 从 534 次、504,784 B 降到 254 次、265,152 B，分别下降 52.43% 和 47.47%。
+
+父提交与候选交错 5 轮，每个 workload 各收集 120 个 GPU timestamp。下表是各轮汇总
+distribution 的 median；正百分比表示候选数值增加。
+
+| workload | FPS | frame P95 | GPU total | Forward | Shadow |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | 56.508→56.525（+0.03%） | 25.1→25.3 ms（+0.80%） | 18.188→17.711 ms（-2.62%） | 15.721→15.626 ms（-0.61%） | 1.854→1.755 ms（-5.32%） |
+| no grass | 66.150→66.667（+0.78%） | 23.7→23.6 ms（-0.42%） | 15.542→15.928 ms（+2.49%） | 13.058→13.576 ms（+3.97%） | 1.637→1.980 ms（+20.92%） |
+| no tree | 62.970→63.154（+0.29%） | 25.0→24.8 ms（-0.80%） | 16.563→16.627 ms（+0.39%） | 14.752→14.810 ms（+0.40%） | 1.122→1.102 ms（-1.75%） |
+| no rock | 62.322→62.000（-0.52%） | 25.0→24.7 ms（-1.20%） | 15.915→16.802 ms（+5.57%） | 14.164→15.128 ms（+6.81%） | 1.124→1.238 ms（+10.13%） |
+
+原速 frame 结果接近噪声且方向不一致，GPU pass 也没有 CPU-only 改动应有的中立分布。为直接
+检验移动端 CPU 风险，benchmark 增加 `BENCHMARK_CPU_THROTTLE_RATE`，通过 Chrome DevTools
+Protocol 对父提交和候选施加相同 4× CPU 降速。完整场景交错 5 轮结果如下：
+
+| 4× CPU 指标 | 父提交 | payload 复用 | 变化 |
+| --- | ---: | ---: | ---: |
+| ready median | 4,619.3 ms | 4,685.8 ms | +1.44% |
+| FPS median | 47.997 | 40.344 | -15.95% |
+| frame P50 median | 18.2 ms | 25.0 ms | +37.36% |
+| frame P95 median | 26.6 ms | 33.2 ms | +24.81% |
+
+命令下降成立，但逐 draw 在 JavaScript 中扫描完整 payload 的成本高于省掉的原生异步上传调用，
+并在受限 CPU 上形成稳定退化。候选未通过移动端保留门，runtime consumer 和 focused 测试已
+撤销；保留设计、实测上限、CPU throttle benchmark 和本检查点。后续若继续该方向，必须先从
+core 的结构化版本合同做到 pack 前命中，不能恢复本次逐字节扫描方案。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
