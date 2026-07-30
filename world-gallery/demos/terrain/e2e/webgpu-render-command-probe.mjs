@@ -54,7 +54,16 @@ await page.addInitScript(() => {
     "setBlendConstant",
     "setStencilReference"
   ];
-  const stateCommandNames = ["setPipeline", "setBindGroup", "setVertexBuffer", "setIndexBuffer"];
+  const stateCommandNames = [
+    "setPipeline",
+    "setBindGroup",
+    "setVertexBuffer",
+    "setIndexBuffer",
+    "setViewport",
+    "setScissorRect",
+    "setBlendConstant",
+    "setStencilReference"
+  ];
   const createCommandCounts = () => Object.fromEntries(commandNames.map((name) => [name, 0]));
   const createStateCommandCounts = () => Object.fromEntries(stateCommandNames.map((name) => [name, 0]));
   const createEmptyCounts = () => ({
@@ -95,7 +104,13 @@ await page.addInitScript(() => {
     if (ArrayBuffer.isView(value)) return `${value.constructor.name}:${Array.from(value).join(",")}`;
     if (Array.isArray(value)) return `Array:${value.map(commandArgumentKey).join(",")}`;
     const valueType = typeof value;
-    if (valueType === "object" || valueType === "function") return `Object:${getNativeObjectId(value)}`;
+    if (valueType === "object" || valueType === "function") {
+      const entries = Object.entries(value);
+      if (entries.length > 0) {
+        return `Record:${entries.map(([key, entry]) => `${key}=${commandArgumentKey(entry)}`).join(",")}`;
+      }
+      return `Object:${getNativeObjectId(value)}`;
+    }
     return `${valueType}:${String(value)}`;
   };
   const stateCommandSlot = (name, args) =>
@@ -293,6 +308,8 @@ await page.addInitScript(() => {
             getPassCounts(label).redundantCommands[name]++;
           }
           stateCommandSignatures.set(stateSlot, signature);
+        } else if (name === "executeBundles") {
+          stateCommandSignatures.clear();
         }
         return command.call(pass, ...args);
       };
