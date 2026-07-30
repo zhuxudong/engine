@@ -9,11 +9,15 @@ const compactOutput = process.env.BENCHMARK_COMPACT === "1";
 const summaryOutput = process.env.BENCHMARK_SUMMARY === "1";
 const roundCount = Number(process.env.BENCHMARK_ROUNDS ?? 3);
 const gpuSampleCount = Number(process.env.BENCHMARK_GPU_SAMPLES ?? 0);
+const cpuThrottleRate = Number(process.env.BENCHMARK_CPU_THROTTLE_RATE ?? 1);
 if (!Number.isInteger(roundCount) || roundCount < 1) {
   throw new RangeError(`BENCHMARK_ROUNDS must be a positive integer, received ${roundCount}.`);
 }
 if (!Number.isInteger(gpuSampleCount) || gpuSampleCount < 0) {
   throw new RangeError(`BENCHMARK_GPU_SAMPLES must be a non-negative integer, received ${gpuSampleCount}.`);
+}
+if (!Number.isFinite(cpuThrottleRate) || cpuThrottleRate < 1) {
+  throw new RangeError(`BENCHMARK_CPU_THROTTLE_RATE must be at least 1, received ${cpuThrottleRate}.`);
 }
 const disabledCategories = (process.env.BENCHMARK_DISABLED_CATEGORIES ?? "")
   .split(",")
@@ -42,6 +46,8 @@ const results = [];
 for (let round = 0; round < orders.length; round++) {
   for (const variant of orders[round]) {
     const page = await context.newPage();
+    const cdpSession = await context.newCDPSession(page);
+    await cdpSession.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottleRate });
     const diagnostics = [];
     page.on("console", (message) => {
       if (
@@ -144,6 +150,7 @@ for (let round = 0; round < orders.length; round++) {
       surface: await page.evaluate(() => window.grasslandsDebug.inspectSurface()),
       diagnostics
     });
+    await cdpSession.detach();
     await page.close();
   }
 }
@@ -243,6 +250,7 @@ console.log(
       browser: { executablePath, version: browserVersion },
       roundCount,
       gpuSampleCount,
+      cpuThrottleRate,
       churnLods,
       disabledCategories,
       summary: summaryOutput
