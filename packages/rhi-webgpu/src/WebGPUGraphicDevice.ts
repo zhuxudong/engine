@@ -143,6 +143,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private readonly _computePipelines = new Map<string, WebGPUComputePipelineState>();
   private readonly _constantBuffers = new Map<number, WebGPUBuffer>();
   private _retiredBuffers: GPUBuffer[] = [];
+  private _appliedRenderPipeline?: GPURenderPipeline;
+  private _viewportDirty = true;
+  private _scissorDirty = true;
+  private _appliedBlendConstant?: number[];
+  private _appliedStencilReference?: number;
   private _destroyed = false;
   private _globalDepthBias = 0;
   private _globalSlopeScaledDepthBias = 0;
@@ -392,11 +397,19 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   }
 
   viewport(x: number, y: number, width: number, height: number): void {
-    this._viewport.set(x, y, width, height);
+    const viewport = this._viewport;
+    if (viewport.x !== x || viewport.y !== y || viewport.z !== width || viewport.w !== height) {
+      viewport.set(x, y, width, height);
+      this._viewportDirty = true;
+    }
   }
 
   scissor(x: number, y: number, width: number, height: number): void {
-    this._scissor.set(x, y, width, height);
+    const scissor = this._scissor;
+    if (scissor.x !== x || scissor.y !== y || scissor.z !== width || scissor.w !== height) {
+      scissor.set(x, y, width, height);
+      this._scissorDirty = true;
+    }
   }
 
   colorMask(): void {}
@@ -641,6 +654,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     descriptor.label = this._renderPassLabel;
     this._gpuTimingProfiler.addTimestampWrites(descriptor, "render");
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
+    this._resetRenderPassState();
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
   }
@@ -772,28 +786,61 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   _applyDynamicState(pass: GPURenderPassEncoder): void {
-    const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
-    const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
-    const viewportWidth = Math.max(0, Math.min(this._viewport.z, targetWidth - this._viewport.x));
-    const viewportHeight = Math.max(0, Math.min(this._viewport.w, targetHeight - this._viewport.y));
-    pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
-    pass.setScissorRect(
-      Math.max(0, Math.floor(this._scissor.x)),
-      Math.max(0, Math.floor(this._scissor.y)),
-      Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x))),
-      Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)))
-    );
+    if (this._viewportDirty) {
+      const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
+      const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
+      const viewportWidth = Math.max(0, Math.min(this._viewport.z, targetWidth - this._viewport.x));
+      const viewportHeight = Math.max(0, Math.min(this._viewport.w, targetHeight - this._viewport.y));
+      pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
+      this._viewportDirty = false;
+    }
+    if (this._scissorDirty) {
+      const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
+      const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
+      const scissorX = Math.max(0, Math.floor(this._scissor.x));
+      const scissorY = Math.max(0, Math.floor(this._scissor.y));
+      const scissorWidth = Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x)));
+      const scissorHeight = Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)));
+      pass.setScissorRect(scissorX, scissorY, scissorWidth, scissorHeight);
+      this._scissorDirty = false;
+    }
     const { state, customStates } = this._getRenderState();
     const blendColor = state.blendState.blendColor;
-    pass.setBlendConstant({
-      r: blendColor.r,
-      g: blendColor.g,
-      b: blendColor.b,
-      a: blendColor.a
-    });
-    pass.setStencilReference(
-      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue
-    );
+    const blendConstant = this._appliedBlendConstant;
+    if (
+      !blendConstant ||
+      blendConstant[0] !== blendColor.r ||
+      blendConstant[1] !== blendColor.g ||
+      blendConstant[2] !== blendColor.b ||
+      blendConstant[3] !== blendColor.a
+    ) {
+      pass.setBlendConstant({
+        r: blendColor.r,
+        g: blendColor.g,
+        b: blendColor.b,
+        a: blendColor.a
+      });
+      this._appliedBlendConstant = [blendColor.r, blendColor.g, blendColor.b, blendColor.a];
+    }
+    const stencilReference =
+      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue;
+    if (this._appliedStencilReference !== stencilReference) {
+      pass.setStencilReference(stencilReference);
+      this._appliedStencilReference = stencilReference;
+    }
+  }
+
+  /**
+   * Set the active pipeline when it differs from the current render-pass state.
+   * @param pass - Active render-pass encoder.
+   * @param pipeline - Pipeline required by the next draw.
+   * @internal
+   */
+  _setRenderPipeline(pass: GPURenderPassEncoder, pipeline: GPURenderPipeline): void {
+    if (this._appliedRenderPipeline !== pipeline) {
+      pass.setPipeline(pipeline);
+      this._appliedRenderPipeline = pipeline;
+    }
   }
 
   /** @internal */
@@ -891,6 +938,14 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _endCurrentPass(): void {
     this._endRenderPass();
     this._endComputePass();
+  }
+
+  private _resetRenderPassState(): void {
+    this._appliedRenderPipeline = undefined;
+    this._viewportDirty = true;
+    this._scissorDirty = true;
+    this._appliedBlendConstant = undefined;
+    this._appliedStencilReference = undefined;
   }
 
   private _reportComputeCompilationErrors(module: GPUShaderModule, source: string, pipelineId: number): void {
