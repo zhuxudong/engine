@@ -3249,6 +3249,56 @@ index buffer 和 vertex buffer 定义为影响后续 draw 的当前状态。`exe
    场景 frame P95 不得退化超过 2%，且 GPU pass 不形成超过测量噪声的稳定退化；否则撤销
    runtime consumer，只保留设计、探针和检查点。
 
+#### 实现检查点：保留高重复子集
+
+首次候选覆盖表中的七类状态，原生命令数达到设计上限；但 `setVertexBuffer` 和
+`setIndexBuffer` 合计要在 JavaScript 中检查 3,256 次，只能省 116 次 native 调用。4× CPU
+完整场景 5 轮中，FPS 中位数从 48.866 降到 47.389（-3.03%），frame P50 从 18.0 增至
+23.4 ms（+30.0%）。因此低重复的 vertex/index cache 已撤销，不因“命令数更少”保留。
+
+最终实现只缓存 pipeline，并对 viewport、scissor、blend constant 和 stencil reference 做
+pass-local 数值去重。viewport/scissor 的裁剪计算也只在目标值变化或新 pass 开始时执行。
+缓存统一归 `WebGPUGraphicDevice` 所有，每次 `beginRenderPass()` 后清空；WebGL2、bind group、
+vertex/index binding、draw、upload、ShaderLab 和用户 API 均未改变。
+
+固定命令探针的 169,199 个可见实例、76 个 renderer batch、443 次直接 indexed draw、6 次
+indirect draw、492 次 `setBindGroup`、534 次/504,784 B `writeBuffer` 均与父提交一致：
+
+| 命令 | 父提交 | 最终候选 | 变化 |
+| --- | ---: | ---: | ---: |
+| `setPipeline` | 450 | 114 | -336（-74.67%） |
+| `setViewport` | 450 | 7 | -443（-98.44%） |
+| `setScissorRect` | 450 | 7 | -443（-98.44%） |
+| `setBlendConstant` | 450 | 4 | -446（-99.11%） |
+| `setStencilReference` | 450 | 4 | -446（-99.11%） |
+| `setVertexBuffer` | 2,807 | 2,807 | 0 |
+| `setIndexBuffer` | 449 | 449 | 0 |
+| 七类合计 | 5,506 | 3,392 | -2,114（-38.39%） |
+
+父提交和最终候选使用独立页面、交替 5 轮；每个 workload 各取 120 个 GPU timestamp。下表为
+各轮合并后的中位数变化，正数表示候选数值增加：
+
+| workload | FPS | frame P95 | GPU total | Forward | Shadow |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | +0.60% | -0.39% | -0.37% | +0.55% | +0.54% |
+| no grass | -0.50% | -1.10% | -0.63% | -4.43% | -0.81% |
+| no tree | +0.02% | -1.22% | +0.23% | +0.42% | -9.06% |
+| no rock | -1.33% | +0.40% | +0.68% | +1.06% | -3.63% |
+
+这些 GPU pass 方向混合，且 CPU-only 改动没有减少 shader、draw 或实例工作量，因此不把其中
+的 GPU timestamp 波动解释为 GPU 加速，也不形成 grass/tree/rock 的独立收益结论。完整场景
+原速 FPS 中位数为 55.657→55.991，frame P95 为 25.4→25.3 ms。
+
+最终候选在 4× CPU 下另做 5 轮：FPS 中位数 47.654→47.868（+0.45%），frame P50
+18.2→18.3 ms（+0.55%），P95 26.6→26.5 ms（-0.38%）。候选没有重现初版全状态 cache 的
+受限 CPU 退化，因此保留高重复子集；现有证据只支持减少 render-pass 命令编码且不造成可测
+帧时间退化，不支持宣称显著 FPS 或 GPU 着色收益。
+
+WebGPU RHI 测试 19/19、类型构建和 module 构建通过。最终产物的 Grasslands WebGPU E2E
+6/6 通过，1 个仅 benchmark 模式启用的 timing case 按预期跳过；WebGL2/WebGPU
+runtime/precompiled 四路径、四机位最大 normalized RMSE 为 0.001065，低于 0.005 门，
+backend reload、category/LOD、shadow、post-process、compute、indirect 和 diagnostic 均通过。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
