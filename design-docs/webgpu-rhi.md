@@ -3009,6 +3009,57 @@ Surface 会因此变快，也不授权按 category、材质 id 或某个 demo �
    共有收益写成 WebGPU 独占能力。若 program/module 增长、启动或任一后端性能门失败，撤销
    runtime consumer，只保留本检查点。
 
+#### 客观检查点结果
+
+候选严格按上述契约实现过一次，并在最终代码中撤销。以下数据只描述本机固定测试的结果，不形成
+移动端或其他 GPU 的性能结论。测试使用 Chromium 140、`--use-angle=metal`、1280×720 CSS
+viewport、DPR 2，固定 `first-person` 相机，关闭 animation、clouds 和 wind；每个 workload
+交替运行父提交与候选各 5 轮，每轮读取 24 个 GPU timestamp 样本。
+
+runtime 与预构建模式在 WebGL2/WebGPU 四条路径均完成四个固定相机渲染，实例、category、LOD、
+visible batch 和 indirect batch 计数一致，页面/GPU diagnostic 为 0。原生
+`GPUDevice.createShaderModule` 捕获到候选 Forward fragment 的 6 组实际 feature 元组：
+disabled、3D/wind/translucency、2D/wind、local-y/wind/translucency、UV/wind 和 wind-only。
+
+| 固定页面原生对象 | 父提交 uniform | 候选 specialization | 变化 |
+| --- | ---: | ---: | ---: |
+| Surface shader modules | 36 | 52 | +44.44% |
+| Surface WGSL module bytes | 649,783 | 829,790 | +27.70% |
+| unique Surface modules | 19 | 31 | +63.16% |
+| unique Surface WGSL bytes | 400,244 | 628,883 | +57.13% |
+| Surface render pipelines | 18 | 26 | +44.44% |
+| Forward fragment modules | 10 | 15 | +50.00% |
+
+module 与 pipeline 数包含现有 instancing、LOD、vertex layout 和 pass 变体，不能等同于材质 feature
+元组数。父提交因为保留 runtime uniform 分支，生成代码本身不能用于反推出离散元组；候选捕获的
+6 组与 manifest 的静态组合一致，没有出现材质 id 级元组。
+
+| workload | 指标 | 父提交中位数，IQR (ms) | 候选中位数，IQR (ms) | 候选变化 |
+| --- | --- | ---: | ---: | ---: |
+| all | total | 18.160，17.197–19.188 | 17.897，16.924–18.827 | -1.45% |
+| all | Forward | 15.449，13.603–16.753 | 15.361，13.947–16.187 | -0.57% |
+| all | Shadow | 1.651，1.517–2.645 | 1.630，1.499–2.224 | -1.27% |
+| no grass | total | 15.776，14.967–16.472 | 15.538，14.591–16.320 | -1.51% |
+| no grass | Forward | 12.277，10.580–13.912 | 12.140，10.012–13.754 | -1.12% |
+| no grass | Shadow | 1.834，1.519–3.071 | 1.630，1.503–2.560 | -11.12% |
+| no tree | total | 16.631，15.845–17.652 | 16.242，15.025–17.084 | -2.34% |
+| no tree | Forward | 13.922，11.725–15.484 | 12.667，11.413–14.683 | -9.02% |
+| no tree | Shadow | 1.403，0.907–2.322 | 1.431，1.102–2.156 | +2.00% |
+| no rock | total | 16.787，15.984–17.711 | 16.972，15.895–17.825 | +1.10% |
+| no rock | Forward | 14.836，12.277–15.673 | 14.681，12.696–15.843 | -1.05% |
+| no rock | Shadow | 1.290，0.959–1.695 | 1.295，0.967–2.010 | +0.39% |
+
+完整场景的父提交/候选 median FPS 为 56.66/57.35，frame P95 均为 25.1 ms；scene-ready
+中位数为 1839/1901 ms，候选增加 62 ms（+3.37%）。完整场景的 total 仅 4/5 轮、Forward
+仅 3/5 轮方向有利，两个分布的 IQR 均重叠；`no rock` 的 total 和多个 Shadow 归因项也发生
+退化。预构建 `Surface.shaderc` raw/gzip 从 141,482/24,212 B 增至
+143,785/24,520 B，`Surface.wgslc` 从 243,096/40,718 B 增至
+252,057/41,490 B。
+
+候选没有通过完整场景 Forward/total 的稳定性、module/pipeline 增长和启动成本门，Surface
+consumer 已撤销。该结果不否定静态 feature specialization 在其他 workload 或更粗粒度管线中的
+作用，只说明当前 6 元组切分在本检查点没有足够证据保留。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
