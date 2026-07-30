@@ -2930,6 +2930,85 @@ Surface shader module 含 `enable f16` 与 f16 aliases。
 保留门，因此 Surface consumer 已撤销。Compiler、RHI capability 和 compute 执行测试具有独立
 功能价值，予以保留；本检查点不形成桌面或移动端性能提升结论。
 
+### Surface 静态材质 feature specialization 设计
+
+#### 当前源码与工作量边界
+
+`SurfaceMaterial` 从只读 manifest 构造后，不提供修改下列语义的 public setter，但
+`Surface.shader` 仍把它们作为运行时 uniform 分支：
+
+- `material_WindSupported`：是否包含 wind vertex path；全局 wind 开关和时间仍是动态值。
+- `material_ColorVariationEnabled/Mode`：disabled、world-noise-2d、world-noise-3d、
+  vertex-gradient 或 uv-gradient。
+- `material_TranslucencyModel` 与非零 translucency：是否执行额外背光路径。
+
+Grasslands 25 个材质只形成 6 组实际组合，而不是 25 个独立程序语义：
+
+| 静态组合 | 材质数 | 主要材质/实例边界 |
+| --- | ---: | --- |
+| no variation / no wind / no translucency | 17 | 全部岩石、树干、fake-tree 等 |
+| 3D variation / wind / translucency | 1 | birch-leaves，129 个编译实例 |
+| 2D variation / wind / no translucency | 2 | grass-2 为 245,637 个编译实例；另有 birch-leaves-2 |
+| vertex gradient / wind / translucency | 2 | broadleaf-leaves、bush |
+| UV gradient / wind / no translucency | 2 | flowers-1、grass-3，合计 17,848 个编译实例 |
+| no variation / wind / no translucency | 1 | flowers-2，9,085 个编译实例 |
+
+动态相机在 `first-person/hero` 间交替时，现有 Surface compaction compute pass 的 20 个
+one-shot 样本中位数只有 `0.036 ms`，IQR `0.034–0.041 ms`。因此本阶段不扩展 subgroup 或
+prefix-sum；稳定大项仍是 grass Forward，以及 tree/rock Shadow 的 vertex/fragment workload。
+
+#### 固定上游源码事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| Unity URP | `4c8e8d3ed16eb59bdc6399f9beb12eb19a740f02` | `SimpleLit.shader`、`ComplexLit.shader` 用 local shader feature 区分 normal、alpha-test、specular workflow、AO、clear-coat 等静态材质能力；各 render pass 只编译其声明的 feature |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `standard.js` 从 `StandardMaterialOptions/LitOptions` 生成 fragment defines，只在启用对应 map、specular、metalness、refraction、iridescence、clear-coat 等能力时加入代码；同一生成器继续交给 GLSL/WGSL LitShader |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `PBRMaterialDefines` 保存 `ALPHATEST/NORMAL/METALLICWORKFLOW/SPECULARTERM` 等静态开关，材质准备阶段按实际属性写 defines，再由同一 PBR shader 的条件块消费 |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | WebGPU `RenderObject.getMaterialCacheKey()` 把 clearcoat、transmission 等数值属性归一成 0/1 并进入 program cache key；具体数值仍作为运行时参数，不按每个数值生成源码 |
+
+这些结构支持“按有限 feature 组合生成程序、数值继续走 uniform”，但不证明 Galacean 当前
+Surface 会因此变快，也不授权按 category、材质 id 或某个 demo 写特例。
+
+#### 方案比较
+
+| 方案 | variant 边界 | 风险 | 决策 |
+| --- | --- | --- | --- |
+| 保持全部 uniform 分支 | 1 个材质 feature 组合 | disabled 路径仍进入可达 shader code 和 uniform layout | 基线 |
+| 把所有 manifest 数值写成 macro/literal | 最多按 25 个材质及数值组合增长 | program/pipeline 数与构建产物不可控，动态调参困难 | 拒绝 |
+| 只专用化三个离散 feature，数值保持 uniform | 当前实际 6 组；由 feature 元组而非材质 id 决定 | 增加有限 shader program 与首次 pipeline 编译 | 候选 |
+
+#### 第一切片契约
+
+1. 增加互斥的 `MATERIAL_SURFACE_COLOR_VARIATION_2D/3D/LOCAL_Y/UV`，无 macro 表示 disabled；
+   增加 `MATERIAL_SURFACE_WIND` 和 `MATERIAL_SURFACE_TRANSLUCENCY`。宏只由
+   `SurfaceMaterialSpec` 的只读 feature 推导，不读取 category、prototype 或 backend。
+2. color variation 的 scale/offset/fade、wind 的 time/strength/direction、translucency 的
+   amount/color 继续使用现有 uniform，保证实时 wind 控制和数值语义不变。debug view、LOD、
+   alpha cutoff、PBR 参数、资源与 render state 不进入本阶段。
+3. ShaderLab 对 disabled feature 不声明对应 uniform，也不保留不可达函数。3D noise 只在
+   wind 或 3D variation 至少一个开启时存在；2D noise 只在 2D variation 开启时存在。
+4. Forward、DepthPrimingOnly 与 ShadowCaster 继续共享同一 vertex placement。wind feature
+   关闭的材质编译为零位移；wind feature 开启时仍服从动态 `material_WindEnabled`。
+5. 同一 runtime ShaderLab 和 `.shaderc/.wgslc` 保存 feature 条件；WebGL2 与 WebGPU 用户 API、
+   engine 初始化和 backend reload 不变。不新增 raw WGSL、材质 id variant 或 demo query hack。
+6. 当前 manifest 的 feature 元组不得超过 6 组。新增资产自然产生新元组，但 E2E 必须报告实际
+   program/module 数；不能用固定白名单拒绝合法组合。
+
+#### 验收与保留门
+
+1. 预构建 GLES/WGSL 产物分别证明 disabled、2D、3D、gradient、wind、translucency 条件仍由
+   ShaderLab instruction 保存；runtime 与 precompiled 四路径渲染相同 feature 组合。
+2. native shader-module capture 报告实际 Surface module 数和总 WGSL bytes，确认无材质 id
+   级变体；页面/GPU diagnostic 为 0。
+3. WebGL2/WebGPU 四个固定相机的 category、LOD、visible/indirect count 与截图相对父提交通过
+   既有门；连续相机、wind on/off、LOD 和 category 切换后必须恢复相同状态。
+4. WebGPU 父提交与候选轮换 `all/no_grass/no_tree/no_rock`，每端每 workload 至少
+   `5×24` 个 one-shot timestamp，报告 Forward、Shadow、total median/IQR；完整场景的 Forward
+   与 total improvement 必须为正且 IQR 不跨 0，frame P95 不稳定退化超过 2%。
+5. 因为这是中立 ShaderLab/material 优化，WebGL2 另做 matched frame benchmark；不能把两后端
+   共有收益写成 WebGPU 独占能力。若 program/module 增长、启动或任一后端性能门失败，撤销
+   runtime consumer，只保留本检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
