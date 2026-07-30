@@ -58,7 +58,10 @@ for (let round = 0; round < orders.length; round++) {
     await page.goto(pageUrl.href, { waitUntil: "networkidle", timeout: 120_000 });
     await page.waitForFunction(() => window.terrainDebug?.ready === true, undefined, { timeout: 120_000 });
     const readyMs = performance.now() - navigationStartedAt;
-    await page.evaluate(() => window.grasslandsDebug.setScene({ animation: false }));
+    await page.evaluate(() => {
+      window.grasslandsDebug.setScene({ animation: false, clouds: false });
+      window.grasslandsDebug.setSurface({ wind: { enabled: false } });
+    });
     if (disabledCategories.length > 0) {
       await page.evaluate(
         (categories) =>
