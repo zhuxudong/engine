@@ -3060,6 +3060,83 @@ module 与 pipeline 数包含现有 instancing、LOD、vertex layout 和 pass �
 consumer 已撤销。该结果不否定静态 feature specialization 在其他 workload 或更粗粒度管线中的
 作用，只说明当前 6 元组切分在本检查点没有足够证据保留。
 
+### WebGPU draw-uniform 精确 payload 复用设计
+
+#### 当前源码与实测上限
+
+`WebGPUShaderProgram._getBindGroup()` 当前每次 draw 都重新 pack 完整 uniform
+`ArrayBuffer`、递增 dynamic offset 并立即执行一次 `GPUQueue.writeBuffer`。同一 program、
+同一 submission 内没有复用已经上传的相同内容。
+
+固定 Grasslands `first-person`、1024×576 CSS、DPR 2、关闭 animation、architecture、clouds
+和 wind 后，原生 `writeBuffer` payload 探针连续 5 个 submission 得到完全相同的上限：
+
+| draw-uniform 指标 | 当前值 | 字节完全相同的唯一值 | 可消除上限 |
+| --- | ---: | ---: | ---: |
+| `writeBuffer` 调用 | 367 | 115 | 252（68.66%） |
+| 上传字节 | 349,888 | 121,984 | 227,904（65.14%） |
+
+探针按 GPU buffer identity 和实际上传字节分组，不按 renderer、material、program label 或业务
+category 猜测相等。示例中一个 program 有 87 次 draw 但只有 4 份唯一 payload；另一个有 47 次
+draw、39 份唯一 payload，因此实现不能假定所有对象或某一类 Surface 都共享 uniform。
+
+#### 固定上游源码与规范事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | `UniformsGroup.update()` 逐字段比较缓存值，只有真实变化时返回 updated；`Bindings._update()` 仅在 updated 时调用 backend 上传 |
+| Babylon.js | `d9ae931f9eb24fc5a5c152b33923e5015311b0ad` | `UniformBuffer` 用 `_needSync` 跳过静态 UBO；启用 frame tracking 时还对当前 ring buffer 的完整 `Float32Array` 做 `_buffersEqual()`，相同则不上传 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `DynamicBuffers` 按 alignment bump allocate mapped staging，提交时对 used range 编码 `copyBufferToBuffer`；固定版本未对相同 payload 做去重 |
+| LayaAir | `722a2847902909c952257d6dd50e5e32f5b07bff` | 固定 WebGPU buffer 更新路径直接执行 `queue.writeBuffer`；限定检索未发现同 submission payload 复用 |
+
+[WebGPU 规范](https://gpuweb.github.io/gpuweb/#dom-gpubindingcommandsmixin-setbindgroup) 规定
+dynamic offset 在 `setBindGroup()` 时加到同一 bind group 的 buffer binding offset，并按
+`minUniformBufferOffsetAlignment` 校验；因此多个 draw 可以合法指向同一已写入区间。
+[GPUQueue.writeBuffer](https://gpuweb.github.io/gpuweb/#dom-gpuqueue-writebuffer) 把提供的数据
+写入指定 buffer offset。规范没有自动识别相同 payload，也没有要求每个 draw 使用不同 offset。
+
+这些实现和规范支持“值未变则不重复上传”与“同一 bind group 使用不同/相同 dynamic offset”的
+合法性，不证明 Galacean 加入 hash/compare 后的 CPU 成本一定小于节省的调用成本。
+
+#### 方案比较
+
+| 方案 | 边界 | 收益 | 风险 | 决策 |
+| --- | --- | --- | --- | --- |
+| core `ShaderData`/renderer/material 版本组成结构化 key | core + RHI | 可在 pack 前命中 | 合并顺序、默认值、数组和引用值需要新的跨层不可变版本合同 | 不作为首切片 |
+| 只用 32-bit hash 复用 offset | WebGPU program | 查找快 | hash collision 会静默绑定错误 uniform，正确性不可接受 | 拒绝 |
+| hash 分桶后逐字节确认完整 packed payload | WebGPU program | 不改 core/API；精确覆盖最终 WGSL layout、默认零值和合并结果 | 每 draw 仍需 pack/hash；submission 内保留唯一 payload 引用 | 候选 |
+| 合并整段 ring 上传 | WebGPU program/submit | 调用数少 | 已实测上传字节增加 10.4%，且性能门失败 | 已拒绝 |
+
+#### 第一切片契约
+
+1. cache 只属于单个 `WebGPUShaderProgram`、当前 uniform buffer generation 和当前
+   `GPUQueue.submit` 边界。`flush()` 后 `_resetFrame()` 清空 cache，不能跨 submission 复用可能
+   已被下一轮覆盖的 offset。
+2. 每次 draw 继续走现有 `_packUniforms()` 得到最终字节。先计算快速 hash，再在同 hash bucket
+   中比较 byte length 和每个字节；只有完全相同才复用已有 dynamic offset。
+3. cache key 不包含 texture/sampler，因为它们继续由现有 bind-group key 独立选择；复用的只是
+   binding 0 uniform buffer 中相同字节的 offset。
+4. 新 payload 才递增 `_uniformCursor` 和调用 `writeBuffer`。若容量不足，先切换新 buffer、
+   增加 generation、清空 bind group 与 payload cache，再把新 payload 写入新 buffer；旧 buffer
+   继续由现有 submitted-work retirement 生命周期持有。
+5. destroy 清空 payload 引用。WebGL2、core、ShaderLab、material、renderer、example query 和
+   用户 API 不变；不加入 category、program id、payload 数量 threshold 或 demo 开关。
+
+#### 验收与保留门
+
+1. focused fake-GPU 测试覆盖相同 payload 复用、不同 payload 不复用、hash 后字节比较、submission
+   reset 后重新上传，以及 capacity generation 切换后不复用旧 buffer offset。
+2. 原生命令探针在固定页面报告 draw-uniform 调用、字节和唯一 payload；目标接近 367→115 与
+   349,888→121,984，不能增加 renderer-instance/core buffer 上传。
+3. WebGL2/WebGPU runtime/precompiled 四路径、四个固定相机、backend reload、wind/LOD/category
+   切换、Surface/Shadow/indirect 计数、截图及 page/GPU diagnostic 必须通过。
+4. 父提交/候选按 `all/no_grass/no_tree/no_rock` 交替至少 5 轮；每端每 workload 读取 24 个
+   GPU timestamp，并报告 frame FPS/P50/P95、Forward/Shadow/total。完整场景 frame P95 不得
+   退化超过 2%。
+5. 保留需要完整场景 frame time 或 RHI encode time 的配对改善方向稳定，且上传调用与字节都
+   明确下降；GPU pass 不应因 CPU-only 改动形成超过测量噪声的稳定退化。否则撤销 runtime
+   consumer，只保留设计、探针和检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
