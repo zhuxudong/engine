@@ -3173,6 +3173,82 @@ Protocol 对父提交和候选施加相同 4× CPU 降速。完整场景交错 5
 撤销；保留设计、实测上限、CPU throttle benchmark 和本检查点。后续若继续该方向，必须先从
 core 的结构化版本合同做到 pack 前命中，不能恢复本次逐字节扫描方案。
 
+### WebGPU render-pass 状态去重设计
+
+#### 当前源码与实测上限
+
+`WebGPUShaderProgram.draw()` 每次 draw 都直接执行 `setPipeline()`；`WebGPUPrimitive._encodeDraw()`
+逐 slot 重绑 vertex buffer，并重绑 index buffer；`WebGPUGraphicDevice._applyDynamicState()` 每次
+draw 都重发 viewport、scissor、blend constant 和 stencil reference。状态只由调用点掌握，没有
+与当前 `GPURenderPassEncoder` 生命周期一致的缓存。
+
+固定 Grasslands `first-person`、1024×576 CSS、DPR 2、关闭 animation、clouds、fog、post
+process 和 wind 后，原生命令探针按 native object identity、slot 和实际数值比较连续状态：
+
+| 每 submission 命令 | 当前调用 | 必须保留 | 连续重复 |
+| --- | ---: | ---: | ---: |
+| `setPipeline` | 450 | 114 | 336（74.67%） |
+| `setVertexBuffer` | 2,807 | 2,711 | 96（3.42%） |
+| `setIndexBuffer` | 449 | 429 | 20（4.45%） |
+| `setViewport` | 450 | 7 | 443（98.44%） |
+| `setScissorRect` | 450 | 7 | 443（98.44%） |
+| `setBlendConstant` | 450 | 4 | 446（99.11%） |
+| `setStencilReference` | 450 | 4 | 446（99.11%） |
+
+七类命令合计 5,506 次，其中 2,230 次（40.50%）可以按当前 pass 的已设置状态消除。
+`setBindGroup` 的 492 次调用不在该上限内：当前 draw-uniform dynamic offset 每 draw 不同，探针
+确认连续完全相同的 bind-group 命令为 0。
+
+#### 固定上游源码与规范事实
+
+| 实现 | 固定版本 | 客观实现 |
+| --- | --- | --- |
+| Three.js | `c6620cee323838ead14035b37008f401edbc2ea1` | 每个 render context 建立 `currentSets`；仅当 pipeline、index 或 vertex attribute identity 改变时调用对应 native setter，stencil reference 也按值比较 |
+| PlayCanvas | `332a922d2dcf48bf3c774d296c999c69581d3d2c` | `draw()` 比较当前 pipeline 后再调用 `setPipeline()`；blend constant 和 stencil reference 按值比较；固定版本的 viewport/scissor 仍标有 change-check TODO |
+| LayaAir | `722a2847902909c952257d6dd50e5e32f5b07bff` | `startRender()` 清空 `curpipeline`、`curGeometry` 和 bind-group cache；pipeline identity 未变时不重发，geometry 未变时跳过整组 vertex/index 绑定 |
+
+[WebGPU API](https://gpuweb.github.io/types/interfaces/GPURenderPassEncoder.html) 把 pipeline、
+index buffer 和 vertex buffer 定义为影响后续 draw 的当前状态。`executeBundles()` 不继承 pass
+已有的 pipeline/bind group/vertex/index 状态，执行后还会把这四类状态清回初始空值。因此缓存
+必须以单个 render pass 为边界；未来接入 render bundle 时必须在 bundle 后失效对应缓存，不能
+假设 pass 开始前或 bundle 前的状态仍然有效。
+
+#### 方案比较
+
+| 方案 | 边界 | 收益 | 风险 | 决策 |
+| --- | --- | --- | --- | --- |
+| 依赖业务 render queue 排序减少切换 | core/world | 可能减少真实状态变化 | 改变透明、stencil、阴影等顺序语义，不能覆盖重复 dynamic state | 不作为 RHI 首切片 |
+| 在各调用点分别保存 last value | program/primitive/device | 局部改动少 | 同一 native pass 被三个对象共享，pass 重建时容易残留跨 pass 状态 | 拒绝 |
+| 包装完整 `GPURenderPassEncoder` 并拦截全部方法 | WebGPU RHI | 所有调用自动进入统一入口 | 复制原生接口面过宽，增加新 WebGPU 命令时容易漏转发 | 拒绝 |
+| 由 `WebGPUGraphicDevice` 持有当前 pass 的窄状态缓存 | WebGPU RHI | 生命周期和 pass 创建/结束同属一个模块；只覆盖已实测命令 | 内部调用点要改走 device setter | 候选 |
+
+#### 第一切片契约
+
+1. cache 只属于当前 `GPURenderPassEncoder`。创建新 pass 时状态为空；结束 pass、切换 compute
+   或 render target 后不能复用旧状态。
+2. pipeline 按 `GPURenderPipeline` identity 比较；vertex buffer 按 slot、`GPUBuffer` identity、
+   offset 和 size 比较；index buffer 还包含 format。
+3. viewport、scissor、blend constant 和 stencil reference 比较最终传给 WebGPU 的实际数值，
+   不能比较可变 `Vector4`、`Color` 或 render-state 对象引用。
+4. bind group、uniform/instance upload、draw/indirect draw、pipeline key、render queue 和
+   ShaderLab 不变。WebGL2、example backend query 和用户 API 不变。
+5. 当前主 RHI 没有 `executeBundles()` 路径；本切片不预设 bundle 抽象。以后新增该路径时，
+   必须按规范使 pipeline/bind-group/vertex/index cache 失效。
+
+#### 验收与保留门
+
+1. fake pass 测试覆盖首次设置、相同值跳过、identity/offset/slot/format/数值变化重发，以及
+   新 pass 清空缓存。
+2. 原生命令探针应接近 pipeline 450→114、viewport/scissor 450→7、blend/stencil 450→4、
+   vertex 2,807→2,711、index 449→429；bind group、draw、indirect draw 和上传计数不变。
+3. WebGL2/WebGPU runtime/precompiled 四路径、四个固定相机、backend reload、wind/LOD/category
+   切换、Surface/Shadow/indirect 计数、截图及 page/GPU diagnostic 必须通过。
+4. 父提交/候选按 `all/no_grass/no_tree/no_rock` 交替至少 5 轮；每端每 workload 读取 24 个
+   GPU timestamp，并报告 FPS/P50/P95、Forward/Shadow/total。
+5. 完整场景再以 4× CPU 降速交错至少 5 轮。保留要求原速和受限 CPU 的配对方向不冲突，完整
+   场景 frame P95 不得退化超过 2%，且 GPU pass 不形成超过测量噪声的稳定退化；否则撤销
+   runtime consumer，只保留设计、探针和检查点。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
