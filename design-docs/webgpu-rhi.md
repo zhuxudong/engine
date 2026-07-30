@@ -2875,6 +2875,61 @@ runtime/precompiled 各 10 轮；每个样本新建 browser context，HTTP cache
    场景与归因 workload 的方向稳定、画面门通过才保留 consumer；compiler/RHI 基础能力是否保留
    由独立功能门决定，不把桌面 Metal 结果写成移动端收益。
 
+#### 实现与实验检查点：基础能力保留，Surface consumer 撤销
+
+第一切片已经按契约落地：
+
+- ShaderLab compiler 接受函数局部 `half/half2/half3/half4` 和显式 constructor，并在
+  uniform、storage、attribute、varying、struct member、函数参数或返回值使用时确定性报错。
+- GLES100/GLES300 把局部 half 输出为 `mediump float/vec*`；WGSL 只对实际使用 half 的 shader
+  生成 `GRAPHICS_FEATURE_SHADER_F16` 条件 aliases。
+- RHI 增加只读 `ShaderCapabilities.float16`。WebGPU 只在 adapter 支持时请求 `shader-f16`，
+  WebGL 保持 false；render 和 compute ShaderPass 使用最终 device capability 选择同一份
+  runtime source 或 `.wgslc` 的分支。
+
+Compiler 定向测试 4/4 通过，覆盖 GLES lowering、WGSL f16/f32 aliases、非法 interface 拒绝，
+以及两条 WGSL 的 native shader-module 创建；ShaderCompiler 既有回归 47/47 通过。ComputePass
+7/7 通过，其中真实 WebGPU dispatch 把 f32 storage 值显式转换为 `half4` 再升回 f32，并同时
+核对 device feature 与最终源码分支。13 个 package 类型构建和 module 构建通过。
+
+Surface 候选只把 albedo 与 metallic-smoothness 的两个 texture sample 局部改成 `half4`，在
+alpha、base color、metallic、roughness 进入既有 PBR 路径前显式升回 f32；位置、深度、法线、
+光照、wind/noise、资源与 stage interface 均未修改。WebGL2/WebGPU × runtime/precompiled
+四种 Grasslands 页面和四个固定相机通过截图、实例/LOD/batch 与零 diagnostic 门。测试期 native
+capture 还确认当前 Chromium/Metal adapter 和最终 device 都包含 `shader-f16`，实际创建的
+Surface shader module 含 `enable f16` 与 f16 aliases。
+
+性能比较固定 `terrain-horizon` 相机、1280×720 CSS、DPR 2，关闭 animation、clouds 和 wind。
+父提交与候选在同一 Chromium 140 / Metal 浏览器 context 内按 AB/BA 交替 5 轮；每个页面读取
+24 个 one-shot timestamp，所以每个 workload、每个实现各有 120 个 GPU 样本。下表是合并样本
+的中位数；delta 为 candidate 相对 baseline，负数表示候选更快：
+
+| workload | 实例变化 | GPU total baseline / candidate | Forward baseline / candidate | Shadow baseline / candidate | total delta | Forward delta |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| all | 172,366 visible | 13.433 / 13.543 ms | 11.396 / 11.294 ms | 1.863 / 1.733 ms | +0.82% | -0.90% |
+| no grass | grass 139,378 → 0 | 12.657 / 12.786 ms | 10.345 / 10.487 ms | 1.701 / 1.819 ms | +1.02% | +1.37% |
+| no tree | tree 14,878 → 0 | 12.184 / 11.948 ms | 10.466 / 10.295 ms | 1.031 / 1.049 ms | -1.94% | -1.63% |
+| no rock | rock 3,129 → 0 | 11.774 / 11.592 ms | 10.247 / 10.188 ms | 1.118 / 1.107 ms | -1.55% | -0.58% |
+
+对应的 baseline / candidate IQR：
+
+| workload | GPU total IQR | Forward IQR | Shadow IQR |
+| --- | ---: | ---: | ---: |
+| all | 12.508–14.512 / 12.399–14.933 ms | 10.283–12.435 / 10.544–12.897 ms | 1.550–2.217 / 1.539–2.061 ms |
+| no grass | 11.359–13.438 / 11.450–13.721 ms | 9.803–11.270 / 9.665–11.438 ms | 1.550–2.238 / 1.571–2.167 ms |
+| no tree | 11.182–13.174 / 11.056–13.443 ms | 9.782–11.291 / 9.352–11.357 ms | 0.954–1.868 / 0.957–1.679 ms |
+| no rock | 11.049–13.118 / 10.949–12.892 ms | 8.982–11.177 / 8.836–11.078 ms | 0.969–1.770 / 0.963–2.145 ms |
+
+四种 workload 的可见 category、LOD、renderer/indirect batch 完全匹配，页面与 GPU diagnostic
+均为 0。但完整场景 total 退化，去草负载也退化，去树和去石则改善；每个 workload 的 5 个配对
+轮次都同时出现正负方向。候选没有修改 Shadow 算术，Shadow 中位数仍在 -6.97% 到 +6.92%
+间翻转，也说明约 1% 的差异无法与当前桌面测量噪声区分。
+
+预构建 Surface 产物相对同一 compiler 下未使用 half 的版本，`.shaderc` raw/gzip 增加
+73/22 B，`.wgslc` raw/gzip 增加 570/189 B。候选没有通过完整场景与归因 workload 方向稳定的
+保留门，因此 Surface consumer 已撤销。Compiler、RHI capability 和 compute 执行测试具有独立
+功能价值，予以保留；本检查点不形成桌面或移动端性能提升结论。
+
 ### 移动端约束与验收
 
 - workgroup size、每批次容量、storage binding 数和 buffer 大小都从 `device.limits` 派生；不写适配桌面显卡的固定大值。
