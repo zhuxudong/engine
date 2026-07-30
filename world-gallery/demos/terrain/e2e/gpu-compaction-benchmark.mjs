@@ -6,6 +6,7 @@ const variants = {
 };
 const churnLods = process.env.BENCHMARK_LOD_CHURN === "1";
 const compactOutput = process.env.BENCHMARK_COMPACT === "1";
+const summaryOutput = process.env.BENCHMARK_SUMMARY === "1";
 const roundCount = Number(process.env.BENCHMARK_ROUNDS ?? 3);
 const gpuSampleCount = Number(process.env.BENCHMARK_GPU_SAMPLES ?? 0);
 if (!Number.isInteger(roundCount) || roundCount < 1) {
@@ -148,7 +149,77 @@ for (let round = 0; round < orders.length; round++) {
 }
 
 await browser.close();
-const outputResults = compactOutput
+const summarizeDistribution = (values) => {
+  const sorted = [...values].sort((left, right) => left - right);
+  const percentile = (fraction) => sorted[Math.floor((sorted.length - 1) * fraction)];
+  return {
+    count: sorted.length,
+    min: sorted[0],
+    q1: percentile(0.25),
+    median: percentile(0.5),
+    q3: percentile(0.75),
+    max: sorted.at(-1)
+  };
+};
+const summarizeGpuSamples = (samples) => {
+  const passNames = [...new Set(samples.flatMap((sample) => sample.passes.map((pass) => pass.name)))];
+  return {
+    total: summarizeDistribution(samples.map((sample) => sample.durationMs)),
+    passes: Object.fromEntries(
+      passNames.map((passName) => [
+        passName,
+        summarizeDistribution(
+          samples.flatMap((sample) =>
+            sample.passes.filter((pass) => pass.name === passName).map((pass) => pass.durationMs)
+          )
+        )
+      ])
+    )
+  };
+};
+const summarizeBenchmarkResults = (samples) => ({
+  rounds: samples.length,
+  readyMs: summarizeDistribution(samples.map((sample) => sample.readyMs)),
+  fps: summarizeDistribution(samples.map((sample) => sample.fps)),
+  frameP50: summarizeDistribution(samples.map((sample) => sample.p50)),
+  frameP95: summarizeDistribution(samples.map((sample) => sample.p95)),
+  gpuTiming:
+    samples[0]?.gpuSamples.length > 0 ? summarizeGpuSamples(samples.flatMap((sample) => sample.gpuSamples)) : null
+});
+const outputResults = summaryOutput
+  ? results.map(({ round, label, readyMs, fps, p50, p95, gpuSamples, surface, diagnostics }) => ({
+      round,
+      label,
+      readyMs,
+      fps,
+      p50,
+      p95,
+      gpuTiming:
+        gpuSamples.length > 0
+          ? {
+              total: summarizeDistribution(gpuSamples.map((sample) => sample.durationMs)),
+              forward: summarizeDistribution(
+                gpuSamples.flatMap((sample) =>
+                  sample.passes.filter((pass) => pass.name === "forward").map((pass) => pass.durationMs)
+                )
+              ),
+              shadow: summarizeDistribution(
+                gpuSamples.flatMap((sample) =>
+                  sample.passes.filter((pass) => pass.name === "shadow").map((pass) => pass.durationMs)
+                )
+              )
+            }
+          : null,
+      surface: {
+        visibleRendererBatches: surface.visibleRendererBatches,
+        indirectRendererBatches: surface.indirectRendererBatches,
+        visibleInstances: surface.visibleInstances,
+        visibleCategoryCounts: surface.visibleCategoryCounts,
+        lodCounts: surface.lodCounts
+      },
+      diagnostics
+    }))
+  : compactOutput
   ? results.map(({ round, label, fps, p50, p95, gpuSamples, surface, diagnostics }) => ({
       round,
       label,
@@ -174,6 +245,14 @@ console.log(
       gpuSampleCount,
       churnLods,
       disabledCategories,
+      summary: summaryOutput
+        ? Object.fromEntries(
+            Object.values(labels).map((label) => [
+              label,
+              summarizeBenchmarkResults(results.filter((sample) => sample.label === label))
+            ])
+          )
+        : undefined,
       results: outputResults
     },
     null,
