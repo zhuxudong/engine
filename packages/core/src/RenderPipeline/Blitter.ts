@@ -32,6 +32,7 @@ export class Blitter {
    * @param material - The material to use when blit
    * @param passIndex - Pass index to use of the provided material
    * @param sourceScaleOffset - Source scale and offset
+   * @param gpuTimingLabel - Internal native-pass name used by optional GPU timing.
    */
   static blitTexture(
     engine: Engine,
@@ -41,7 +42,8 @@ export class Blitter {
     viewport: Vector4 = PipelineUtils.defaultViewport,
     material: Material = null,
     passIndex = 0,
-    sourceScaleOffset?: Vector4
+    sourceScaleOffset?: Vector4,
+    gpuTimingLabel: string = "blit"
   ): void {
     const basicResources = engine._basicResources;
     const rhi = engine._hardwareRenderer;
@@ -54,7 +56,7 @@ export class Blitter {
     // We not use projection matrix when blit, but we must modify flipProjection to make front face correct
     context.flipProjection = needFlipY;
 
-    context.setRenderTarget(destination, viewport, 0);
+    context.setRenderTarget(destination, viewport, 0, undefined, gpuTimingLabel);
 
     const rendererShaderData = Blitter._rendererShaderData;
 

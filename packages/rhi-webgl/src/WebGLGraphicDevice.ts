@@ -27,6 +27,7 @@ import {
 } from "@galacean/engine-core";
 import type {
   ComputeCapabilities,
+  GPUTiming,
   IHardwareRenderer,
   IPlatformComputeProgram,
   IPlatformPrimitive,
@@ -116,6 +117,14 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   /** WebGL shaders use the existing GLSL precision path rather than native WGSL f16. */
   readonly shaderCapabilities: ShaderCapabilities = {
     float16: false
+  };
+  /** Timestamp collection is not implemented by the WebGL backend. */
+  readonly gpuTiming: GPUTiming = {
+    supported: false,
+    enabled: false,
+    latestSample: null,
+    droppedSampleCount: 0,
+    requestSample: () => false
   };
 
   maxUniformBlockSize: number;
@@ -493,7 +502,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     viewport: Vector4,
     isFlipProjection: boolean,
     mipLevel?: number,
-    faceIndex?: TextureCubeFace
+    faceIndex?: TextureCubeFace,
+    _gpuTimingLabel?: string
   ) {
     let bufferWidth: number, bufferHeight: number;
     if (renderTarget) {

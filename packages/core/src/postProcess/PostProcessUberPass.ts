@@ -77,7 +77,17 @@ export class PostProcessUberPass extends PostProcessPass {
       uberShaderData.disableMacro(TonemappingEffect._enableMacro);
     }
     const viewport = destTarget === camera.renderTarget ? camera.viewport : undefined;
-    Blitter.blitTexture(camera.engine, srcTexture, destTarget, 0, viewport, this._uberMaterial, undefined);
+    Blitter.blitTexture(
+      camera.engine,
+      srcTexture,
+      destTarget,
+      0,
+      viewport,
+      this._uberMaterial,
+      undefined,
+      undefined,
+      "post-process-uber"
+    );
   }
 
   /**
@@ -171,7 +181,17 @@ export class PostProcessUberPass extends PostProcessPass {
       mipWidth = Math.max(1, Math.floor(mipWidth / 2));
       mipHeight = Math.max(1, Math.floor(mipHeight / 2));
     }
-    Blitter.blitTexture(engine, srcTexture, this._mipDownRT[0], undefined, undefined, bloomMaterial, 0);
+    Blitter.blitTexture(
+      engine,
+      srcTexture,
+      this._mipDownRT[0],
+      undefined,
+      undefined,
+      bloomMaterial,
+      0,
+      undefined,
+      "bloom-prefilter"
+    );
 
     // Down sample - gaussian pyramid
     let lastDown = this._mipDownRT[0];
@@ -186,7 +206,9 @@ export class PostProcessUberPass extends PostProcessPass {
         undefined,
         undefined,
         bloomMaterial,
-        1
+        1,
+        undefined,
+        "bloom-downsample-x"
       );
       Blitter.blitTexture(
         engine,
@@ -195,7 +217,9 @@ export class PostProcessUberPass extends PostProcessPass {
         undefined,
         undefined,
         bloomMaterial,
-        2
+        2,
+        undefined,
+        "bloom-downsample-y"
       );
       lastDown = this._mipDownRT[i];
     }
@@ -210,7 +234,17 @@ export class PostProcessUberPass extends PostProcessPass {
         const texelSizeLow = bloomShaderData.getVector4(BloomEffect._lowMipTexelSizeProp);
         texelSizeLow.set(1 / lowMip.width, 1 / lowMip.height, lowMip.width, lowMip.height);
       }
-      Blitter.blitTexture(engine, <Texture2D>highMip.getColorTexture(0), dst, undefined, undefined, bloomMaterial, 3);
+      Blitter.blitTexture(
+        engine,
+        <Texture2D>highMip.getColorTexture(0),
+        dst,
+        undefined,
+        undefined,
+        bloomMaterial,
+        3,
+        undefined,
+        "bloom-upsample"
+      );
     }
 
     // Setup bloom on uber

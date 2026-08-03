@@ -65,10 +65,16 @@ export class RenderContext {
     shaderData.setVector4(RenderContext._cameraProjectionProperty, projectionParams);
   }
 
-  setRenderTarget(destination: RenderTarget | null, viewport: Vector4, mipLevel?: number, faceIndex?: TextureCubeFace) {
+  setRenderTarget(
+    destination: RenderTarget | null,
+    viewport: Vector4,
+    mipLevel?: number,
+    faceIndex?: TextureCubeFace,
+    gpuTimingLabel?: string
+  ) {
     const engine = this.camera.engine;
     const rhi = engine._hardwareRenderer;
-    rhi.activeRenderTarget(destination, viewport, this.flipProjection, mipLevel, faceIndex);
+    rhi.activeRenderTarget(destination, viewport, this.flipProjection, mipLevel, faceIndex, gpuTimingLabel);
 
     if (destination) {
       engine._macroCollection.disable(Engine._outputSRGBCorrectMacro);

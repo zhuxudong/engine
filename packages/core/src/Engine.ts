@@ -1,5 +1,6 @@
 import {
   type ComputeCapabilities,
+  type GPUTiming,
   type GraphicsBackend,
   IHardwareRenderer,
   IInputOptions,
@@ -268,6 +269,14 @@ export class Engine extends EventDispatcher {
    */
   get computeCapabilities(): ComputeCapabilities {
     return this._hardwareRenderer.computeCapabilities;
+  }
+
+  /**
+   * Optional GPU timestamp collection state.
+   * @returns Backend-neutral support, enablement, and latest asynchronous sample.
+   */
+  get gpuTiming(): GPUTiming {
+    return this._hardwareRenderer.gpuTiming;
   }
 
   protected constructor(canvas: Canvas, hardwareRenderer: IHardwareRenderer, configuration: EngineConfiguration) {

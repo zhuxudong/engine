@@ -43,6 +43,7 @@ import { WebGPUShaderProgram } from "./WebGPUShaderProgram";
 import { WebGPUTexture2D } from "./WebGPUTexture2D";
 import { WebGPUTexture2DArray } from "./WebGPUTexture2DArray";
 import { WebGPUTextureCube } from "./WebGPUTextureCube";
+import { WebGPUTimingProfiler } from "./WebGPUTimingProfiler";
 
 /**
  * Options used to request and configure a WebGPU device.
@@ -56,6 +57,8 @@ export interface WebGPUGraphicDeviceOptions {
   requiredFeatures?: GPUFeatureName[];
   /** Required WebGPU limits. */
   requiredLimits?: Record<string, GPUSize64>;
+  /** Request optional non-blocking GPU timestamp collection. */
+  enableGPUTiming?: boolean;
   /** Canvas alpha compositing mode. */
   alphaMode?: GPUCanvasAlphaMode;
   /** Canvas color space. */
@@ -102,6 +105,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly shaderCapabilities: ShaderCapabilities;
   /** Adapter description exposed for diagnostics. */
   readonly renderer: string;
+  /** Optional GPU timestamp collection state. */
+  readonly gpuTiming: WebGPUTimingProfiler;
 
   /** @internal */
   _currentBindShaderProgram: unknown;
@@ -127,14 +132,21 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     customStates?: Record<number, any>;
   };
   private readonly _mipmapGenerator: WebGPUMipmapGenerator;
+  private readonly _gpuTimingProfiler: WebGPUTimingProfiler;
   private readonly _defaultVertexBuffer: GPUBuffer;
   private readonly _usedPrograms = new Set<WebGPUShaderProgram>();
   private readonly _computePipelines = new Map<string, WebGPUComputePipelineState>();
   private readonly _constantBuffers = new Map<number, WebGPUBuffer>();
   private _retiredBuffers: GPUBuffer[] = [];
+  private _appliedRenderPipeline?: GPURenderPipeline;
+  private _viewportDirty = true;
+  private _scissorDirty = true;
+  private _appliedBlendConstant?: number[];
+  private _appliedStencilReference?: number;
   private _destroyed = false;
   private _globalDepthBias = 0;
   private _globalSlopeScaledDepthBias = 0;
+  private _renderPassLabel = "render";
 
   /**
    * Whether the texture-based joint path is available.
@@ -158,6 +170,12 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this.canvasFormat = format;
     this.capability = new WebGPUCapability(device);
     this._mipmapGenerator = new WebGPUMipmapGenerator(device);
+    this._gpuTimingProfiler = new WebGPUTimingProfiler(
+      device,
+      adapter.features.has("timestamp-query"),
+      options.enableGPUTiming ?? false
+    );
+    this.gpuTiming = this._gpuTimingProfiler;
     const defaultVertexData = new ArrayBuffer(48);
     new Float32Array(defaultVertexData, 0, 4)[3] = 1;
     new Int32Array(defaultVertexData, 16, 4)[3] = 1;
@@ -239,6 +257,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       if (adapter.features.has(feature)) {
         requestedFeatures.add(feature);
       }
+    }
+    if (options.enableGPUTiming && adapter.features.has("timestamp-query")) {
+      requestedFeatures.add("timestamp-query");
     }
     const device = await adapter.requestDevice({
       requiredFeatures: Array.from(requestedFeatures),
@@ -370,11 +391,19 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   }
 
   viewport(x: number, y: number, width: number, height: number): void {
-    this._viewport.set(x, y, width, height);
+    const viewport = this._viewport;
+    if (viewport.x !== x || viewport.y !== y || viewport.z !== width || viewport.w !== height) {
+      viewport.set(x, y, width, height);
+      this._viewportDirty = true;
+    }
   }
 
   scissor(x: number, y: number, width: number, height: number): void {
-    this._scissor.set(x, y, width, height);
+    const scissor = this._scissor;
+    if (scissor.x !== x || scissor.y !== y || scissor.z !== width || scissor.w !== height) {
+      scissor.set(x, y, width, height);
+      this._scissorDirty = true;
+    }
   }
 
   colorMask(): void {}
@@ -428,9 +457,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     viewport: Vector4,
     _isFlipProjection?: boolean,
     mipLevel: number = 0,
-    faceIndex?: number
+    faceIndex?: number,
+    gpuTimingLabel?: string
   ): void {
     this._endCurrentPass();
+    this._renderPassLabel = gpuTimingLabel || (renderTarget ? "offscreen-render" : "main-render");
     if (renderTarget) {
       (
         renderTarget as RenderTarget & { _platformRenderTarget: IPlatformRenderTarget }
@@ -473,7 +504,9 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
     this._endCurrentPass();
     if (this._commandEncoder) {
+      const timingReadback = this._gpuTimingProfiler.resolve(this._commandEncoder);
       this.device.queue.submit([this._commandEncoder.finish()]);
+      this._gpuTimingProfiler.readAfterSubmit(timingReadback);
       this._commandEncoder = null;
     }
     for (const program of this._usedPrograms) {
@@ -514,6 +547,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._destroyed = true;
       this._endCurrentPass();
       this._computePipelines.clear();
+      this._gpuTimingProfiler.destroy();
       this._mainDepthTexture?.destroy();
       this._defaultVertexBuffer.destroy();
       for (const buffer of this._retiredBuffers) {
@@ -608,7 +642,10 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     const descriptor = this._currentRenderTarget
       ? this._currentRenderTarget.createDescriptor(this._pendingClearFlags, this._pendingClearColor)
       : this._createMainRenderPassDescriptor();
+    descriptor.label = this._renderPassLabel;
+    this._gpuTimingProfiler.addTimestampWrites(descriptor, "render");
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
+    this._resetRenderPassState();
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
   }
@@ -626,9 +663,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._commandEncoder ??= this.device.createCommandEncoder({
       label: "Galacean WebGPU frame"
     });
-    return (this._computePass = this._commandEncoder.beginComputePass({
-      label: "Galacean compute pass"
-    }));
+    const descriptor: GPUComputePassDescriptor = {
+      label: "compute"
+    };
+    this._gpuTimingProfiler.addTimestampWrites(descriptor, "compute");
+    return (this._computePass = this._commandEncoder.beginComputePass(descriptor));
   }
 
   /**
@@ -738,28 +777,61 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   _applyDynamicState(pass: GPURenderPassEncoder): void {
-    const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
-    const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
-    const viewportWidth = Math.max(0, Math.min(this._viewport.z, targetWidth - this._viewport.x));
-    const viewportHeight = Math.max(0, Math.min(this._viewport.w, targetHeight - this._viewport.y));
-    pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
-    pass.setScissorRect(
-      Math.max(0, Math.floor(this._scissor.x)),
-      Math.max(0, Math.floor(this._scissor.y)),
-      Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x))),
-      Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)))
-    );
+    if (this._viewportDirty) {
+      const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
+      const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
+      const viewportWidth = Math.max(0, Math.min(this._viewport.z, targetWidth - this._viewport.x));
+      const viewportHeight = Math.max(0, Math.min(this._viewport.w, targetHeight - this._viewport.y));
+      pass.setViewport(this._viewport.x, this._viewport.y, viewportWidth, viewportHeight, 0, 1);
+      this._viewportDirty = false;
+    }
+    if (this._scissorDirty) {
+      const targetWidth = this._currentRenderTarget?.width ?? this._canvas.width;
+      const targetHeight = this._currentRenderTarget?.height ?? this._canvas.height;
+      const scissorX = Math.max(0, Math.floor(this._scissor.x));
+      const scissorY = Math.max(0, Math.floor(this._scissor.y));
+      const scissorWidth = Math.max(0, Math.floor(Math.min(this._scissor.z, targetWidth - this._scissor.x)));
+      const scissorHeight = Math.max(0, Math.floor(Math.min(this._scissor.w, targetHeight - this._scissor.y)));
+      pass.setScissorRect(scissorX, scissorY, scissorWidth, scissorHeight);
+      this._scissorDirty = false;
+    }
     const { state, customStates } = this._getRenderState();
     const blendColor = state.blendState.blendColor;
-    pass.setBlendConstant({
-      r: blendColor.r,
-      g: blendColor.g,
-      b: blendColor.b,
-      a: blendColor.a
-    });
-    pass.setStencilReference(
-      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue
-    );
+    const blendConstant = this._appliedBlendConstant;
+    if (
+      !blendConstant ||
+      blendConstant[0] !== blendColor.r ||
+      blendConstant[1] !== blendColor.g ||
+      blendConstant[2] !== blendColor.b ||
+      blendConstant[3] !== blendColor.a
+    ) {
+      pass.setBlendConstant({
+        r: blendColor.r,
+        g: blendColor.g,
+        b: blendColor.b,
+        a: blendColor.a
+      });
+      this._appliedBlendConstant = [blendColor.r, blendColor.g, blendColor.b, blendColor.a];
+    }
+    const stencilReference =
+      customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue;
+    if (this._appliedStencilReference !== stencilReference) {
+      pass.setStencilReference(stencilReference);
+      this._appliedStencilReference = stencilReference;
+    }
+  }
+
+  /**
+   * Set the active pipeline when it differs from the current render-pass state.
+   * @param pass - Active render-pass encoder.
+   * @param pipeline - Pipeline required by the next draw.
+   * @internal
+   */
+  _setRenderPipeline(pass: GPURenderPassEncoder, pipeline: GPURenderPipeline): void {
+    if (this._appliedRenderPipeline !== pipeline) {
+      pass.setPipeline(pipeline);
+      this._appliedRenderPipeline = pipeline;
+    }
   }
 
   /** @internal */
@@ -857,6 +929,14 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _endCurrentPass(): void {
     this._endRenderPass();
     this._endComputePass();
+  }
+
+  private _resetRenderPassState(): void {
+    this._appliedRenderPipeline = undefined;
+    this._viewportDirty = true;
+    this._scissorDirty = true;
+    this._appliedBlendConstant = undefined;
+    this._appliedStencilReference = undefined;
   }
 
   private _reportComputeCompilationErrors(module: GPUShaderModule, source: string, pipelineId: number): void {
