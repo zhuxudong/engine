@@ -9,6 +9,8 @@
   "debug": "src/index.ts",
   "scripts": {
     "b:types": "tsc",
+    "b:webgpu-types": "tsc -p tsconfig.webgpu.json",
+    "e2e:webgpu": "playwright test -c e2e/webgpu/playwright.config.ts",
     "dev": "vite serve . --config vite.config.js"
   },
   "dependencies": {

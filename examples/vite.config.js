@@ -11,43 +11,64 @@ String.prototype.replaceEJS = function (regStr, replaceStr) {
 const out_p = path.join(__dirname, "./");
 console.log(out_p);
 
-const demoList = fs
-  .readdirSync(path.join(__dirname, "./src"))
-  .filter((name) => /.ts$/.test(name))
-  .map((name) => {
-    const content = fs.readFileSync(path.join(__dirname, "./src", name), "utf8");
+const sourceRoot = path.join(__dirname, "./src");
+
+function collectExampleFiles(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      return entry.name.startsWith("_") ? [] : collectExampleFiles(absolutePath);
+    }
+    return entry.isFile() && entry.name.endsWith(".ts") && !entry.name.startsWith("_") ? [absolutePath] : [];
+  });
+}
+
+const demoList = collectExampleFiles(sourceRoot)
+  .sort()
+  .map((absolutePath) => {
+    const relativePath = path.relative(sourceRoot, absolutePath);
+    const content = fs.readFileSync(absolutePath, "utf8");
     const title = /@title\s+(.+)\b/.exec(content);
     const category = /@category\s+(.+)\b/.exec(content);
+    const backend = /@backend\s+(webgl2|webgpu)\b/.exec(content);
 
     if (!title || !category) {
-      throw new Error(`title and category must be set in playground[${name}]`);
+      throw new Error(`title and category must be set in playground[${relativePath}]`);
     }
 
     return {
       title: title[1],
       category: category[1],
-      file: name.split(".ts")[0]
+      backend: backend?.[1] ?? "webgl2",
+      file: relativePath.slice(0, -path.extname(relativePath).length).split(path.sep).join("/")
     };
   });
 
-demoList.forEach(({ title, file }) => {
-  const ejs = templateStr.replaceEJS("title", title).replaceEJS("url", `./${file}.ts`);
+fs.emptyDirSync(path.resolve(__dirname, OUT_PATH));
 
-  fs.outputFileSync(path.resolve(__dirname, OUT_PATH, file + ".ts"), `import "../src/${file}"`);
+demoList.forEach(({ title, file }) => {
+  const ejs = templateStr.replaceEJS("title", title).replaceEJS("url", `./${path.basename(file)}.ts`);
+  const outputModule = path.resolve(__dirname, OUT_PATH, file + ".ts");
+  const sourceModule = path.resolve(sourceRoot, file);
+  const importPath = path.relative(path.dirname(outputModule), sourceModule).split(path.sep).join("/");
+
+  fs.outputFileSync(outputModule, `import "${importPath.startsWith(".") ? importPath : `./${importPath}`}"`);
   fs.outputFileSync(path.resolve(__dirname, OUT_PATH, file + ".html"), ejs);
 });
 
 // output demolist
 const demoSorted = {};
-demoList.forEach(({ title, category, file }) => {
+demoList.forEach(({ title, category, backend, file }) => {
   if (!demoSorted[category]) {
     demoSorted[category] = [];
   }
   demoSorted[category].push({
     src: file,
-    label: title
+    label: title,
+    backend
   });
 });
+Object.values(demoSorted).forEach((demos) => demos.sort((left, right) => left.label.localeCompare(right.label)));
 
 fs.outputJSONSync(path.join(__dirname, OUT_PATH, ".demoList.json"), demoSorted);
 

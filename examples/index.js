@@ -32,7 +32,7 @@ Object.keys(demoList).forEach((group, groupIndex) => {
   demosDOM.classList.add("space-y-1", "mb-4");
 
   demos.forEach((item) => {
-    const { label, src } = item;
+    const { label, src, backend } = item;
     const itemDOM = document.createElement("a");
 
     itemDOM.innerHTML = `
@@ -54,14 +54,15 @@ Object.keys(demoList).forEach((group, groupIndex) => {
     );
 
     itemDOM.onclick = function () {
-      clickItem(itemDOM);
+      clickItem(itemDOM, backend);
     };
     demosDOM.appendChild(itemDOM);
 
     items.push({
       itemDOM,
       label,
-      src
+      src,
+      backend
     });
   });
 });
@@ -74,7 +75,8 @@ fullScreenDOM.onclick = () => {
   const itemName = location.hash.split("#dist/")[1];
 
   if (itemName) {
-    location.href = location.origin + `/dist/${itemName}.html`;
+    const [entryPath, query] = itemName.split("?");
+    location.href = location.origin + `/dist/${entryPath}.html${query ? `?${query}` : ""}`;
   }
 };
 
@@ -91,22 +93,23 @@ function updateFilter(value) {
   });
 }
 
-function clickItem(itemDOM) {
-  window.location.hash = `#dist/${itemDOM.title}`;
+function clickItem(itemDOM, backend = "webgl2") {
+  window.location.hash = `#dist/${itemDOM.title}?backend=${backend}`;
 }
 
 function onHashChange() {
   const hashPath = window.location.hash.split("#")[1];
   if (!hashPath) {
-    clickItem(items[0].itemDOM);
+    clickItem(items[0].itemDOM, items[0].backend);
     return;
   }
 
-  iframe.src = hashPath + ".html";
+  const [entryPath, query] = hashPath.split("?");
+  iframe.src = `${entryPath}.html${query ? `?${query}` : ""}`;
 
   items.forEach(({ itemDOM }) => {
     const itemPath = `dist/${itemDOM.title}`;
-    if (itemPath === hashPath) {
+    if (itemPath === entryPath) {
       itemDOM.classList.add("active");
     } else {
       itemDOM.classList.remove("active");
