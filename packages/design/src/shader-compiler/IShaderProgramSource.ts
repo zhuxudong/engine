@@ -84,6 +84,24 @@ export interface IShaderResourceReflection {
 }
 
 /**
+ * Reflected storage-buffer binding.
+ */
+export interface IShaderStorageBufferReflection {
+  /** Shader property name. */
+  name: string;
+  /** WebGPU bind-group binding index. */
+  binding: number;
+  /** Storage access declared by ShaderLab. */
+  access: "read" | "read_write";
+  /** Backend-neutral array element type. */
+  elementType: ShaderReflectionType;
+  /** Source expression for an optional fixed array length. */
+  arrayLength?: string;
+  /** Macro conditions controlling whether the resource exists in a compiled variant. */
+  conditions?: readonly IShaderReflectionCondition[];
+}
+
+/**
  * Reflected vertex input.
  */
 export interface IShaderVertexInputReflection {
@@ -109,6 +127,8 @@ export interface IShaderReflection {
   vertexInputs: IShaderVertexInputReflection[];
   /** Fragment color output locations written by the variant. */
   fragmentOutputs: number[];
+  /** Storage buffers used by a compute variant. */
+  storageBuffers?: IShaderStorageBufferReflection[];
 }
 
 /**
@@ -125,4 +145,10 @@ export interface IShaderProgramSource {
   fragmentShaderInstructions?: ShaderInstruction[];
   /** Structured resource and input reflection. */
   reflection?: IShaderReflection;
+  /** Compute shader source. */
+  compute?: string;
+  /** Encoded compute shader macro instructions. */
+  computeShaderInstructions?: ShaderInstruction[];
+  /** Compile-time compute workgroup dimensions. */
+  computeWorkgroupSize?: readonly [string, string, string];
 }

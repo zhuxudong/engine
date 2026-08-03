@@ -266,7 +266,16 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
 
   ...GrammarUtils.createProductionWithOptions(
     NoneTerminal.storage_qualifier,
-    [[Keyword.CONST], [Keyword.IN], [Keyword.INOUT], [Keyword.OUT], [Keyword.CENTROID]],
+    [
+      [Keyword.CONST],
+      [Keyword.IN],
+      [Keyword.INOUT],
+      [Keyword.OUT],
+      [Keyword.CENTROID],
+      [Keyword.BUFFER],
+      [Keyword.READONLY],
+      [Keyword.SHARED]
+    ],
     // #if _VERBOSE
     ASTNode.StorageQualifier.pool
     // #endif

@@ -14,6 +14,8 @@ export class WebGPUBuffer implements IPlatformBuffer {
   readonly _bindingId = WebGPUBuffer._counter++;
 
   private readonly _device: WebGPUGraphicDevice;
+  private readonly _bindingFlags: BufferBindFlag;
+  private readonly _byteLength: number;
   private readonly _shadowData: Uint8Array;
   private _lastUploadEnd = 0;
 
@@ -25,10 +27,12 @@ export class WebGPUBuffer implements IPlatformBuffer {
     data?: ArrayBuffer | ArrayBufferView
   ) {
     this._device = device;
+    this._bindingFlags = type;
+    this._byteLength = byteLength;
     const size = Math.max(4, WebGPUBuffer._alignToFour(byteLength));
     this._shadowData = new Uint8Array(size);
     this._gpuBuffer = device.device.createBuffer({
-      label: BufferBindFlag[type],
+      label: WebGPUBuffer._getLabel(type),
       size,
       usage: WebGPUBuffer._getUsage(type)
     });
@@ -114,18 +118,50 @@ export class WebGPUBuffer implements IPlatformBuffer {
     return this._shadowData.subarray(0, this._lastUploadEnd);
   }
 
+  /** @internal */
+  _validateIndirectDraw(indexed: boolean, offset: number): void {
+    if (!(this._bindingFlags & BufferBindFlag.IndirectBuffer)) {
+      throw new Error("Indirect draw requires a buffer created with BufferBindFlag.IndirectBuffer.");
+    }
+    if (!Number.isInteger(offset) || offset < 0 || (offset & 3) !== 0) {
+      throw new RangeError(`Indirect draw offset ${offset} must be a non-negative multiple of 4.`);
+    }
+    const argumentByteLength = indexed ? 20 : 16;
+    if (offset + argumentByteLength > this._byteLength) {
+      throw new RangeError(
+        `Indirect draw arguments [${offset}, ${offset + argumentByteLength}) exceed ${this._byteLength} bytes.`
+      );
+    }
+  }
+
   private static _getUsage(type: BufferBindFlag): GPUBufferUsageFlags {
     const copyUsage = GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    switch (type) {
-      case BufferBindFlag.VertexBuffer:
-        return GPUBufferUsage.VERTEX | copyUsage;
-      case BufferBindFlag.IndexBuffer:
-        return GPUBufferUsage.INDEX | copyUsage;
-      case BufferBindFlag.ConstantBuffer:
-        return GPUBufferUsage.UNIFORM | copyUsage;
-      default:
-        throw new Error(`Unsupported buffer binding: ${type}`);
+    const supportedBindings =
+      BufferBindFlag.VertexBuffer |
+      BufferBindFlag.IndexBuffer |
+      BufferBindFlag.ConstantBuffer |
+      BufferBindFlag.StorageBuffer |
+      BufferBindFlag.IndirectBuffer;
+    if (!Number.isInteger(type) || (type as number) === 0 || (type & ~supportedBindings) !== 0) {
+      throw new Error(`Unsupported buffer bindings: ${type}`);
     }
+    let usage = copyUsage;
+    if (type & BufferBindFlag.VertexBuffer) usage |= GPUBufferUsage.VERTEX;
+    if (type & BufferBindFlag.IndexBuffer) usage |= GPUBufferUsage.INDEX;
+    if (type & BufferBindFlag.ConstantBuffer) usage |= GPUBufferUsage.UNIFORM;
+    if (type & BufferBindFlag.StorageBuffer) usage |= GPUBufferUsage.STORAGE;
+    if (type & BufferBindFlag.IndirectBuffer) usage |= GPUBufferUsage.INDIRECT;
+    return usage;
+  }
+
+  private static _getLabel(type: BufferBindFlag): string {
+    const labels: string[] = [];
+    if (type & BufferBindFlag.VertexBuffer) labels.push("Vertex");
+    if (type & BufferBindFlag.IndexBuffer) labels.push("Index");
+    if (type & BufferBindFlag.ConstantBuffer) labels.push("Constant");
+    if (type & BufferBindFlag.StorageBuffer) labels.push("Storage");
+    if (type & BufferBindFlag.IndirectBuffer) labels.push("Indirect");
+    return labels.length > 0 ? `${labels.join("|")} buffer` : "Invalid buffer";
   }
 
   private static _alignToFour(byteLength: number): number {

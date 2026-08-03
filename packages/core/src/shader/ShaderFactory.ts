@@ -345,6 +345,38 @@ mat3 _normalMatFromModel(mat3 m) {
 }
 ` + source;
       }
+
+      const sampleLevelHelperName = `gs_sampleDepthLevel_${name}`;
+      const sampleLevelCall = new RegExp(
+        `textureSampleLevel\\(\\s*${escapedName}\\s*,\\s*${escapedName}_sampler\\s*,`,
+        "g"
+      );
+      if (sampleLevelCall.test(source)) {
+        source = source.replace(sampleLevelCall, `${sampleLevelHelperName}(${name}, ${name}_sampler,`);
+        source =
+          `fn ${sampleLevelHelperName}(
+  texture: texture_depth_2d,
+  textureSampler: sampler,
+  uv: vec2<f32>,
+  level: f32
+) -> vec4<f32> {
+  let depth = textureSampleLevel(texture, textureSampler, uv, level);
+  return vec4<f32>(depth, 0.0, 0.0, 1.0);
+}
+` + source;
+      }
+
+      const loadHelperName = `gs_loadDepth_${name}`;
+      const loadCall = new RegExp(`textureLoad\\(\\s*${escapedName}\\s*,`, "g");
+      if (loadCall.test(source)) {
+        source = source.replace(loadCall, `${loadHelperName}(${name},`);
+        source =
+          `fn ${loadHelperName}(texture: texture_depth_2d, coords: vec2<i32>, level: i32) -> vec4<f32> {
+  let depth = textureLoad(texture, coords, level);
+  return vec4<f32>(depth, 0.0, 0.0, 1.0);
+}
+` + source;
+      }
     }
 
     return {

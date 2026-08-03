@@ -9,6 +9,12 @@ export interface IShaderPassSource {
   renderStates: IRenderStates;
   /** Shader source code. */
   contents: string;
-  vertexEntry: string;
-  fragmentEntry: string;
+  /** Vertex-stage entry point for a render pass. */
+  vertexEntry?: string;
+  /** Fragment-stage entry point for a render pass. */
+  fragmentEntry?: string;
+  /** Compute-stage entry point for a compute pass. */
+  computeEntry?: string;
+  /** Compile-time workgroup dimensions. */
+  computeWorkgroupSize?: readonly [string, string, string];
 }

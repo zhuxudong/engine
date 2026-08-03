@@ -44,6 +44,10 @@ export interface IPrecompiledPass {
   vertexShaderInstructions?: ShaderInstruction[];
   /** Encoded fragment-stage source and macro instructions. */
   fragmentShaderInstructions?: ShaderInstruction[];
+  /** Encoded compute-stage source and macro instructions. */
+  computeShaderInstructions?: ShaderInstruction[];
+  /** Compile-time compute workgroup dimensions. */
+  computeWorkgroupSize?: readonly [string, string, string];
   /** Structured reflection for this backend target. */
   reflection?: IShaderReflection;
 }

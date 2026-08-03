@@ -1,7 +1,7 @@
-import { IPlatformPrimitive } from "@galacean/engine-design";
+import type { IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
 import { Engine } from "../Engine";
 import { GraphicsResource } from "../asset/GraphicsResource";
-import { ShaderProgram } from "../shader/ShaderProgram";
+import type { IPlatformBuffer } from "../renderingHardwareInterface/IPlatformBuffer";
 import { BufferUtil } from "./BufferUtil";
 import { IndexBufferBinding } from "./IndexBufferBinding";
 import { SubPrimitive } from "./SubPrimitive";
@@ -147,8 +147,26 @@ export class Primitive extends GraphicsResource {
     }
   }
 
-  draw(shaderProgram: ShaderProgram, subMesh: SubPrimitive): void {
+  draw(shaderProgram: IPlatformShaderProgram, subMesh: SubPrimitive): void {
     this._platformPrimitive.draw(shaderProgram, subMesh);
+    this._bufferStructChanged = false;
+  }
+
+  /**
+   * Draw with arguments read by the platform primitive from an indirect buffer.
+   * @param shaderProgram - Shader program used by the draw.
+   * @param subMesh - Sub-primitive supplying topology and fallback draw range.
+   * @param indirectBuffer - Platform buffer containing indirect arguments.
+   * @param indirectOffset - Byte offset of the selected argument record.
+   * @internal
+   */
+  _drawIndirect(
+    shaderProgram: IPlatformShaderProgram,
+    subMesh: SubPrimitive,
+    indirectBuffer: IPlatformBuffer,
+    indirectOffset: number
+  ): void {
+    this._platformPrimitive.drawIndirect(shaderProgram, subMesh, indirectBuffer, indirectOffset);
     this._bufferStructChanged = false;
   }
 

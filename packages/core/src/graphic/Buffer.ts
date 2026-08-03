@@ -23,7 +23,7 @@ export class Buffer extends GraphicsResource {
   private _data: Uint8Array;
 
   /**
-   * Buffer binding flag.
+   * Buffer binding flags.
    */
   get type(): BufferBindFlag {
     return this._type;
@@ -68,7 +68,7 @@ export class Buffer extends GraphicsResource {
   /**
    * Create Buffer.
    * @param engine - Engine
-   * @param type - Buffer binding flag
+   * @param type - Bitwise combination of buffer binding flags
    * @param byteLength - Byte length
    * @param bufferUsage - Buffer usage
    * @param readable - If buffer is readable
@@ -78,7 +78,7 @@ export class Buffer extends GraphicsResource {
   /**
    * Create Buffer.
    * @param engine - Engine
-   * @param type - Buffer binding flag
+   * @param type - Bitwise combination of buffer binding flags
    * @param data - Buffer data, if `readable` is true, the`data` property will store a copy of this
    * @param bufferUsage - Buffer usage
    * @param readable - If buffer is readable

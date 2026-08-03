@@ -1,4 +1,11 @@
-import { IndexFormat, MeshTopology, Primitive, SubPrimitive, VertexElementFormat } from "@galacean/engine-core";
+import {
+  IndexFormat,
+  type IPlatformBuffer,
+  MeshTopology,
+  Primitive,
+  SubPrimitive,
+  VertexElementFormat
+} from "@galacean/engine-core";
 import type { IPlatformPrimitive, IPlatformShaderProgram, IShaderVertexInputReflection } from "@galacean/engine-design";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
@@ -20,7 +27,25 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   draw(shaderProgram: IPlatformShaderProgram, subPrimitive: SubPrimitive): void {
-    (shaderProgram as WebGPUShaderProgram).draw(this, subPrimitive);
+    this._draw(shaderProgram, subPrimitive);
+  }
+
+  drawIndirect(
+    shaderProgram: IPlatformShaderProgram,
+    subPrimitive: SubPrimitive,
+    indirectBuffer: IPlatformBuffer,
+    indirectOffset: number
+  ): void {
+    this._draw(shaderProgram, subPrimitive, indirectBuffer as WebGPUBuffer, indirectOffset);
+  }
+
+  private _draw(
+    shaderProgram: IPlatformShaderProgram,
+    subPrimitive: SubPrimitive,
+    indirectBuffer?: WebGPUBuffer,
+    indirectOffset: number = 0
+  ): void {
+    (shaderProgram as WebGPUShaderProgram).draw(this, subPrimitive, indirectBuffer, indirectOffset);
   }
 
   destroy(): void {}
@@ -118,12 +143,18 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   /** @internal */
-  _encodeDraw(pass: GPURenderPassEncoder, subPrimitive: SubPrimitive, defaultBufferSlot?: number): void {
+  _encodeDraw(
+    pass: GPURenderPassEncoder,
+    subPrimitive: SubPrimitive,
+    defaultBufferSlot?: number,
+    indirectBuffer?: WebGPUBuffer,
+    indirectOffset: number = 0
+  ): void {
     const primitive = this.primitive;
     for (let index = 0; index < primitive.vertexBufferBindings.length; index++) {
       const binding = primitive.vertexBufferBindings[index];
       if (binding) {
-        pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer);
+        pass.setVertexBuffer(index, (binding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer, binding.offset);
       }
     }
     if (defaultBufferSlot !== undefined) {
@@ -135,7 +166,15 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     if (indexBinding) {
       const format = this._indexFormat();
       pass.setIndexBuffer((indexBinding.buffer._platformBuffer as WebGPUBuffer)._gpuBuffer, format);
-      pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
+      if (indirectBuffer) {
+        indirectBuffer._validateIndirectDraw(true, indirectOffset);
+        pass.drawIndexedIndirect(indirectBuffer._gpuBuffer, indirectOffset);
+      } else {
+        pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
+      }
+    } else if (indirectBuffer) {
+      indirectBuffer._validateIndirectDraw(false, indirectOffset);
+      pass.drawIndirect(indirectBuffer._gpuBuffer, indirectOffset);
     } else {
       pass.draw(subPrimitive.count, instanceCount, subPrimitive.start, 0);
     }
@@ -205,6 +244,10 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
         return "snorm16x4";
       case VertexElementFormat.NormalizedUShort4:
         return "unorm16x4";
+      case VertexElementFormat.Float16Vector2:
+        return "float16x2";
+      case VertexElementFormat.Float16Vector4:
+        return "float16x4";
     }
   }
 

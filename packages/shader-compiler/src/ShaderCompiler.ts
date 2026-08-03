@@ -62,10 +62,12 @@ export class ShaderCompiler {
 
   _parseShaderPass(
     source: string,
-    vertexEntry: string,
-    fragmentEntry: string,
+    vertexEntry: string | undefined,
+    fragmentEntry: string | undefined,
     backend: ShaderLanguage,
-    basePathForIncludeKey: string
+    basePathForIncludeKey: string,
+    computeEntry?: string,
+    computeWorkgroupSize: readonly [string, string, string] = ["GALACEAN_COMPUTE_WORKGROUP_SIZE_X", "1", "1"]
   ): IShaderProgramSource | undefined {
     const macroDefineList = {};
     const noIncludeContent = Preprocessor.parse(
@@ -90,6 +92,35 @@ export class ShaderCompiler {
 
     if (!program) {
       return undefined;
+    }
+
+    if (computeEntry) {
+      if (vertexEntry || fragmentEntry) {
+        throw new Error("A ShaderLab pass cannot mix render and compute entry points.");
+      }
+      if (backend !== ShaderLanguage.WGSL) {
+        return {
+          vertex: "",
+          fragment: "",
+          compute: "",
+          vertexShaderInstructions: [],
+          fragmentShaderInstructions: [],
+          computeShaderInstructions: [],
+          computeWorkgroupSize
+        };
+      }
+      const computeProgram = WGSLVisitor.getVisitor()
+        .setIncludeGuardMacros(this._includeGuardMacros)
+        .visitComputeProgram(program, computeEntry, computeWorkgroupSize);
+      computeProgram.vertexShaderInstructions = [];
+      computeProgram.fragmentShaderInstructions = [];
+      computeProgram.computeShaderInstructions = ShaderInstructionEncoder.parse(computeProgram.compute!);
+      ShaderCompiler._processingPassText = undefined;
+      return computeProgram;
+    }
+
+    if (!vertexEntry || !fragmentEntry) {
+      throw new Error("A render ShaderLab pass requires both VertexShader and FragmentShader entries.");
     }
 
     const codeGen =
@@ -135,7 +166,9 @@ export class ShaderCompiler {
           pass.vertexEntry,
           pass.fragmentEntry,
           platformTarget,
-          basePathForIncludeKey
+          basePathForIncludeKey,
+          pass.computeEntry,
+          pass.computeWorkgroupSize
         );
         if (!programSource) {
           throw new Error(
@@ -150,6 +183,8 @@ export class ShaderCompiler {
           renderStates: this._serializeRenderStates(pass.renderStates),
           vertexShaderInstructions: programSource.vertexShaderInstructions,
           fragmentShaderInstructions: programSource.fragmentShaderInstructions,
+          computeShaderInstructions: programSource.computeShaderInstructions,
+          computeWorkgroupSize: programSource.computeWorkgroupSize,
           reflection: programSource.reflection
         };
       })

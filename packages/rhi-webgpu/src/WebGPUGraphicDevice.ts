@@ -21,15 +21,21 @@ import {
   TextureCube
 } from "@galacean/engine-core";
 import type {
+  ComputeCapabilities,
   IHardwareRenderer,
+  IPlatformComputeProgram,
   IPlatformPrimitive,
   IPlatformShaderProgram,
-  IShaderReflection
+  IShaderReflection,
+  IShaderResourceReflection,
+  IShaderStorageBufferReflection,
+  ShaderCapabilities
 } from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import { WebGPUCanvas } from "./WebGPUCanvas";
 import { WebGPUCapability } from "./WebGPUCapability";
+import { WebGPUComputeProgram, type WebGPUComputePipelineState } from "./WebGPUComputeProgram";
 import { WebGPUMipmapGenerator } from "./WebGPUMipmapGenerator";
 import { WebGPUPrimitive } from "./WebGPUPrimitive";
 import { WebGPURenderTarget } from "./WebGPURenderTarget";
@@ -90,6 +96,10 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   readonly capability: WebGPUCapability;
   /** Maximum uniform-buffer binding size in bytes. */
   readonly maxUniformBlockSize: number;
+  /** Compute support and native device limits. */
+  readonly computeCapabilities: ComputeCapabilities;
+  /** Shader arithmetic features enabled on the WebGPU device. */
+  readonly shaderCapabilities: ShaderCapabilities;
   /** Adapter description exposed for diagnostics. */
   readonly renderer: string;
 
@@ -105,6 +115,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _scissor = new Vector4();
   private _commandEncoder: GPUCommandEncoder;
   private _renderPass: GPURenderPassEncoder;
+  private _computePass: GPUComputePassEncoder;
   private _pendingClearFlags = CameraClearFlags.None;
   private _pendingClearColor = new Color();
   private _mainDepthTexture: GPUTexture;
@@ -118,6 +129,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private readonly _mipmapGenerator: WebGPUMipmapGenerator;
   private readonly _defaultVertexBuffer: GPUBuffer;
   private readonly _usedPrograms = new Set<WebGPUShaderProgram>();
+  private readonly _computePipelines = new Map<string, WebGPUComputePipelineState>();
   private readonly _constantBuffers = new Map<number, WebGPUBuffer>();
   private _retiredBuffers: GPUBuffer[] = [];
   private _destroyed = false;
@@ -162,6 +174,23 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       stencil: options.stencil ?? true
     };
     this.maxUniformBlockSize = device.limits.maxUniformBufferBindingSize;
+    this.computeCapabilities = {
+      supported: true,
+      maxWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension,
+      maxWorkgroupSizeX: device.limits.maxComputeWorkgroupSizeX,
+      maxWorkgroupSizeY: device.limits.maxComputeWorkgroupSizeY,
+      maxWorkgroupSizeZ: device.limits.maxComputeWorkgroupSizeZ,
+      maxInvocationsPerWorkgroup: device.limits.maxComputeInvocationsPerWorkgroup,
+      maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+      maxStorageBuffersPerStage: device.limits.maxStorageBuffersPerShaderStage,
+      recommendedWorkgroupSizeX: Math.max(
+        1,
+        Math.min(64, device.limits.maxComputeWorkgroupSizeX, device.limits.maxComputeInvocationsPerWorkgroup)
+      )
+    };
+    this.shaderCapabilities = {
+      float16: device.features.has("shader-f16")
+    };
     this.renderer = adapter.info?.description || adapter.info?.device || "WebGPU";
     context.configure({
       device,
@@ -197,6 +226,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
 
     const preferredFeatures: GPUFeatureName[] = [
+      "shader-f16",
       "float32-filterable",
       "float32-blendable",
       "rg11b10ufloat-renderable",
@@ -261,6 +291,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     instanceLayout?: InstanceBufferLayout | null
   ): IPlatformShaderProgram {
     return new WebGPUShaderProgram(this, engine, vertexSource, fragmentSource, reflection, instanceLayout);
+  }
+
+  /**
+   * Create a WebGPU compute pipeline and storage-binding owner.
+   * @param computeSource - Generated WGSL compute source.
+   * @param reflection - Resolved ShaderLab resource reflection.
+   * @returns Platform compute program.
+   * @internal
+   */
+  createPlatformComputeProgram(computeSource: string, reflection: IShaderReflection): IPlatformComputeProgram {
+    return new WebGPUComputeProgram(this, computeSource, reflection);
   }
 
   createPlatformTexture2D(texture: Texture2D): IPlatformTexture2D {
@@ -339,18 +380,39 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   colorMask(): void {}
 
   clearRenderTarget(_engine: Engine, clearFlags: CameraClearFlags, clearColor?: Color): void {
-    this._endRenderPass();
+    this._endCurrentPass();
     this._pendingClearFlags = clearFlags;
     if (clearColor) {
       this._pendingClearColor.copyFrom(clearColor);
     }
   }
 
-  drawPrimitive(primitive: WebGPUPrimitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram): void {
+  drawPrimitive(primitive: Primitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram): void {
     const platformProgram =
       (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
       shaderProgram;
     primitive.draw(platformProgram, subPrimitive);
+  }
+
+  /**
+   * Encodes an indirect draw using the primitive's current pipeline and bindings.
+   * @param primitive Primitive supplying vertex and optional index buffers.
+   * @param subPrimitive Sub-primitive supplying topology for pipeline selection.
+   * @param shaderProgram Shader program supplying pipeline and bind groups.
+   * @param indirectBuffer Platform buffer containing WebGPU draw arguments.
+   * @param indirectOffset Byte offset of the argument record.
+   */
+  drawPrimitiveIndirect(
+    primitive: Primitive,
+    subPrimitive: SubMesh,
+    shaderProgram: IPlatformShaderProgram,
+    indirectBuffer: IPlatformBuffer,
+    indirectOffset: number = 0
+  ): void {
+    const platformProgram =
+      (shaderProgram as IPlatformShaderProgram & { _platformProgram?: IPlatformShaderProgram })._platformProgram ??
+      shaderProgram;
+    primitive._drawIndirect(platformProgram, subPrimitive, indirectBuffer, indirectOffset);
   }
 
   getMainFrameBufferWidth(): number {
@@ -368,7 +430,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     mipLevel: number = 0,
     faceIndex?: number
   ): void {
-    this._endRenderPass();
+    this._endCurrentPass();
     if (renderTarget) {
       (
         renderTarget as RenderTarget & { _platformRenderTarget: IPlatformRenderTarget }
@@ -409,7 +471,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     if (!this._commandEncoder && this._pendingClearFlags !== CameraClearFlags.None) {
       this._getRenderPass();
     }
-    this._endRenderPass();
+    this._endCurrentPass();
     if (this._commandEncoder) {
       this.device.queue.submit([this._commandEncoder.finish()]);
       this._commandEncoder = null;
@@ -442,7 +504,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   }
 
   resetState(): void {
-    this._endRenderPass();
+    this._endCurrentPass();
     this._currentBindShaderProgram = null;
     this._currentRenderTarget = null;
   }
@@ -450,7 +512,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   destroy(): void {
     if (!this._destroyed) {
       this._destroyed = true;
-      this._endRenderPass();
+      this._endCurrentPass();
+      this._computePipelines.clear();
       this._mainDepthTexture?.destroy();
       this._defaultVertexBuffer.destroy();
       for (const buffer of this._retiredBuffers) {
@@ -463,7 +526,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   _setRenderTarget(target: WebGPURenderTarget): void {
-    this._endRenderPass();
+    this._endCurrentPass();
     this._currentRenderTarget = target;
   }
 
@@ -529,11 +592,16 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     };
   }
 
-  /** @internal */
+  /**
+   * Return the active render pass, closing any preceding compute group.
+   * @returns Current or newly encoded render pass.
+   * @internal
+   */
   _getRenderPass(): GPURenderPassEncoder {
     if (this._renderPass) {
       return this._renderPass;
     }
+    this._endComputePass();
     this._commandEncoder ??= this.device.createCommandEncoder({
       label: "Galacean WebGPU frame"
     });
@@ -543,6 +611,129 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
+  }
+
+  /**
+   * Return the active compute pass so consecutive dispatches share one native pass.
+   * @returns Current or newly encoded compute pass.
+   * @internal
+   */
+  _beginComputePass(): GPUComputePassEncoder {
+    if (this._computePass) {
+      return this._computePass;
+    }
+    this._endRenderPass();
+    this._commandEncoder ??= this.device.createCommandEncoder({
+      label: "Galacean WebGPU frame"
+    });
+    return (this._computePass = this._commandEncoder.beginComputePass({
+      label: "Galacean compute pass"
+    }));
+  }
+
+  /**
+   * Reuse immutable pipeline state for identical generated compute WGSL.
+   * @param source - Generated WGSL compute source.
+   * @param resources - Reflected sampled-texture declarations.
+   * @param storageBuffers - Reflected storage-buffer declarations.
+   * @returns Device-owned native pipeline state.
+   * @internal
+   */
+  _getComputePipeline(
+    source: string,
+    resources: readonly IShaderResourceReflection[],
+    storageBuffers: readonly IShaderStorageBufferReflection[]
+  ): WebGPUComputePipelineState {
+    const cached = this._computePipelines.get(source);
+    if (cached) {
+      return cached;
+    }
+
+    const pipelineId = this._computePipelines.size;
+    const module = this.device.createShaderModule({
+      label: `ComputePipeline ${pipelineId}`,
+      code: source
+    });
+    this._reportComputeCompilationErrors(module, source, pipelineId);
+    const bindGroupLayout = this.device.createBindGroupLayout({
+      label: `ComputePipeline ${pipelineId} resources`,
+      entries: [
+        ...resources.flatMap<GPUBindGroupLayoutEntry>((resource) => [
+          {
+            binding: resource.textureBinding,
+            visibility: GPUShaderStage.COMPUTE,
+            texture: {
+              sampleType: WebGPUGraphicDevice._textureSampleType(resource.textureType),
+              viewDimension: WebGPUGraphicDevice._textureViewDimension(resource.textureType),
+              multisampled: false
+            }
+          },
+          {
+            binding: resource.samplerBinding,
+            visibility: GPUShaderStage.COMPUTE,
+            sampler: {
+              type: resource.comparison
+                ? "comparison"
+                : resource.textureType.includes("depth")
+                  ? "non-filtering"
+                  : "filtering"
+            }
+          }
+        ]),
+        ...storageBuffers.map<GPUBindGroupLayoutEntry>((storageBuffer) => ({
+          binding: storageBuffer.binding,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: {
+            type: storageBuffer.access === "read" ? "read-only-storage" : "storage"
+          }
+        }))
+      ]
+    });
+    const state = {
+      bindGroupLayout,
+      pipeline: this.device.createComputePipeline({
+        label: `ComputePipeline ${pipelineId}`,
+        layout: this.device.createPipelineLayout({
+          label: `ComputePipeline ${pipelineId} layout`,
+          bindGroupLayouts: [bindGroupLayout]
+        }),
+        compute: {
+          module,
+          entryPoint: "main"
+        }
+      })
+    };
+    this._computePipelines.set(source, state);
+    return state;
+  }
+
+  private static _textureSampleType(type: string): GPUTextureSampleType {
+    if (type.includes("depth")) {
+      return "depth";
+    }
+    if (type.includes("<u32>")) {
+      return "uint";
+    }
+    if (type.includes("<i32>")) {
+      return "sint";
+    }
+    return "float";
+  }
+
+  private static _textureViewDimension(type: string): GPUTextureViewDimension {
+    if (type.includes("cube_array")) {
+      return "cube-array";
+    }
+    if (type.includes("cube")) {
+      return "cube";
+    }
+    if (type.includes("2d_array")) {
+      return "2d-array";
+    }
+    if (type.includes("3d")) {
+      return "3d";
+    }
+    return "2d";
   }
 
   /** @internal */
@@ -654,5 +845,34 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._renderPass.end();
       this._renderPass = null;
     }
+  }
+
+  private _endComputePass(): void {
+    if (this._computePass) {
+      this._computePass.end();
+      this._computePass = null;
+    }
+  }
+
+  private _endCurrentPass(): void {
+    this._endRenderPass();
+    this._endComputePass();
+  }
+
+  private _reportComputeCompilationErrors(module: GPUShaderModule, source: string, pipelineId: number): void {
+    module.getCompilationInfo().then((info) => {
+      const errors = info.messages.filter((message) => message.type === "error");
+      if (errors.length > 0 && !this._destroyed) {
+        const lines = source.split("\n");
+        console.error(
+          `WebGPU compute pipeline ${pipelineId} failed:\n${errors
+            .map((message) => {
+              const sourceLine = lines[message.lineNum - 1]?.trim();
+              return `${message.lineNum}:${message.linePos} ${message.message}${sourceLine ? `\n> ${sourceLine}` : ""}`;
+            })
+            .join("\n")}`
+        );
+      }
+    });
   }
 }

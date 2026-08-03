@@ -17,6 +17,8 @@ interface IPrecompiledShader {
       isUsePass: boolean;
       vertexShaderInstructions?: unknown;
       fragmentShaderInstructions?: unknown;
+      computeShaderInstructions?: unknown;
+      computeWorkgroupSize?: readonly [string, string, string];
       reflection?: unknown;
     }[];
   }[];

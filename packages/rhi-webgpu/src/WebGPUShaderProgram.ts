@@ -190,7 +190,12 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
   }
 
   /** @internal */
-  draw(primitive: WebGPUPrimitive, subPrimitive: SubPrimitive): void {
+  draw(
+    primitive: WebGPUPrimitive,
+    subPrimitive: SubPrimitive,
+    indirectBuffer?: WebGPUBuffer,
+    indirectOffset: number = 0
+  ): void {
     if (this._destroyed) {
       throw new Error("Cannot draw with a destroyed WebGPU shader program.");
     }
@@ -208,7 +213,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       pass.setBindGroup(1, instanceBinding.bindGroup, [instanceBinding.dynamicOffset]);
     }
     graphicDevice._applyDynamicState(pass);
-    primitive._encodeDraw(pass, subPrimitive, vertexState.defaultBufferSlot);
+    primitive._encodeDraw(pass, subPrimitive, vertexState.defaultBufferSlot, indirectBuffer, indirectOffset);
     graphicDevice._useProgram(this);
   }
 

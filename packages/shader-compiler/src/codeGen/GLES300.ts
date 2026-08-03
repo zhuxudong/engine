@@ -49,6 +49,10 @@ export class GLES300Visitor extends GLESVisitor {
   }
 
   override visitFunctionIdentifier(node: ASTNode.FunctionIdentifier): string {
+    const halfType = this._getHalfValueType(node.lexeme);
+    if (halfType) {
+      return halfType;
+    }
     const children = node.children;
     const typeSpecifier = children[0] as ASTNode.TypeSpecifier;
     if (typeSpecifier.children.length !== 1) {

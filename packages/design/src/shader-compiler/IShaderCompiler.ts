@@ -21,10 +21,12 @@ export interface IShaderCompiler {
    */
   _parseShaderPass(
     shaderPassSource: string,
-    vertexEntry: string,
-    fragmentEntry: string,
+    vertexEntry: string | undefined,
+    fragmentEntry: string | undefined,
     backend: any,
-    basePathForIncludeKey: string
+    basePathForIncludeKey: string,
+    computeEntry?: string,
+    computeWorkgroupSize?: readonly [string, string, string]
   ): IShaderProgramSource | undefined;
 
   /**

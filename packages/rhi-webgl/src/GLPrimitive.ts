@@ -1,4 +1,4 @@
-import { GLCapabilityType, Logger, Primitive } from "@galacean/engine-core";
+import { DataType, GLCapabilityType, type IPlatformBuffer, Logger, Primitive } from "@galacean/engine-core";
 import { SubPrimitive } from "@galacean/engine-core/types/graphic/SubPrimitive";
 import { IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
 import { WebGLGraphicDevice } from "./WebGLGraphicDevice";
@@ -17,6 +17,7 @@ export class GLPrimitive implements IPlatformPrimitive {
   private _attribLocArray: number[] = [];
   private readonly _primitive: Primitive;
   private readonly _canUseInstancedArrays: boolean;
+  private readonly _isWebGL2: boolean;
 
   private _gl: (WebGLRenderingContext & WebGLExtension) | WebGL2RenderingContext;
   private _vaoMap: Map<number, WebGLVertexArrayObject> = new Map();
@@ -26,6 +27,7 @@ export class GLPrimitive implements IPlatformPrimitive {
     this._primitive = primitive;
     this._canUseInstancedArrays = rhi.canIUse(GLCapabilityType.instancedArrays);
     this._isSupportVAO = rhi.canIUse(GLCapabilityType.vertexArrayObject);
+    this._isWebGL2 = rhi.isWebGL2;
     this._gl = rhi.gl;
   }
 
@@ -93,6 +95,19 @@ export class GLPrimitive implements IPlatformPrimitive {
     }
   }
 
+  /**
+   * Reports the unsupported indirect-draw capability on WebGL.
+   * @throws Always; WebGL does not expose core indirect drawing.
+   */
+  drawIndirect(
+    _shaderProgram: IPlatformShaderProgram,
+    _subMesh: SubPrimitive,
+    _indirectBuffer: IPlatformBuffer,
+    _indirectOffset: number
+  ): never {
+    throw new Error("Indirect drawing is not supported by the WebGL backend.");
+  }
+
   destroy(): void {
     this._isSupportVAO && this._clearVAO();
   }
@@ -118,7 +133,7 @@ export class GLPrimitive implements IPlatformPrimitive {
 
       const element = attributes[name];
       if (element) {
-        const { buffer, stride } = vertexBufferBindings[element.bindingIndex];
+        const { buffer, stride, offset } = vertexBufferBindings[element.bindingIndex];
         vbo = buffer._platformBuffer._glBuffer;
         // prevent binding the vbo which already bound at the last loop, e.g. a buffer with multiple attributes.
         if (lastBoundVbo !== vbo) {
@@ -128,7 +143,17 @@ export class GLPrimitive implements IPlatformPrimitive {
 
         gl.enableVertexAttribArray(loc);
         const elementInfo = element._formatMetaInfo;
-        gl.vertexAttribPointer(loc, elementInfo.size, elementInfo.type, elementInfo.normalized, stride, element.offset);
+        if (elementInfo.type === DataType.HALF_FLOAT && !this._isWebGL2) {
+          throw new Error("Half-float vertex attributes require WebGL2.");
+        }
+        gl.vertexAttribPointer(
+          loc,
+          elementInfo.size,
+          elementInfo.type,
+          elementInfo.normalized,
+          stride,
+          offset + element.offset
+        );
         if (this._canUseInstancedArrays) {
           gl.vertexAttribDivisor(loc, element.instanceStepRate);
         }

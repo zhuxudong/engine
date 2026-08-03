@@ -15,6 +15,7 @@ import {
   Logger,
   Mesh,
   Platform,
+  Primitive,
   RenderTarget,
   SubMesh,
   SystemInfo,
@@ -24,7 +25,14 @@ import {
   TextureCubeFace,
   TextureFormat
 } from "@galacean/engine-core";
-import type { IHardwareRenderer, IPlatformPrimitive, IPlatformShaderProgram } from "@galacean/engine-design";
+import type {
+  ComputeCapabilities,
+  IHardwareRenderer,
+  IPlatformComputeProgram,
+  IPlatformPrimitive,
+  IPlatformShaderProgram,
+  ShaderCapabilities
+} from "@galacean/engine-design";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { GLBuffer } from "./GLBuffer";
 import { GLCapability } from "./GLCapability";
@@ -93,6 +101,22 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   readonly backend = "webgl" as const;
   /** Origin used when sampling WebGL render-target textures. */
   readonly renderTargetOrigin = "lower-left" as const;
+  /** Compute is unavailable in WebGL and remains an explicit capability boundary. */
+  readonly computeCapabilities: ComputeCapabilities = {
+    supported: false,
+    maxWorkgroupsPerDimension: 0,
+    maxWorkgroupSizeX: 0,
+    maxWorkgroupSizeY: 0,
+    maxWorkgroupSizeZ: 0,
+    maxInvocationsPerWorkgroup: 0,
+    maxStorageBufferBindingSize: 0,
+    maxStorageBuffersPerStage: 0,
+    recommendedWorkgroupSizeX: 1
+  };
+  /** WebGL shaders use the existing GLSL precision path rather than native WGSL f16. */
+  readonly shaderCapabilities: ShaderCapabilities = {
+    float16: false
+  };
 
   maxUniformBlockSize: number;
 
@@ -252,6 +276,16 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   createPlatformPrimitive(primitive: Mesh): IPlatformPrimitive {
     return new GLPrimitive(this, primitive);
+  }
+
+  /**
+   * Reject compute-program creation on WebGL.
+   * @returns Never returns.
+   * @throws Always because WebGL has no compute pipeline.
+   * @internal
+   */
+  createPlatformComputeProgram(): IPlatformComputeProgram {
+    throw new Error("Compute passes are not supported by the WebGL backend.");
   }
 
   createPlatformTexture2D(texture2D: Texture2D): IPlatformTexture2D {
@@ -418,13 +452,32 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     gl.clear(clearFlag);
   }
 
-  drawPrimitive(primitive: GLPrimitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram) {
+  drawPrimitive(primitive: Primitive, subPrimitive: SubMesh, shaderProgram: IPlatformShaderProgram) {
     // todo: VAO not support morph animation
     if (primitive) {
       primitive.draw(shaderProgram, subPrimitive);
     } else {
       Logger.error("draw primitive failed.");
     }
+  }
+
+  /**
+   * Reports the unsupported indirect-draw capability on WebGL.
+   * @param _primitive Primitive that would supply vertex and index buffers.
+   * @param _subPrimitive Sub-primitive that would supply topology.
+   * @param _shaderProgram Shader program that would supply the pipeline state.
+   * @param _indirectBuffer Buffer that would contain indirect arguments.
+   * @param _indirectOffset Byte offset that would select the argument record.
+   * @throws Always; indirect drawing is only available on WebGPU.
+   */
+  drawPrimitiveIndirect(
+    _primitive: Primitive,
+    _subPrimitive: SubMesh,
+    _shaderProgram: IPlatformShaderProgram,
+    _indirectBuffer: IPlatformBuffer,
+    _indirectOffset: number = 0
+  ): never {
+    throw new Error("Indirect drawing is not supported by the WebGL backend.");
   }
 
   getMainFrameBufferWidth(): number {

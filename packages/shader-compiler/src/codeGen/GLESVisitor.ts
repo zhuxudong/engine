@@ -10,6 +10,13 @@ import { CodeGenVisitor } from "./CodeGenVisitor";
 import { ICodeSegment } from "./types";
 import { StructRole, VisitorContext } from "./VisitorContext";
 
+const HALF_VALUE_TYPES = {
+  half: "float",
+  half2: "vec2",
+  half3: "vec3",
+  half4: "vec4"
+} as const;
+
 /**
  * @internal
  */
@@ -17,6 +24,18 @@ export abstract class GLESVisitor extends CodeGenVisitor {
   private _globalCodeArray: ICodeSegment[] = [];
   private static _lookupSymbol: SymbolInfo = new SymbolInfo("", null);
   private static _serializedGlobalKey = new Set();
+
+  override defaultCodeGen(children: NodeChild[]): string {
+    return children
+      .map((child) => {
+        if (child instanceof BaseToken) {
+          const halfType = this._getHalfValueType(child.lexeme);
+          return halfType ? `mediump ${halfType}` : child.lexeme;
+        }
+        return child.codeGen(this);
+      })
+      .join(" ");
+  }
 
   reset(): void {
     const { _globalCodeArray: globalCodeArray } = this;
@@ -31,6 +50,7 @@ export abstract class GLESVisitor extends CodeGenVisitor {
   }
 
   visitShaderProgram(node: ASTNode.GLShaderProgram, vertexEntry: string, fragmentEntry: string): IShaderInfo {
+    this._validateHalfValueTypes(node);
     // #if _VERBOSE
     this.errors.length = 0;
     // #endif
@@ -50,6 +70,59 @@ export abstract class GLESVisitor extends CodeGenVisitor {
       vertex: this._vertexMain(vertexEntry, shaderData, outerGlobalMacroDeclarations),
       fragment: this._fragmentMain(fragmentEntry, shaderData, outerGlobalMacroDeclarations)
     };
+  }
+
+  override visitFunctionIdentifier(node: ASTNode.FunctionIdentifier): string {
+    return this._getHalfValueType(node.lexeme) ?? super.visitFunctionIdentifier(node);
+  }
+
+  /**
+   * Generate the shared function body for a compute entry.
+   * @param node - Parsed ShaderLab program.
+   * @param computeEntry - Compute entry-point name.
+   * @returns Backend-stage source without its platform wrapper.
+   * @internal
+   */
+  protected _visitComputeProgramBody(node: ASTNode.GLShaderProgram, computeEntry: string): string {
+    // #if _VERBOSE
+    this.errors.length = 0;
+    // #endif
+    VisitorContext.reset();
+    this.reset();
+
+    const shaderData = node.shaderData;
+    const context = VisitorContext.context;
+    context._passSymbolTable = shaderData.symbolTable;
+    context.stage = EShaderStage.COMPUTE;
+    context.stageEntry = computeEntry;
+
+    const lookupSymbol = GLESVisitor._lookupSymbol;
+    lookupSymbol.set(computeEntry, ESymbolType.FN);
+    const fnSymbols = <FnSymbol[]>shaderData.symbolTable.getSymbols(lookupSymbol, true, []);
+    if (!fnSymbols.length) {
+      throw `no entry function found: ${computeEntry}`;
+    }
+    for (const fnSymbol of fnSymbols) {
+      const prototype = fnSymbol.astNode.protoType;
+      if (prototype.returnType.type !== Keyword.VOID || prototype.parameterList?.length) {
+        throw `compute entry "${computeEntry}" must return void and declare no parameters`;
+      }
+    }
+
+    context.referenceGlobal(computeEntry, ESymbolType.FN);
+    const globalCodeArray = this._globalCodeArray;
+    this._getGlobalSymbol(globalCodeArray);
+    this._getGlobalMacroDeclarations(shaderData.getOuterGlobalMacroDeclarations(), globalCodeArray);
+    this.getOtherGlobal(shaderData, globalCodeArray);
+
+    const source = globalCodeArray
+      .sort((left, right) => left.index - right.index)
+      .map((item) => item.text)
+      .join("\n");
+
+    context.reset();
+    this.reset();
+    return source;
   }
 
   /** Populate `_structVarMap` for varying/attribute/mrt-typed variables across both stages before codegen. */
@@ -116,6 +189,30 @@ export abstract class GLESVisitor extends CodeGenVisitor {
     symbolTable.forEach((sym) => {
       if (sym.type === ESymbolType.VAR) registerByType(sym.dataType?.typeLexeme, sym.ident);
     });
+  }
+
+  protected _getHalfValueType(lexeme: string): (typeof HALF_VALUE_TYPES)[keyof typeof HALF_VALUE_TYPES] | undefined {
+    return HALF_VALUE_TYPES[lexeme as keyof typeof HALF_VALUE_TYPES];
+  }
+
+  protected _validateHalfValueTypes(node: TreeNode): void {
+    const visit = (current: TreeNode): void => {
+      if (current instanceof ASTNode.TypeSpecifier && this._getHalfValueType(current.lexeme)) {
+        const parent = current.parent;
+        const declaration = parent instanceof ASTNode.FullySpecifiedType ? parent.parent : undefined;
+        if (!(parent instanceof ASTNode.FunctionIdentifier) && !(declaration instanceof ASTNode.SingleDeclaration)) {
+          throw new Error(
+            `ShaderLab ${current.lexeme} is only supported in function-local declarations and explicit constructors.`
+          );
+        }
+      }
+      for (const child of current.children) {
+        if (child instanceof TreeNode) {
+          visit(child);
+        }
+      }
+    };
+    visit(node);
   }
 
   private _vertexMain(
@@ -375,7 +472,7 @@ export abstract class GLESVisitor extends CodeGenVisitor {
       const child = macro.children[0];
 
       if (child instanceof ASTNode.GlobalMacroIfStatement) {
-        let result: ICodeSegment[] = [];
+        const result: ICodeSegment[] = [];
         result.push(
           ...macro.macroExpressions.map((item) => ({
             text: item instanceof BaseToken ? item.lexeme : item.codeGen(this),

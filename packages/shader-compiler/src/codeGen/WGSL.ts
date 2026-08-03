@@ -2,6 +2,7 @@ import type {
   IShaderInfo,
   IShaderReflection,
   IShaderResourceReflection,
+  IShaderStorageBufferReflection,
   IShaderStructReflection,
   IShaderUniformReflection,
   IShaderVertexInputReflection
@@ -17,7 +18,7 @@ import { ParserUtils } from "../ParserUtils";
 import { GLESVisitor } from "./GLESVisitor";
 import { VisitorContext } from "./VisitorContext";
 
-type Stage = "vertex" | "fragment";
+type Stage = "vertex" | "fragment" | "compute";
 
 type IOField = {
   name: string;
@@ -37,6 +38,35 @@ type Uniform = IShaderUniformReflection & {
   branch: BranchSignature;
 };
 
+type StorageBuffer = IShaderStorageBufferReflection & {
+  sourceIndex: number;
+  branch: BranchSignature;
+  atomic: boolean;
+};
+
+type WorkgroupVariable = {
+  name: string;
+  type: string;
+  arrayLength?: string;
+  sourceIndex: number;
+  branch: BranchSignature;
+  atomic: boolean;
+};
+
+type StorageElementReference = {
+  kind: "storage";
+  storageBuffer: StorageBuffer;
+  expression: ASTNode.PostfixExpression;
+};
+
+type WorkgroupAtomicReference = {
+  kind: "workgroup";
+  workgroupVariable: WorkgroupVariable;
+  expression: ASTNode.PostfixExpression | ASTNode.VariableIdentifier;
+};
+
+type AtomicReference = StorageElementReference | WorkgroupAtomicReference;
+
 /**
  * Direct ShaderLab AST to WGSL code generator.
  * @internal
@@ -46,6 +76,8 @@ export class WGSLVisitor extends GLESVisitor {
 
   private readonly _uniforms = new Map<string, Uniform>();
   private readonly _resources = new Map<string, Resource>();
+  private readonly _storageBuffers = new Map<string, StorageBuffer>();
+  private readonly _workgroupVariables = new Map<string, WorkgroupVariable>();
   private readonly _structs = new Map<string, StructSymbol>();
   private readonly _vertexInputs = new Map<string, IOField>();
   private readonly _vertexOutputs = new Map<string, IOField>();
@@ -54,7 +86,8 @@ export class WGSLVisitor extends GLESVisitor {
   private readonly _functionSymbols = new Map<string, FnSymbol[]>();
   private readonly _builtins: Record<Stage, Set<string>> = {
     vertex: new Set(),
-    fragment: new Set()
+    fragment: new Set(),
+    compute: new Set()
   };
   private readonly _pointerParameterStack: Set<string>[] = [];
   private readonly _samplerParameterStack: Map<string, string>[] = [];
@@ -62,6 +95,7 @@ export class WGSLVisitor extends GLESVisitor {
   private _fragmentEntry = "";
   private _swizzleTempIndex = 0;
   private _requiresNanHelper = false;
+  private _usesHalfValueTypes = false;
   private _includeGuardMacros = new Set<string>();
 
   static getVisitor(): WGSLVisitor {
@@ -85,15 +119,50 @@ export class WGSLVisitor extends GLESVisitor {
     this._vertexEntry = vertexEntry;
     this._fragmentEntry = fragmentEntry;
     this._collectGlobalResources(node, vertexEntry, fragmentEntry);
+    this._prepareAtomics(node, false);
 
     const generated = super.visitShaderProgram(node, vertexEntry, fragmentEntry);
     this._collectFragmentOutputs(node, fragmentEntry);
     const reflection = this._createReflection();
     const declarations = this._createResourceDeclarations();
+    const halfValueTypes = this._createHalfValueTypeDeclarations();
 
     return {
-      vertex: `${declarations}\n${generated.vertex}\n${this._createVertexWrapper()}`,
-      fragment: `${declarations}\n${generated.fragment}\n${this._createFragmentWrapper()}`,
+      vertex: `${halfValueTypes}\n${declarations}\n${generated.vertex}\n${this._createVertexWrapper()}`,
+      fragment: `${halfValueTypes}\n${declarations}\n${generated.fragment}\n${this._createFragmentWrapper()}`,
+      reflection
+    };
+  }
+
+  /**
+   * Generate a WebGPU compute shader from the same ShaderLab AST used by render passes.
+   * @param node - Parsed ShaderLab program.
+   * @param computeEntry - Compute entry-point name.
+   * @param workgroupSize - Compile-time workgroup dimensions.
+   * @returns Generated compute source and structured reflection.
+   * @internal
+   */
+  visitComputeProgram(
+    node: ASTNode.GLShaderProgram,
+    computeEntry: string,
+    workgroupSize: readonly [string, string, string]
+  ): IShaderInfo {
+    this._resetProgram();
+    this._validateHalfValueTypes(node);
+    VisitorContext.reset();
+    this._collectGlobalResources(node, "", "", computeEntry);
+    this._prepareAtomics(node, true);
+
+    const generated = this._visitComputeProgramBody(node, computeEntry);
+    const reflection = this._createReflection();
+    const declarations = this._createResourceDeclarations();
+    const halfValueTypes = this._createHalfValueTypeDeclarations();
+
+    return {
+      vertex: "",
+      fragment: "",
+      compute: `${halfValueTypes}\n${declarations}\n${generated}\n${this._createComputeWrapper(workgroupSize)}`,
+      computeWorkgroupSize: workgroupSize,
       reflection
     };
   }
@@ -216,6 +285,25 @@ export class WGSLVisitor extends GLESVisitor {
     }
 
     const name = identifier.lexeme;
+    if (name === "barrier" && this._stage() !== "compute") {
+      throw new Error("ShaderLab barrier is only supported in compute passes.");
+    }
+    if (name === "atomicAdd" || name === "atomicMax" || name === "atomicLoad" || name === "atomicStore") {
+      const expectedParameterCount = name === "atomicLoad" ? 1 : 2;
+      const target = params[0] ? this._atomicReference(params[0]) : undefined;
+      if (!target || params.length !== expectedParameterCount) {
+        throw new Error(
+          `ShaderLab ${name} requires a shared int/uint variable or direct shared/storage int/uint array element.`
+        );
+      }
+      const targetCode = params[0].codeGen(this);
+      if (name === "atomicLoad") {
+        return `atomicLoad(&${targetCode})`;
+      }
+      const valueCode = params[1].codeGen(this);
+      return `${name}(&${targetCode}, ${valueCode})`;
+    }
+
     const args = params.map((param) => param.codeGen(this));
     const textureCall = this._textureCall(name, params, args);
     if (textureCall) {
@@ -241,7 +329,8 @@ export class WGSLVisitor extends GLESVisitor {
       return `(${args[0]} ${this._relationalOperator(name)} ${args[1]})`;
     }
     if (mapped === "bitcast") {
-      return `bitcast<${this._typeFromDataType(node.type)}>(${args[0]})`;
+      const argumentType = this._topLevelExpressionType(params[0], args[0]);
+      return `bitcast<${this._bitcastTargetType(name, argumentType)}>(${args[0]})`;
     }
     if ((mapped === "min" || mapped === "max" || mapped === "clamp") && args.length >= 2) {
       const returnType = this._topLevelExpressionType(params[0], args[0]);
@@ -255,7 +344,7 @@ export class WGSLVisitor extends GLESVisitor {
       }
     }
     if (identifier.isBuiltin && typeof identifier.ident !== "string") {
-      const targetType = this._typeFromDataType(identifier.ident);
+      const targetType = this._getWGSLHalfValueType(identifier.lexeme) ?? this._typeFromDataType(identifier.ident);
       const targetComponentType = /<([^>]+)>/.exec(targetType)?.[1] ?? targetType;
       if (targetComponentType !== "bool") {
         for (let i = 0; i < args.length; i++) {
@@ -275,7 +364,7 @@ export class WGSLVisitor extends GLESVisitor {
 
   override visitFunctionIdentifier(node: ASTNode.FunctionIdentifier): string {
     if (node.isBuiltin && typeof node.ident !== "string") {
-      return this._typeFromDataType(node.ident);
+      return this._getWGSLHalfValueType(node.lexeme) ?? this._typeFromDataType(node.ident);
     }
     return this._builtinFunction(node.lexeme);
   }
@@ -330,7 +419,7 @@ export class WGSLVisitor extends GLESVisitor {
 
   override visitSingleDeclaration(node: ASTNode.SingleDeclaration): string {
     const children = node.children;
-    const type = this._typeFromSpecifier(node.typeSpecifier, node.arraySpecifier);
+    const type = this._valueTypeFromSpecifier(node.typeSpecifier, node.arraySpecifier);
     const name = (children[1] as BaseToken).lexeme;
     const initializer = children[children.length - 1];
     const hasInitializer = children.length === 4 || children.length === 5;
@@ -579,6 +668,8 @@ export class WGSLVisitor extends GLESVisitor {
   private _resetProgram(): void {
     this._uniforms.clear();
     this._resources.clear();
+    this._storageBuffers.clear();
+    this._workgroupVariables.clear();
     this._structs.clear();
     this._vertexInputs.clear();
     this._vertexOutputs.clear();
@@ -587,13 +678,20 @@ export class WGSLVisitor extends GLESVisitor {
     this._functionSymbols.clear();
     this._builtins.vertex.clear();
     this._builtins.fragment.clear();
+    this._builtins.compute.clear();
     this._pointerParameterStack.length = 0;
     this._samplerParameterStack.length = 0;
     this._swizzleTempIndex = 0;
     this._requiresNanHelper = false;
+    this._usesHalfValueTypes = false;
   }
 
-  private _collectGlobalResources(node: ASTNode.GLShaderProgram, vertexEntry: string, fragmentEntry: string): void {
+  private _collectGlobalResources(
+    node: ASTNode.GLShaderProgram,
+    vertexEntry: string,
+    fragmentEntry: string,
+    computeEntry = ""
+  ): void {
     const ioTypes = new Set<string>();
     node.shaderData.symbolTable.forEach((symbol) => {
       if (symbol instanceof FnSymbol) {
@@ -604,7 +702,10 @@ export class WGSLVisitor extends GLESVisitor {
         }
         this._functionSymbols.set(symbol.ident, symbols);
       }
-      if (symbol instanceof FnSymbol && (symbol.ident === vertexEntry || symbol.ident === fragmentEntry)) {
+      if (
+        symbol instanceof FnSymbol &&
+        (symbol.ident === vertexEntry || symbol.ident === fragmentEntry || symbol.ident === computeEntry)
+      ) {
         for (const param of symbol.astNode.protoType.parameterList ?? []) {
           if (param.typeInfo && typeof param.typeInfo.type === "string") {
             ioTypes.add(param.typeInfo.typeLexeme);
@@ -639,6 +740,42 @@ export class WGSLVisitor extends GLESVisitor {
     for (const symbol of globals) {
       const name = symbol.ident;
       const branch = (symbol.astNode.children[1] as BaseToken).branch;
+      const isWorkgroupVariable = this._containsQualifier(symbol.astNode.children, Keyword.SHARED);
+      if (isWorkgroupVariable) {
+        if (!computeEntry) {
+          throw new Error(`ShaderLab shared variable "${name}" is only supported in compute passes.`);
+        }
+        if (!this._workgroupVariables.has(name)) {
+          this._workgroupVariables.set(name, {
+            name,
+            type: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
+            arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
+            sourceIndex: symbol.astNode.location.start.index,
+            branch,
+            atomic: false
+          });
+        }
+        continue;
+      }
+      const isStorageBuffer = this._containsQualifier(symbol.astNode.children, Keyword.BUFFER);
+      if (isStorageBuffer) {
+        if (!symbol.dataType.arraySpecifier) {
+          throw new Error(`ShaderLab storage buffer "${name}" must be declared as an array.`);
+        }
+        if (!this._storageBuffers.has(name)) {
+          this._storageBuffers.set(name, {
+            name,
+            binding: 0,
+            access: this._containsQualifier(symbol.astNode.children, Keyword.READONLY) ? "read" : "read_write",
+            elementType: this._typeFromDataType(symbol.dataType.type, symbol.dataType.typeLexeme),
+            arrayLength: this._arrayLength(symbol.dataType.arraySpecifier),
+            sourceIndex: symbol.astNode.location.start.index,
+            branch,
+            atomic: false
+          });
+        }
+        continue;
+      }
       const sampler = this._samplerType(symbol.dataType.typeLexeme);
       if (sampler) {
         if (!this._resources.has(name)) {
@@ -667,12 +804,17 @@ export class WGSLVisitor extends GLESVisitor {
       }
     }
 
-    let binding = 1;
+    let binding = computeEntry && this._uniforms.size === 0 ? 0 : 1;
     for (const resource of Array.from(this._resources.values()).sort(
       (left, right) => left.sourceIndex - right.sourceIndex
     )) {
       resource.textureBinding = binding++;
       resource.samplerBinding = binding++;
+    }
+    for (const storageBuffer of Array.from(this._storageBuffers.values()).sort(
+      (left, right) => left.sourceIndex - right.sourceIndex
+    )) {
+      storageBuffer.binding = binding++;
     }
   }
 
@@ -728,7 +870,17 @@ export class WGSLVisitor extends GLESVisitor {
       ({ name, type, location }) => ({ name, type, location })
     );
     const fragmentOutputs = Array.from(this._fragmentOutputs.values()).map(({ location }) => location);
-    return { uniforms, structs, resources, vertexInputs, fragmentOutputs };
+    const storageBuffers = Array.from(this._storageBuffers.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map(({ sourceIndex: _sourceIndex, branch, atomic: _atomic, ...storageBuffer }) => ({
+        ...storageBuffer,
+        conditions: this._reflectionConditions(branch)
+      }));
+    const reflection: IShaderReflection = { uniforms, structs, resources, vertexInputs, fragmentOutputs };
+    if (storageBuffers.length > 0) {
+      reflection.storageBuffers = storageBuffers;
+    }
+    return reflection;
   }
 
   private _createResourceDeclarations(): string {
@@ -769,6 +921,14 @@ export class WGSLVisitor extends GLESVisitor {
       fields.length > 0
         ? `struct GSUniforms {\n${fields.join("\n")}\n}\n@group(0) @binding(0) var<uniform> gsUniforms: GSUniforms;`
         : "";
+    const workgroupVariables = Array.from(this._workgroupVariables.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map((variable) => {
+        const elementType = variable.atomic ? `atomic<${variable.type}>` : variable.type;
+        const type = variable.arrayLength ? `array<${elementType}, ${variable.arrayLength}>` : elementType;
+        return this._guardBranch(variable.branch, `var<workgroup> ${variable.name}: ${type};`);
+      })
+      .join("\n");
     const resources = Array.from(this._resources.values())
       .sort((left, right) => left.sourceIndex - right.sourceIndex)
       .map((resource) =>
@@ -779,10 +939,150 @@ export class WGSLVisitor extends GLESVisitor {
         )
       )
       .join("\n");
+    const storageBuffers = Array.from(this._storageBuffers.values())
+      .sort((left, right) => left.sourceIndex - right.sourceIndex)
+      .map((storageBuffer) => {
+        const elementType = storageBuffer.atomic ? `atomic<${storageBuffer.elementType}>` : storageBuffer.elementType;
+        const arrayType = storageBuffer.arrayLength
+          ? `array<${elementType}, ${storageBuffer.arrayLength}>`
+          : `array<${elementType}>`;
+        return this._guardBranch(
+          storageBuffer.branch,
+          `@group(0) @binding(${storageBuffer.binding}) var<storage, ${storageBuffer.access}> ${storageBuffer.name}: ${arrayType};`
+        );
+      })
+      .join("\n");
     const nanHelper = this._requiresNanHelper
       ? "fn gs_nan() -> f32 { var bits: u32 = 0x7fc00000u; return bitcast<f32>(bits); }"
       : "";
-    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${resources}\n${nanHelper}`;
+    return `${structs}\n${wrapperTypes}\n${uniformBlock}\n${workgroupVariables}\n${resources}\n${storageBuffers}\n${nanHelper}`;
+  }
+
+  private _prepareAtomics(node: TreeNode, isComputeProgram: boolean): void {
+    const atomicTargets = new Set<TreeNode>();
+    const visitAtomicCalls = (current: TreeNode): void => {
+      if (current instanceof ASTNode.FunctionCall) {
+        const call = current.children[0] as ASTNode.FunctionCallGeneric;
+        const identifier = call.children[0] as ASTNode.FunctionIdentifier;
+        const paramsNode = call.children[2];
+        if (
+          !(call.fnSymbol instanceof FnSymbol) &&
+          (identifier.lexeme === "atomicAdd" ||
+            identifier.lexeme === "atomicMax" ||
+            identifier.lexeme === "atomicLoad" ||
+            identifier.lexeme === "atomicStore") &&
+          paramsNode instanceof ASTNode.FunctionCallParameterList
+        ) {
+          const name = identifier.lexeme;
+          if (!isComputeProgram) {
+            throw new Error(`ShaderLab ${name} is only supported in compute passes.`);
+          }
+          const params = paramsNode.paramNodes;
+          const expectedParameterCount = name === "atomicLoad" ? 1 : 2;
+          const target = params[0] ? this._atomicReference(params[0]) : undefined;
+          if (!target || params.length !== expectedParameterCount) {
+            throw new Error(
+              `ShaderLab ${name} requires a shared int/uint variable or direct shared/storage int/uint array element.`
+            );
+          }
+          if (target.kind === "storage" && target.storageBuffer.access !== "read_write") {
+            throw new Error(`ShaderLab ${name} target "${target.storageBuffer.name}" must be writable.`);
+          }
+          const targetType =
+            target.kind === "storage" ? target.storageBuffer.elementType : target.workgroupVariable.type;
+          if (targetType !== "i32" && targetType !== "u32") {
+            const targetName = target.kind === "storage" ? target.storageBuffer.name : target.workgroupVariable.name;
+            throw new Error(`ShaderLab ${name} target "${targetName}" must contain scalar int or uint values.`);
+          }
+          if (target.kind === "storage") {
+            target.storageBuffer.atomic = true;
+          } else {
+            target.workgroupVariable.atomic = true;
+          }
+          atomicTargets.add(target.expression);
+        }
+      }
+      for (const child of current.children) {
+        if (child instanceof TreeNode) {
+          visitAtomicCalls(child);
+        }
+      }
+    };
+    visitAtomicCalls(node);
+
+    if (atomicTargets.size === 0) {
+      return;
+    }
+    const rejectNonAtomicAccess = (current: TreeNode): void => {
+      if (current instanceof ASTNode.PostfixExpression && current.children.length === 4) {
+        const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+        const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
+        if (storageBuffer?.atomic && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab storage buffer "${storageBuffer.name}" uses atomic elements; only atomic operations are supported.`
+          );
+        }
+        const workgroupVariable = root ? this._workgroupVariables.get(root) : undefined;
+        if (workgroupVariable?.atomic && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab shared variable "${workgroupVariable.name}" uses atomic elements; only atomic operations are supported.`
+          );
+        }
+      } else if (current instanceof ASTNode.VariableIdentifier) {
+        const name = ParserUtils.extractDirectIdentLexeme(current);
+        const workgroupVariable = name ? this._workgroupVariables.get(name) : undefined;
+        if (workgroupVariable?.atomic && !workgroupVariable.arrayLength && !atomicTargets.has(current)) {
+          throw new Error(
+            `ShaderLab shared variable "${workgroupVariable.name}" is atomic; only atomic operations are supported.`
+          );
+        }
+      }
+      for (const child of current.children) {
+        if (child instanceof TreeNode) {
+          rejectNonAtomicAccess(child);
+        }
+      }
+    };
+    rejectNonAtomicAccess(node);
+  }
+
+  private _storageElementReference(node: TreeNode): StorageElementReference | undefined {
+    let current = node;
+    while (current.children.length === 1 && current.children[0] instanceof TreeNode) {
+      current = current.children[0];
+    }
+    if (!(current instanceof ASTNode.PostfixExpression) || current.children.length !== 4) {
+      return undefined;
+    }
+    const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+    const storageBuffer = root ? this._storageBuffers.get(root) : undefined;
+    return storageBuffer ? { kind: "storage", storageBuffer, expression: current } : undefined;
+  }
+
+  private _atomicReference(node: TreeNode): AtomicReference | undefined {
+    const storageReference = this._storageElementReference(node);
+    if (storageReference) {
+      return storageReference;
+    }
+
+    let current = node;
+    while (current.children.length === 1 && current.children[0] instanceof TreeNode) {
+      current = current.children[0];
+    }
+    if (current instanceof ASTNode.VariableIdentifier) {
+      const name = ParserUtils.extractDirectIdentLexeme(current);
+      const workgroupVariable = name ? this._workgroupVariables.get(name) : undefined;
+      if (workgroupVariable && !workgroupVariable.arrayLength) {
+        return { kind: "workgroup", workgroupVariable, expression: current };
+      }
+      return undefined;
+    }
+    if (!(current instanceof ASTNode.PostfixExpression) || current.children.length !== 4) {
+      return undefined;
+    }
+    const root = ParserUtils.extractDirectIdentLexeme(current.children[0] as ASTNode.PostfixExpression);
+    const workgroupVariable = root ? this._workgroupVariables.get(root) : undefined;
+    return workgroupVariable?.arrayLength ? { kind: "workgroup", workgroupVariable, expression: current } : undefined;
   }
 
   private _createVertexWrapper(): string {
@@ -926,6 +1226,34 @@ ${outputs.join("\n")}
 }`;
   }
 
+  private _createComputeWrapper(workgroupSize: readonly [string, string, string]): string {
+    const builtins = this._builtins.compute;
+    const inputs: string[] = [];
+    const privateFields: string[] = [];
+    const assignments: string[] = [];
+    const addBuiltin = (sourceName: string, wgslName: string, type: string, privateName: string): void => {
+      if (!builtins.has(sourceName)) {
+        return;
+      }
+      inputs.push(`@builtin(${wgslName}) ${privateName.substring(3)}: ${type}`);
+      privateFields.push(`var<private> ${privateName}: ${type};`);
+      assignments.push(`  ${privateName} = ${privateName.substring(3)};`);
+    };
+
+    addBuiltin("gl_GlobalInvocationID", "global_invocation_id", "vec3<u32>", "_gsGlobalInvocationID");
+    addBuiltin("gl_LocalInvocationID", "local_invocation_id", "vec3<u32>", "_gsLocalInvocationID");
+    addBuiltin("gl_WorkGroupID", "workgroup_id", "vec3<u32>", "_gsWorkGroupID");
+    addBuiltin("gl_LocalInvocationIndex", "local_invocation_index", "u32", "_gsLocalInvocationIndex");
+    addBuiltin("gl_NumWorkGroups", "num_workgroups", "vec3<u32>", "_gsNumWorkGroups");
+
+    return `${privateFields.join("\n")}
+@compute @workgroup_size(${workgroupSize.join(", ")})
+fn main(${inputs.join(", ")}) {
+${assignments.join("\n")}
+  gs_computeEntry();
+}`;
+  }
+
   private _emitInitDeclaratorList(node: ASTNode.InitDeclaratorList): string[] {
     const children = node.children;
     if (children.length === 1) {
@@ -936,8 +1264,52 @@ ${outputs.join("\n")}
     const array = children[3] instanceof ASTNode.ArraySpecifier ? children[3] : node.typeInfo.arraySpecifier;
     const initializer = children[children.length - 1];
     const value = children.length === 5 || children.length === 6 ? ` = ${this._code(initializer)}` : "";
-    output.push(`var ${name}: ${this._type(node.typeInfo, array)}${value}`);
+    output.push(`var ${name}: ${this._valueType(node.typeInfo, array)}${value}`);
     return output;
+  }
+
+  private _valueType(typeInfo: SymbolType, array = typeInfo.arraySpecifier): string {
+    const halfType = this._getWGSLHalfValueType(typeInfo.typeLexeme);
+    if (!halfType) {
+      return this._type(typeInfo, array);
+    }
+    const length = this._arrayLength(array);
+    return length ? `array<${halfType}, ${length}>` : halfType;
+  }
+
+  private _valueTypeFromSpecifier(specifier: ASTNode.TypeSpecifier, array = specifier.arraySpecifier): string {
+    const halfType = this._getWGSLHalfValueType(specifier.lexeme);
+    if (!halfType) {
+      return this._typeFromSpecifier(specifier, array);
+    }
+    const length = this._arrayLength(array);
+    return length ? `array<${halfType}, ${length}>` : halfType;
+  }
+
+  private _getWGSLHalfValueType(lexeme: string): string | undefined {
+    if (!this._getHalfValueType(lexeme)) {
+      return undefined;
+    }
+    this._usesHalfValueTypes = true;
+    return lexeme;
+  }
+
+  private _createHalfValueTypeDeclarations(): string {
+    if (!this._usesHalfValueTypes) {
+      return "";
+    }
+    return `#ifdef GRAPHICS_FEATURE_SHADER_F16
+enable f16;
+alias half = f16;
+alias half2 = vec2<f16>;
+alias half3 = vec3<f16>;
+alias half4 = vec4<f16>;
+#else
+alias half = f32;
+alias half2 = vec2<f32>;
+alias half3 = vec3<f32>;
+alias half4 = vec4<f32>;
+#endif`;
   }
 
   private _textureCall(
@@ -1013,6 +1385,8 @@ ${outputs.join("\n")}
         return "atan2";
       case "inversesqrt":
         return "inverseSqrt";
+      case "barrier":
+        return "workgroupBarrier";
       case "dFdx":
         return "dpdx";
       case "dFdy":
@@ -1024,6 +1398,10 @@ ${outputs.join("\n")}
       case "intBitsToFloat":
       case "uintBitsToFloat":
         return "bitcast";
+      case "packHalf2x16":
+        return "pack2x16float";
+      case "unpackHalf2x16":
+        return "unpack2x16float";
       case "lessThan":
       case "lessThanEqual":
       case "greaterThan":
@@ -1036,6 +1414,12 @@ ${outputs.join("\n")}
       default:
         return name;
     }
+  }
+
+  private _bitcastTargetType(name: string, argumentType: string): string {
+    const componentType = name === "floatBitsToInt" ? "i32" : name === "floatBitsToUint" ? "u32" : "f32";
+    const vectorSize = /^vec([234])</.exec(argumentType)?.[1];
+    return vectorSize ? `vec${vectorSize}<${componentType}>` : componentType;
   }
 
   private _relationalOperator(name: string): string {
@@ -1312,14 +1696,21 @@ ${outputs.join("\n")}
   }
 
   private _arrayLength(array?: ASTNode.ArraySpecifier): string | undefined {
-    if (!array) {
+    if (!array || array.children.length < 3) {
       return undefined;
     }
     return this._code(array.children[1]);
   }
 
   private _stage(): Stage {
-    return VisitorContext.context.stage === EShaderStage.VERTEX ? "vertex" : "fragment";
+    switch (VisitorContext.context.stage) {
+      case EShaderStage.VERTEX:
+        return "vertex";
+      case EShaderStage.FRAGMENT:
+        return "fragment";
+      default:
+        return "compute";
+    }
   }
 
   private _builtinName(name: string, stage: Stage): string | undefined {
@@ -1329,6 +1720,17 @@ ${outputs.join("\n")}
           gl_Position: "_gsPosition",
           gl_VertexID: "_gsVertexIndex",
           gl_InstanceID: "_gsInstanceIndex"
+        } as Record<string, string>
+      )[name];
+    }
+    if (stage === "compute") {
+      return (
+        {
+          gl_GlobalInvocationID: "_gsGlobalInvocationID",
+          gl_LocalInvocationID: "_gsLocalInvocationID",
+          gl_WorkGroupID: "_gsWorkGroupID",
+          gl_LocalInvocationIndex: "_gsLocalInvocationIndex",
+          gl_NumWorkGroups: "_gsNumWorkGroups"
         } as Record<string, string>
       )[name];
     }
