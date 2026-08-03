@@ -21,6 +21,8 @@ export interface MacroDefineInfo {
   /** Whitespace-normalized directive text. Dedup key against re-includes in
    *  the same branch; differing values produce different keys. */
   dedupKey: string;
+  /** Whitespace-normalized replacement text for opaque macro consumers. */
+  valueText?: string;
   /** `#ifdef` branch at registration time; call sites filter to visible entries. */
   branch: BranchSignature;
 }
@@ -42,6 +44,27 @@ export class Preprocessor {
     return source.replace(this._includeReg, (match, includeName) =>
       includeName ? this._replace(includeName, basePathForIncludeKey, includeMap, chunkOutputCache) : match
     );
+  }
+
+  /**
+   * Collect canonical guards declared by registered include chunks.
+   * @param includeMap - Shader include source map.
+   * @returns Guard macro names owned by include chunks.
+   * @internal
+   */
+  static collectIncludeGuardMacros(includeMap: IncludeMap): Set<string> {
+    const guards = new Set<string>();
+    for (const name in includeMap) {
+      const chunk = includeMap[name];
+      if (!chunk) {
+        continue;
+      }
+      const match = /^\s*#ifndef\s+([A-Za-z_]\w*)\s*\r?\n\s*#define\s+([A-Za-z_]\w*)\b/.exec(chunk);
+      if (match && match[1] === match[2]) {
+        guards.add(match[1]);
+      }
+    }
+    return guards;
   }
 
   private static _replace(

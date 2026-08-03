@@ -50,6 +50,7 @@
     "@swc/helpers": "^0.5.1",
     "@types/dom-webcodecs": "^0.1.13",
     "@types/node": "^18.7.16",
+    "@webgpu/types": "^0.1.71",
     "@types/webxr": "latest",
     "@vitest/coverage-v8": "3.2.6",
     "bumpp": "^9.5.2",

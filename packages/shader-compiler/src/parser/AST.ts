@@ -165,15 +165,28 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.for_init_statement)
   export class ForInitStatement extends TreeNode {}
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.iteration_statement)
-  export class IterationStatement extends TreeNode {}
+  export class IterationStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitIterationStatement(this));
+    }
+  }
 
   @ASTNodeDecorator(NoneTerminal.selection_statement)
-  export class SelectionStatement extends TreeNode {}
+  export class SelectionStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitSelectionStatement(this));
+    }
+  }
 
   @ASTNodeDecorator(NoneTerminal.expression_statement)
-  export class ExpressionStatement extends TreeNode {}
-  // #endif
+  export class ExpressionStatement extends TreeNode {
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitExpressionStatement(this));
+    }
+  }
 
   export abstract class ExpressionAstNode extends TreeNode {
     protected _type?: GalaceanDataType;
@@ -646,6 +659,10 @@ export namespace ASTNode {
         sa.symbolTableStack.insert(varSymbol);
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitParameterDeclaration(this));
+    }
   }
 
   @ASTNodeDecorator(NoneTerminal.parameter_declarator)
@@ -938,6 +955,8 @@ export namespace ASTNode {
     }
   }
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.multiplicative_expression)
   export class MultiplicativeExpression extends ExpressionAstNode {
     override init(): void {
@@ -953,8 +972,13 @@ export namespace ASTNode {
         //   }
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitMultiplicativeExpression(this));
+    }
   }
 
+  // #if _VERBOSE
   @ASTNodeDecorator(NoneTerminal.additive_expression)
   export class AdditiveExpression extends ExpressionAstNode {
     override init(): void {
@@ -1068,6 +1092,8 @@ export namespace ASTNode {
     }
   }
 
+  // #endif
+
   @ASTNodeDecorator(NoneTerminal.conditional_expression)
   export class ConditionalExpression extends ExpressionAstNode {
     override semanticAnalyze(sa: SemanticAnalyzer): void {
@@ -1075,8 +1101,11 @@ export namespace ASTNode {
         this.type = (<LogicalOrExpression>this.children[0]).type;
       }
     }
+
+    override codeGen(visitor: CodeGenVisitor): string {
+      return this.setCache(visitor.visitConditionalExpression(this));
+    }
   }
-  // #endif
 
   @ASTNodeDecorator(NoneTerminal.struct_specifier)
   export class StructSpecifier extends TreeNode {
@@ -1329,11 +1358,7 @@ export namespace ASTNode {
     }
 
     override codeGen(visitor: CodeGenVisitor): string {
-      if (this.isStatic) {
-        return super.codeGen(visitor);
-      } else {
-        return this.setCache(visitor.visitGlobalVariableDeclaration(this));
-      }
+      return this.setCache(visitor.visitVariableDeclaration(this));
     }
   }
 
@@ -1680,6 +1705,7 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.macro_call_symbol)
   export class MacroCallSymbol extends TreeNode {
     referenceSymbolNames: string[] = [];
+    visibleMacroDefinitions: MacroDefineInfo[] = [];
     macroName: string;
     /** True iff every `MacroDefineInfo` visible from this call site's branch
      *  has a `valueAst` (i.e. was parsed via the `macro_define` CFG rule).
@@ -1695,6 +1721,7 @@ export namespace ASTNode {
 
     override init(): void {
       this.referenceSymbolNames.length = 0;
+      this.visibleMacroDefinitions.length = 0;
       this.hasAstValue = false;
       this.isFunctionLikeMacro = false;
       this.aliasesNonBuiltinIdent = false;
@@ -1713,7 +1740,9 @@ export namespace ASTNode {
       const callSiteBranch = nameToken.branch;
       const defList = sa.macroDefineList[macroName];
       const refs = this.referenceSymbolNames;
+      const visibleDefinitions = this.visibleMacroDefinitions;
       refs.length = 0;
+      visibleDefinitions.length = 0;
       let visibleCount = 0;
       let allAst = true;
       let isFn = false;
@@ -1722,6 +1751,7 @@ export namespace ASTNode {
         for (let i = 0, n = defList.length; i < n; i++) {
           const info = defList[i];
           if (!Lexer.isVisibleFrom(info.branch, callSiteBranch)) continue;
+          visibleDefinitions.push(info);
           visibleCount++;
           if (info.valueAst == null) allAst = false;
           if (info.isFunction) isFn = true;
@@ -1782,6 +1812,7 @@ export namespace ASTNode {
   @ASTNodeDecorator(NoneTerminal.macro_call_function)
   export class MacroCallFunction extends TreeNode {
     referenceSymbolNames: string[] = [];
+    visibleMacroDefinitions: MacroDefineInfo[] = [];
     macroName: string = "";
     hasAstValue: boolean = false;
     isFunctionLikeMacro: boolean = false;
@@ -1789,6 +1820,7 @@ export namespace ASTNode {
 
     override init(): void {
       this.referenceSymbolNames = [];
+      this.visibleMacroDefinitions = [];
       this.macroName = "";
       this.hasAstValue = false;
       this.isFunctionLikeMacro = false;
@@ -1799,6 +1831,7 @@ export namespace ASTNode {
       const child = this.children[0] as MacroCallSymbol;
 
       this.referenceSymbolNames = child.referenceSymbolNames;
+      this.visibleMacroDefinitions = child.visibleMacroDefinitions;
       this.macroName = child.macroName;
       this.hasAstValue = child.hasAstValue;
       this.isFunctionLikeMacro = child.isFunctionLikeMacro;

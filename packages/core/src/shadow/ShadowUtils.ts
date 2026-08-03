@@ -10,6 +10,7 @@ import {
   Vector3,
   Vector4
 } from "@galacean/engine-math";
+import type { RenderTargetOrigin } from "@galacean/engine-design";
 import { Camera } from "../Camera";
 import { RenderContext } from "../RenderPipeline/RenderContext";
 import { Renderer } from "../Renderer";
@@ -48,6 +49,24 @@ export class ShadowUtils {
     0.0, -0.5, 0.0, 0.0,
     0.0, 0.0, 0.5, 0.0,
     0.5, 0.5, 0.5, 1.0
+  );
+  private static _upperLeftShadowMapCoordMatrix: Matrix = new Matrix(
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.5,
+    0.5,
+    0.5,
+    1.0
   );
 
   private static _frustumCorners: Vector3[] = [
@@ -324,7 +343,8 @@ export class ShadowUtils {
     nearPlane: number,
     shadowResolution: number,
     shadowSliceData: ShadowSliceData,
-    outShadowMatrices: Float32Array
+    outShadowMatrices: Float32Array,
+    renderTargetOrigin: RenderTargetOrigin
   ): void {
     const boundSphere = shadowSliceData.splitBoundSphere;
     shadowSliceData.resolution = shadowResolution;
@@ -368,7 +388,9 @@ export class ShadowUtils {
     const viewProjectionMatrix = virtualCamera.viewProjectionMatrix;
     Matrix.multiply(projectMatrix, viewMatrix, viewProjectionMatrix);
     Utils._floatMatrixMultiply(
-      ShadowUtils._shadowMapCoordMatrix,
+      renderTargetOrigin === "upper-left"
+        ? ShadowUtils._upperLeftShadowMapCoordMatrix
+        : ShadowUtils._shadowMapCoordMatrix,
       viewProjectionMatrix.elements,
       0,
       outShadowMatrices,

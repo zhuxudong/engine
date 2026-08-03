@@ -28,7 +28,11 @@ export class ShaderMacroProcessor {
    * @param macros - Active runtime macros
    * @returns Pure GLSL string with all conditionals resolved and macros expanded
    */
-  static evaluate(instructions: ShaderInstruction[], macros: Map<string, string>): string {
+  static evaluate(
+    instructions: ShaderInstruction[],
+    macros: Map<string, string>,
+    outputMacros?: Map<string, string>
+  ): string {
     const valueMacros = ShaderMacroProcessor._valueMacros;
     const funcMacros = ShaderMacroProcessor._funcMacros;
     const shaderChunks = ShaderMacroProcessor._shaderChunks;
@@ -108,7 +112,100 @@ export class ShaderMacroProcessor {
       }
     }
 
+    if (outputMacros) {
+      outputMacros.clear();
+      for (const [name, value] of valueMacros) {
+        outputMacros.set(name, value);
+      }
+      for (const name of funcMacros.keys()) {
+        outputMacros.set(name, "");
+      }
+    }
+
     return ShaderMacroProcessor._concatChunks(shaderChunks);
+  }
+
+  /**
+   * Resolve a fixed integer expression with the macros left after preprocessing.
+   * @param expression - Array-length expression from shader reflection.
+   * @param macros - Final value macros from {@link evaluate}.
+   * @returns Positive integer value.
+   * @internal
+   */
+  static _evaluateIntegerExpression(expression: string, macros: ReadonlyMap<string, string>): number {
+    let expanded = expression;
+    for (let pass = 0; pass < 16; pass++) {
+      let changed = false;
+      expanded = expanded.replace(/\b[A-Za-z_]\w*\b/g, (name) => {
+        const value = macros.get(name);
+        if (value === undefined || value === "") {
+          return name;
+        }
+        changed = true;
+        return `(${value})`;
+      });
+      if (!changed) {
+        break;
+      }
+    }
+
+    const tokens = expanded.match(/0[xX][0-9a-fA-F]+|\d+|<<|>>|[()+\-*/%]/g) ?? [];
+    if (tokens.join("").replace(/\s/g, "") !== expanded.replace(/\s/g, "")) {
+      throw new Error(`Unable to resolve shader array length "${expression}" from "${expanded}".`);
+    }
+
+    let index = 0;
+    const parsePrimary = (): number => {
+      const token = tokens[index++];
+      if (token === "(") {
+        const value = parseShift();
+        if (tokens[index++] !== ")") {
+          throw new Error(`Unbalanced shader array length expression "${expression}".`);
+        }
+        return value;
+      }
+      if (token === "+") {
+        return parsePrimary();
+      }
+      if (token === "-") {
+        return -parsePrimary();
+      }
+      if (!token) {
+        throw new Error(`Incomplete shader array length expression "${expression}".`);
+      }
+      return Number(token);
+    };
+    const parseProduct = (): number => {
+      let value = parsePrimary();
+      while (tokens[index] === "*" || tokens[index] === "/" || tokens[index] === "%") {
+        const operator = tokens[index++];
+        const right = parsePrimary();
+        value = operator === "*" ? value * right : operator === "/" ? value / right : value % right;
+      }
+      return value;
+    };
+    const parseSum = (): number => {
+      let value = parseProduct();
+      while (tokens[index] === "+" || tokens[index] === "-") {
+        const operator = tokens[index++];
+        const right = parseProduct();
+        value = operator === "+" ? value + right : value - right;
+      }
+      return value;
+    };
+    const parseShift = (): number => {
+      let value = parseSum();
+      while (tokens[index] === "<<" || tokens[index] === ">>") {
+        value = tokens[index++] === "<<" ? value << parseSum() : value >> parseSum();
+      }
+      return value;
+    };
+
+    const value = parseShift();
+    if (index !== tokens.length || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`Shader array length "${expression}" resolved to invalid value ${value}.`);
+    }
+    return value;
   }
 
   /**
@@ -302,6 +399,9 @@ export class ShaderMacroProcessor {
 
     let result = func.body;
     for (let i = 0; i < func.params.length; i++) {
+      // WGSL splits a GLSL sampler into `texture` and `texture_sampler`.
+      // Preserve that pair when the texture is passed through a function-like macro.
+      result = ShaderMacroProcessor._replaceWord(result, `${func.params[i]}_sampler`, `${args[i]}_sampler`);
       result = ShaderMacroProcessor._replaceWord(result, func.params[i], args[i]);
     }
     return result;

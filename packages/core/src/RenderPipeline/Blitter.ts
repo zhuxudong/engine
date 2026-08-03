@@ -44,14 +44,15 @@ export class Blitter {
     sourceScaleOffset?: Vector4
   ): void {
     const basicResources = engine._basicResources;
-    const blitMesh = destination ? basicResources.flipYBlitMesh : basicResources.blitMesh;
-    const blitMaterial = material || basicResources.blitMaterial;
     const rhi = engine._hardwareRenderer;
+    const needFlipY = !!destination && rhi.renderTargetOrigin === "lower-left";
+    const blitMesh = needFlipY ? basicResources.flipYBlitMesh : basicResources.blitMesh;
+    const blitMaterial = material || basicResources.blitMaterial;
     const context = engine._renderContext;
     const camera = context.camera;
 
     // We not use projection matrix when blit, but we must modify flipProjection to make front face correct
-    context.flipProjection = !!destination;
+    context.flipProjection = needFlipY;
 
     context.setRenderTarget(destination, viewport, 0);
 

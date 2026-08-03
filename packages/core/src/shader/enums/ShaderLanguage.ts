@@ -6,5 +6,8 @@ export enum ShaderLanguage {
   GLSLES100,
 
   /** GLSL ES 300. */
-  GLSLES300
+  GLSLES300,
+
+  /** WebGPU Shading Language. */
+  WGSL
 }

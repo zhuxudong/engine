@@ -1,4 +1,5 @@
 import {
+  type GraphicsBackend,
   IHardwareRenderer,
   IInputOptions,
   IPhysics,
@@ -30,6 +31,7 @@ import { ColliderShape } from "./physics/shape/ColliderShape";
 import { PostProcessPass } from "./postProcess/PostProcessPass";
 import { PostProcessUberPass } from "./postProcess/PostProcessUberPass";
 import { Shader } from "./shader/Shader";
+import { ShaderLanguage } from "./shader/enums/ShaderLanguage";
 import { ShaderMacro } from "./shader/ShaderMacro";
 import { ShaderMacroCollection } from "./shader/ShaderMacroCollection";
 import { ShaderProgramMap } from "./shader/ShaderProgramMap";
@@ -57,6 +59,13 @@ export class Engine extends EventDispatcher {
   static _physicalObjectsMap: Record<number, ColliderShape> = {};
   /** @internal */
   static _nativePhysics: IPhysics;
+  /** @internal */
+  private static _constructHandlers: ((engine: Engine) => void)[] = [];
+
+  /** @internal */
+  static _addConstructHandler(handler: (engine: Engine) => void): void {
+    this._constructHandlers.push(handler);
+  }
 
   /** Input manager of Engine. */
   readonly inputManager: InputManager;
@@ -244,12 +253,26 @@ export class Engine extends EventDispatcher {
     return this._destroyed;
   }
 
+  /**
+   * Graphics backend selected when this engine was created.
+   * @returns Stable backend identity for capability-specific internal paths and diagnostics.
+   */
+  get graphicsBackend(): GraphicsBackend {
+    return this._hardwareRenderer.backend;
+  }
+
   protected constructor(canvas: Canvas, hardwareRenderer: IHardwareRenderer, configuration: EngineConfiguration) {
     super();
     this._hardwareRenderer = hardwareRenderer;
     this._hardwareRenderer.init(canvas, this._onDeviceLost.bind(this), this._onDeviceRestored.bind(this));
+    Shader._defaultPlatformTarget =
+      this._hardwareRenderer.backend === "webgpu" ? ShaderLanguage.WGSL : ShaderLanguage.GLSLES100;
 
     this._canvas = canvas;
+
+    for (const handler of Engine._constructHandlers) {
+      handler(this);
+    }
 
     this._textDefaultFont = Font.createFromOS(this, "Arial");
     this._textDefaultFont.isGCIgnored = true;
@@ -661,7 +684,7 @@ export class Engine extends EventDispatcher {
     }
 
     const loaders = ResourceManager._loaders;
-    for (let key in loaders) {
+    for (const key in loaders) {
       const loader = loaders[key];
       if (loader.initialize) initializePromises.push(loader.initialize(this, configuration));
     }

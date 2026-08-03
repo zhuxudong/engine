@@ -23,13 +23,14 @@ function findFiles(dir: string, ext: string): string[] {
   return results;
 }
 
-/** `PBR.shaderc` → `PBRSource`,  `2D/Sprite.shaderc` → `SpriteSource`. */
-function shadercPathToVarName(relPath: string): string {
-  const normalized = normalizePath(relPath).replace(/\.shaderc$/, "");
+/** `PBR.shaderc` → `PBRSource`, `PBR.wgslc` → `PBRWGSLSource`. */
+function artifactPathToVarName(relPath: string): string {
+  const isWGSL = relPath.endsWith(".wgslc");
+  const normalized = normalizePath(relPath).replace(/\.(shaderc|wgslc)$/, "");
   const base = normalized.split("/").pop() ?? normalized;
   const cleaned = base.replace(/[^A-Za-z0-9]/g, "");
   if (cleaned.length === 0) return "Source";
-  return `${cleaned[0].toUpperCase()}${cleaned.slice(1)}Source`;
+  return `${cleaned[0].toUpperCase()}${cleaned.slice(1)}${isWGSL ? "WGSL" : ""}Source`;
 }
 
 /** `Common/Common.glsl` → `Common_Common` — TS identifier for source-index imports. */
@@ -51,19 +52,19 @@ function pruneEmptyDirs(startDir: string, stopDir: string): void {
 export interface PrecompileOptions {
   /** Absolute or relative path to the directory containing `.shader` sources. */
   input: string;
-  /** Absolute or relative path to the directory where `.shaderc` outputs are written. */
+  /** Absolute or relative path to the directory where `.shaderc` and `.wgslc` outputs are written. */
   output: string;
-  /** Remove `.shaderc` files whose `.shader` source no longer exists, and prune empty dirs. */
+  /** Remove compiled artifacts whose `.shader` source no longer exists, and prune empty dirs. */
   clean?: boolean;
   /** Watch the input dir and re-run incrementally on `.shader` / `.glsl` changes. */
   watch?: boolean;
   /** Compile only this file (path may be relative to cwd). Skips full scan + cleanup. */
   only?: string;
-  /** Generate `<output>/index.ts` aggregating every `.shaderc` file. */
+  /** Generate `<output>/index.ts` aggregating every `.shaderc` and `.wgslc` file. */
   emitIndex?: boolean;
   /** Generate raw-source indexes: `<input>/index.ts` (.shader) + sibling `ShaderLibrary/index.ts` (.glsl). */
   emitSources?: boolean;
-  /** Optional shader platform target passed through to `_precompile`. Defaults to `0`. */
+  /** Optional single shader target. Omit to emit the default GLES100 and WGSL targets. */
   platformTarget?: number;
 }
 
@@ -90,7 +91,7 @@ export async function precompile(options: PrecompileOptions): Promise<void> {
 export async function runFull(options: Omit<PrecompileOptions, "watch">): Promise<{ failed: number }> {
   const inputDir = path.resolve(options.input);
   const outputDir = path.resolve(options.output);
-  const platformTarget = options.platformTarget ?? 0;
+  const platformTargets = getPlatformTargets(options);
 
   if (!fs.existsSync(inputDir)) {
     throw new Error(`Input directory does not exist: ${inputDir}`);
@@ -109,16 +110,16 @@ export async function runFull(options: Omit<PrecompileOptions, "watch">): Promis
   let failed = 0;
   if (options.only) {
     const target = path.resolve(options.only);
-    if (!compileSingle(shaderCompiler, target, inputDir, outputDir, platformTarget)) failed++;
+    if (!compileSingle(shaderCompiler, target, inputDir, outputDir, platformTargets)) failed++;
   } else {
     const shaderFiles = findFiles(inputDir, ".shader");
     console.log(`[shader-compiler-bundler] Precompiling ${shaderFiles.length} shader(s)...`);
     for (const file of shaderFiles) {
-      if (!compileSingle(shaderCompiler, file, inputDir, outputDir, platformTarget)) failed++;
+      if (!compileSingle(shaderCompiler, file, inputDir, outputDir, platformTargets)) failed++;
     }
     if (options.clean) {
       const removed = cleanOrphanedBundles(shaderFiles, inputDir, outputDir);
-      if (removed > 0) console.log(`[shader-compiler-bundler] Cleaned ${removed} orphaned .shaderc file(s).`);
+      if (removed > 0) console.log(`[shader-compiler-bundler] Cleaned ${removed} orphaned shader artifact(s).`);
     }
     if (failed > 0) console.warn(`[shader-compiler-bundler] ${failed} shader(s) failed to precompile.`);
   }
@@ -133,7 +134,7 @@ export async function runFull(options: Omit<PrecompileOptions, "watch">): Promis
 export async function startWatcher(options: Omit<PrecompileOptions, "watch" | "only">): Promise<void> {
   const inputDir = path.resolve(options.input);
   const outputDir = path.resolve(options.output);
-  const platformTarget = options.platformTarget ?? 0;
+  const platformTargets = getPlatformTargets(options);
   const shaderCompiler = await loadShaderCompiler();
   shaderCompiler._setIncludeMap(await collectIncludeMap(inputDir));
 
@@ -155,7 +156,7 @@ export async function startWatcher(options: Omit<PrecompileOptions, "watch" | "o
     if (!fs.existsSync(fullPath)) {
       removeBundleFor(fullPath, inputDir, outputDir);
     } else {
-      compileSingle(shaderCompiler, fullPath, inputDir, outputDir, platformTarget);
+      compileSingle(shaderCompiler, fullPath, inputDir, outputDir, platformTargets);
     }
     if (options.emitSources) emitSources(inputDir);
     if (options.emitIndex) emitIndex(outputDir);
@@ -226,20 +227,27 @@ function compileSingle(
   shaderPath: string,
   inputDir: string,
   outputDir: string,
-  platformTarget: number
+  platformTargets: readonly number[]
 ): boolean {
   const source = fs.readFileSync(shaderPath, "utf-8");
   const relativePath = normalizePath(path.relative(inputDir, shaderPath));
-  const bundleRelative = relativePath.replace(/\.shader$/, ".shaderc");
-  const bundlePath = path.join(outputDir, bundleRelative);
   const basePathForIncludeKey = new URL(relativePath, SHADER_ROOT_PATH).href;
 
-  fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
-
   try {
-    const precompiled = shaderCompiler._precompile(source, platformTarget, basePathForIncludeKey);
-    fs.writeFileSync(bundlePath, JSON.stringify(precompiled));
-    console.log(`  ${relativePath} -> ${bundleRelative}`);
+    const artifacts = platformTargets.map((platformTarget) => {
+      const bundleRelative = relativePath.replace(/\.shader$/, getArtifactExtension(platformTarget));
+      const bundlePath = path.join(outputDir, bundleRelative);
+      return {
+        bundleRelative,
+        bundlePath,
+        precompiled: shaderCompiler._precompile(source, platformTarget, basePathForIncludeKey)
+      };
+    });
+    for (const { bundleRelative, bundlePath, precompiled } of artifacts) {
+      fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
+      fs.writeFileSync(bundlePath, JSON.stringify(precompiled));
+      console.log(`  ${relativePath} -> ${bundleRelative}`);
+    }
     return true;
   } catch (e) {
     console.error(`  FAILED: ${relativePath}`);
@@ -250,14 +258,14 @@ function compileSingle(
 
 function cleanOrphanedBundles(shaderFiles: string[], inputDir: string, outputDir: string): number {
   const aliveSet = new Set(shaderFiles.map((f) => normalizePath(path.relative(inputDir, f)).replace(/\.shader$/, "")));
-  const bundleFiles = findFiles(outputDir, ".shaderc");
+  const bundleFiles = [...findFiles(outputDir, ".shaderc"), ...findFiles(outputDir, ".wgslc")];
   let removed = 0;
 
   for (const bundleFile of bundleFiles) {
-    const rel = normalizePath(path.relative(outputDir, bundleFile)).replace(/\.shaderc$/, "");
+    const rel = normalizePath(path.relative(outputDir, bundleFile)).replace(/\.(shaderc|wgslc)$/, "");
     if (!aliveSet.has(rel)) {
       fs.unlinkSync(bundleFile);
-      console.log(`  Removed orphaned: ${rel}.shaderc`);
+      console.log(`  Removed orphaned: ${normalizePath(path.relative(outputDir, bundleFile))}`);
       removed++;
       pruneEmptyDirs(path.dirname(bundleFile), outputDir);
     }
@@ -266,11 +274,11 @@ function cleanOrphanedBundles(shaderFiles: string[], inputDir: string, outputDir
 }
 
 function emitIndex(outputDir: string): void {
-  const bundleFiles = findFiles(outputDir, ".shaderc");
+  const bundleFiles = [...findFiles(outputDir, ".shaderc"), ...findFiles(outputDir, ".wgslc")];
   const entries = bundleFiles
     .map((file) => {
       const rel = normalizePath(path.relative(outputDir, file));
-      return { varName: shadercPathToVarName(rel), importPath: `./${rel}` };
+      return { varName: artifactPathToVarName(rel), importPath: `./${rel}` };
     })
     .sort((a, b) => a.varName.localeCompare(b.varName));
 
@@ -351,11 +359,31 @@ function emitLibrarySourceIndex(rootDir: string): void {
 }
 
 function removeBundleFor(shaderPath: string, inputDir: string, outputDir: string): void {
-  const rel = normalizePath(path.relative(inputDir, shaderPath)).replace(/\.shader$/, ".shaderc");
-  const bundlePath = path.join(outputDir, rel);
-  if (fs.existsSync(bundlePath)) {
-    fs.unlinkSync(bundlePath);
-    console.log(`  Removed: ${rel}`);
-    pruneEmptyDirs(path.dirname(bundlePath), outputDir);
+  const relativeBase = normalizePath(path.relative(inputDir, shaderPath)).replace(/\.shader$/, "");
+  for (const extension of [".shaderc", ".wgslc"]) {
+    const rel = `${relativeBase}${extension}`;
+    const bundlePath = path.join(outputDir, rel);
+    if (fs.existsSync(bundlePath)) {
+      fs.unlinkSync(bundlePath);
+      console.log(`  Removed: ${rel}`);
+      pruneEmptyDirs(path.dirname(bundlePath), outputDir);
+    }
+  }
+}
+
+function getPlatformTargets(options: Pick<PrecompileOptions, "platformTarget">): readonly number[] {
+  return options.platformTarget === undefined ? [0, 2] : [options.platformTarget];
+}
+
+function getArtifactExtension(platformTarget: number): ".shaderc" | ".wgslc" {
+  switch (platformTarget) {
+    case 0:
+      return ".shaderc";
+    case 2:
+      return ".wgslc";
+    default:
+      throw new Error(
+        `No artifact extension is defined for ShaderLanguage ${platformTarget}; use GLES100 (.shaderc) or WGSL (.wgslc).`
+      );
   }
 }

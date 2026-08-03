@@ -12,6 +12,8 @@ import { ShaderCompilerUtils } from "../ShaderCompilerUtils";
 export interface BranchConstraint {
   name: string;
   defined: boolean;
+  /** Original condition for `#if`/`#elif`; absent for `#ifdef`/`#ifndef`. */
+  expression?: string;
 }
 
 /**

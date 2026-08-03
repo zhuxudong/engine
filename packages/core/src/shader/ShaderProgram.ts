@@ -1,4 +1,4 @@
-import { IHardwareRenderer } from "@galacean/engine-design";
+import { IHardwareRenderer, type IPlatformShaderProgram, type IShaderReflection } from "@galacean/engine-design";
 import { Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import { Engine } from "../Engine";
 import { Logger } from "../base/Logger";
@@ -9,6 +9,7 @@ import { ShaderUniform } from "./ShaderUniform";
 import { ShaderUniformBlock } from "./ShaderUniformBlock";
 import { ShaderBlockProperty } from "./ShaderBlockProperty";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
+import { ShaderLanguage } from "./enums/ShaderLanguage";
 import { InstanceBufferLayout, ShaderFactory } from "./ShaderFactory";
 
 /**
@@ -56,6 +57,8 @@ export class ShaderProgram {
 
   /** @internal */
   _instanceLayout: InstanceBufferLayout | null = null;
+  /** @internal */
+  _platformProgram?: IPlatformShaderProgram;
 
   attributeLocation: Record<string, GLint> = Object.create(null);
   uniformBlockIds: number[] = [];
@@ -66,6 +69,8 @@ export class ShaderProgram {
   private _gl: WebGLRenderingContext;
   private _glProgram: WebGLProgram;
   private _activeTextureUint: number = 0;
+  private _platformTarget: ShaderLanguage;
+  private _reflection?: IShaderReflection;
 
   /**
    * Whether this shader program is valid.
@@ -74,16 +79,42 @@ export class ShaderProgram {
     return this._isValid;
   }
 
-  constructor(engine: Engine, vertexSource: string, fragmentSource: string, transformFeedbackVaryings?: string[]) {
+  constructor(
+    engine: Engine,
+    vertexSource: string,
+    fragmentSource: string,
+    transformFeedbackVaryings?: string[],
+    platformTarget: ShaderLanguage = ShaderLanguage.GLSLES100,
+    reflection?: IShaderReflection,
+    instanceLayout?: InstanceBufferLayout | null
+  ) {
     this._engine = engine;
-    this._gl = engine._hardwareRenderer.gl;
-    this._glProgram = this._createProgram(vertexSource, fragmentSource, transformFeedbackVaryings);
-
-    if (this._glProgram) {
-      this._isValid = true;
-      this._recordLocation();
+    this._platformTarget = platformTarget;
+    this._reflection = reflection;
+    const hardwareRenderer = engine._hardwareRenderer;
+    if (hardwareRenderer.backend === "webgpu") {
+      if (platformTarget !== ShaderLanguage.WGSL || !reflection) {
+        throw new Error("WebGPU shader programs require WGSL source and ShaderLab reflection.");
+      }
+      this._platformProgram = hardwareRenderer.createPlatformShaderProgram(
+        engine,
+        vertexSource,
+        fragmentSource,
+        reflection,
+        instanceLayout
+      );
+      this.attributeLocation = this._platformProgram.attributeLocation;
+      this._isValid = this._platformProgram.isValid;
     } else {
-      this._isValid = false;
+      this._gl = hardwareRenderer.gl;
+      this._glProgram = this._createProgram(vertexSource, fragmentSource, transformFeedbackVaryings);
+
+      if (this._glProgram) {
+        this._isValid = true;
+        this._recordLocation();
+      } else {
+        this._isValid = false;
+      }
     }
 
     this.id = ShaderProgram._counter++;
@@ -95,6 +126,10 @@ export class ShaderProgram {
    * @param shaderData - shader data
    */
   uploadAll(uniformBlock: ShaderUniformBlock, shaderData: ShaderData): void {
+    if (this._platformProgram) {
+      this.uploadData(shaderData._propertyValueMap);
+      return;
+    }
     this.uploadUniforms(uniformBlock, shaderData);
     this.uploadTextures(uniformBlock, shaderData);
   }
@@ -105,6 +140,10 @@ export class ShaderProgram {
    * @param shaderData - shader data
    */
   uploadUniforms(uniformBlock: ShaderUniformBlock, shaderData: ShaderData): void {
+    if (this._platformProgram) {
+      this.uploadData(shaderData._propertyValueMap);
+      return;
+    }
     const propertyValueMap = shaderData._propertyValueMap;
     const constUniforms = uniformBlock.constUniforms;
 
@@ -121,6 +160,10 @@ export class ShaderProgram {
    * @param shaderData - shader data
    */
   uploadTextures(uniformBlock: ShaderUniformBlock, shaderData: ShaderData): void {
+    if (this._platformProgram) {
+      this.uploadData(shaderData._propertyValueMap);
+      return;
+    }
     const propertyValueMap = shaderData._propertyValueMap;
     const textureUniforms = uniformBlock.textureUniforms;
     // textureUniforms property maybe null if ShaderUniformBlock not contain any texture.
@@ -141,6 +184,9 @@ export class ShaderProgram {
    * Upload ungroup texture shader data in shader uniform block.
    */
   uploadUnGroupTextures(): void {
+    if (this._platformProgram) {
+      return;
+    }
     const textureUniforms = this.otherUniformBlock.textureUniforms;
     // textureUniforms property maybe null if ShaderUniformBlock not contain any texture.
     if (textureUniforms) {
@@ -155,6 +201,9 @@ export class ShaderProgram {
    * Grouping other data.
    */
   groupingOtherUniformBlock(): void {
+    if (this._platformProgram) {
+      return;
+    }
     const { constUniforms, textureUniforms } = this.otherUniformBlock;
     constUniforms.length > 0 && this._groupingSubOtherUniforms(constUniforms, false);
     textureUniforms.length > 0 && this._groupingSubOtherUniforms(textureUniforms, true);
@@ -167,7 +216,11 @@ export class ShaderProgram {
   bind(): boolean {
     const rhi: IHardwareRenderer = this._engine._hardwareRenderer;
     if (rhi._currentBindShaderProgram !== this) {
-      this._gl.useProgram(this._glProgram);
+      if (this._platformProgram) {
+        this._platformProgram.bind();
+      } else {
+        this._gl.useProgram(this._glProgram);
+      }
       rhi._currentBindShaderProgram = this;
       return true;
     } else {
@@ -179,8 +232,21 @@ export class ShaderProgram {
    * Destroy this shader program.
    */
   destroy(): void {
-    const gl = this._gl;
-    this._glProgram && gl.deleteProgram(this._glProgram);
+    if (this._platformProgram) {
+      this._platformProgram.destroy();
+    } else {
+      const gl = this._gl;
+      this._glProgram && gl.deleteProgram(this._glProgram);
+    }
+  }
+
+  /**
+   * Merge property values into the platform program.
+   * @param propertyValues - Shader property id to value map.
+   * @internal
+   */
+  uploadData(propertyValues: Readonly<Record<number, unknown>>): void {
+    this._platformProgram?.uploadData(propertyValues);
   }
 
   private _groupingSubOtherUniforms(uniforms: ShaderUniform[], isTexture: boolean): void {

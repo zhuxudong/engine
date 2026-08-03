@@ -1,0 +1,151 @@
+import { BufferBindFlag, BufferUsage, IPlatformBuffer, SetDataOptions } from "@galacean/engine-core";
+import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
+
+/**
+ * WebGPU buffer resource.
+ * @internal
+ */
+export class WebGPUBuffer implements IPlatformBuffer {
+  private static _counter = 0;
+
+  /** @internal */
+  readonly _gpuBuffer: GPUBuffer;
+  /** @internal */
+  readonly _bindingId = WebGPUBuffer._counter++;
+
+  private readonly _device: WebGPUGraphicDevice;
+  private readonly _shadowData: Uint8Array;
+  private _lastUploadEnd = 0;
+
+  constructor(
+    device: WebGPUGraphicDevice,
+    type: BufferBindFlag,
+    byteLength: number,
+    _bufferUsage: BufferUsage,
+    data?: ArrayBuffer | ArrayBufferView
+  ) {
+    this._device = device;
+    const size = Math.max(4, WebGPUBuffer._alignToFour(byteLength));
+    this._shadowData = new Uint8Array(size);
+    this._gpuBuffer = device.device.createBuffer({
+      label: BufferBindFlag[type],
+      size,
+      usage: WebGPUBuffer._getUsage(type)
+    });
+    if (data) {
+      this.setData(byteLength, data);
+    }
+  }
+
+  bind(): void {}
+
+  setData(
+    _byteLength: number,
+    data: ArrayBuffer | ArrayBufferView,
+    bufferByteOffset: number = 0,
+    dataOffset: number = 0,
+    dataLength?: number,
+    _options: SetDataOptions = SetDataOptions.None
+  ): void {
+    const source = WebGPUBuffer._getSourceRange(data, dataOffset, dataLength);
+    const sourceEnd = bufferByteOffset + source.byteLength;
+    if (bufferByteOffset < 0 || sourceEnd > this._shadowData.byteLength) {
+      throw new RangeError(
+        `Buffer upload range [${bufferByteOffset}, ${sourceEnd}) exceeds ${this._shadowData.byteLength} bytes.`
+      );
+    }
+
+    this._shadowData.set(source, bufferByteOffset);
+    this._lastUploadEnd = Math.max(this._lastUploadEnd, sourceEnd);
+    const uploadStart = bufferByteOffset & ~3;
+    const uploadEnd = WebGPUBuffer._alignToFour(sourceEnd);
+    this._device.device.queue.writeBuffer(
+      this._gpuBuffer,
+      uploadStart,
+      this._shadowData.buffer,
+      uploadStart,
+      uploadEnd - uploadStart
+    );
+  }
+
+  getData(): void {
+    throw new Error("Synchronous buffer readback is not supported by the WebGPU backend.");
+  }
+
+  copyFromBuffer(srcBuffer: IPlatformBuffer, srcByteOffset: number, dstByteOffset: number, byteLength: number): void {
+    const webGPUSource = srcBuffer as WebGPUBuffer;
+    const sourceEnd = srcByteOffset + byteLength;
+    const destinationEnd = dstByteOffset + byteLength;
+    if (
+      srcByteOffset < 0 ||
+      dstByteOffset < 0 ||
+      sourceEnd > webGPUSource._shadowData.byteLength ||
+      destinationEnd > this._shadowData.byteLength
+    ) {
+      throw new RangeError("Buffer copy range exceeds the source or destination buffer.");
+    }
+
+    this._shadowData.set(webGPUSource._shadowData.subarray(srcByteOffset, sourceEnd), dstByteOffset);
+    this._lastUploadEnd = Math.max(this._lastUploadEnd, destinationEnd);
+    if ((srcByteOffset | dstByteOffset | byteLength) & 3) {
+      const uploadStart = dstByteOffset & ~3;
+      const uploadEnd = WebGPUBuffer._alignToFour(destinationEnd);
+      this._device.device.queue.writeBuffer(
+        this._gpuBuffer,
+        uploadStart,
+        this._shadowData.buffer,
+        uploadStart,
+        uploadEnd - uploadStart
+      );
+      return;
+    }
+
+    const encoder = this._device.device.createCommandEncoder({ label: "Buffer copy" });
+    encoder.copyBufferToBuffer(webGPUSource._gpuBuffer, srcByteOffset, this._gpuBuffer, dstByteOffset, byteLength);
+    this._device.device.queue.submit([encoder.finish()]);
+  }
+
+  destroy(): void {
+    this._gpuBuffer.destroy();
+  }
+
+  /** @internal */
+  _getUploadedData(): Uint8Array {
+    return this._shadowData.subarray(0, this._lastUploadEnd);
+  }
+
+  private static _getUsage(type: BufferBindFlag): GPUBufferUsageFlags {
+    const copyUsage = GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    switch (type) {
+      case BufferBindFlag.VertexBuffer:
+        return GPUBufferUsage.VERTEX | copyUsage;
+      case BufferBindFlag.IndexBuffer:
+        return GPUBufferUsage.INDEX | copyUsage;
+      case BufferBindFlag.ConstantBuffer:
+        return GPUBufferUsage.UNIFORM | copyUsage;
+      default:
+        throw new Error(`Unsupported buffer binding: ${type}`);
+    }
+  }
+
+  private static _alignToFour(byteLength: number): number {
+    return (byteLength + 3) & ~3;
+  }
+
+  private static _getSourceRange(
+    data: ArrayBuffer | ArrayBufferView,
+    dataOffset: number,
+    dataLength?: number
+  ): Uint8Array {
+    if (data instanceof ArrayBuffer) {
+      const length = dataLength ?? data.byteLength - dataOffset;
+      return new Uint8Array(data, dataOffset, length);
+    }
+
+    const bytesPerElement = (data as { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT ?? 1;
+    const byteOffset = data.byteOffset + dataOffset * bytesPerElement;
+    const byteLength =
+      dataLength === undefined ? data.byteLength - dataOffset * bytesPerElement : dataLength * bytesPerElement;
+    return new Uint8Array(data.buffer, byteOffset, byteLength);
+  }
+}

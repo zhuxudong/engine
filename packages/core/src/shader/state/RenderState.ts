@@ -47,15 +47,15 @@ export class RenderState {
     const hardwareRenderer = engine._hardwareRenderer;
     const lastRenderState = engine._lastRenderState;
     const context = engine._renderContext;
+    const effectiveFrontFaceInvert = context.flipProjection ? !frontFaceInvert : frontFaceInvert;
+    if (hardwareRenderer.backend === "webgpu") {
+      hardwareRenderer.setRenderState(this, effectiveFrontFaceInvert, customRenderStates);
+      return;
+    }
     this.blendState._apply(hardwareRenderer, lastRenderState, customRenderStates);
     this.depthState._apply(hardwareRenderer, lastRenderState, customRenderStates);
     this.stencilState._apply(hardwareRenderer, lastRenderState, customRenderStates);
-    this.rasterState._apply(
-      hardwareRenderer,
-      lastRenderState,
-      context.flipProjection ? !frontFaceInvert : frontFaceInvert,
-      customRenderStates
-    );
+    this.rasterState._apply(hardwareRenderer, lastRenderState, effectiveFrontFaceInvert, customRenderStates);
   }
 
   /**

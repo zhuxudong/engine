@@ -233,7 +233,9 @@ export class BasicRenderPipeline {
     const internalColorTarget = this._internalColorTarget;
     const colorTarget = internalColorTarget || camera.renderTarget;
     const colorViewport = internalColorTarget ? PipelineUtils.defaultViewport : camera.viewport;
-    const needFlipProjection = !!internalColorTarget || (camera.renderTarget && cubeFace == undefined);
+    const needFlipProjection =
+      rhi.renderTargetOrigin === "lower-left" &&
+      (!!internalColorTarget || (camera.renderTarget && cubeFace == undefined));
 
     if (context.flipProjection !== needFlipProjection) {
       // Just add projection matrix update type is enough

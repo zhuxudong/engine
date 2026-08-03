@@ -125,6 +125,10 @@ function uid(base: string) {
   return `__bench_${base}_${nameCounter++}`;
 }
 
+function shaderSourceWithName(source: string, name: string): string {
+  return source.replace(/(Shader\s+")[^"]+("\s*\{)/, `$1${name}$2`);
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────
 
 describe("Precompile Benchmark", async () => {
@@ -275,7 +279,7 @@ describe("Precompile Benchmark", async () => {
   // 4. Shader reconstruction
   // ═══════════════════════════════════════════════════════════
   describe("4. Shader reconstruction", () => {
-    it("_createFromPrecompiled vs Shader.create (PBR)", () => {
+    it("runtime source vs single-target precompiled artifact (PBR)", () => {
       const precompiled = shaderCompiler._precompile(PBRSource, ShaderLanguage.GLSLES100);
       const jsonStr = JSON.stringify(precompiled);
 
@@ -285,20 +289,20 @@ describe("Precompile Benchmark", async () => {
         "Shader.create (live)",
         () => {
           const name = uid("PBR_live");
-          Shader.create(PBRSource);
-          Shader.find(name)?.destroy(true);
+          const shader = Shader.create(shaderSourceWithName(PBRSource, name), ShaderLanguage.GLSLES100);
+          shader.destroy(true);
         },
         5,
         1
       );
 
       const preResult = bench(
-        "JSON.parse + _createFromPrecompiled",
+        "JSON.parse + Shader._createFromPrecompiled",
         () => {
           const parsed = JSON.parse(jsonStr);
           const name = uid("PBR_pre");
           const shader = Shader._createFromPrecompiled({ ...parsed, name });
-          shader?.destroy(true);
+          shader.destroy(true);
         },
         5,
         1

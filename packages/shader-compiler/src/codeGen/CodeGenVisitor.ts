@@ -33,7 +33,7 @@ export abstract class CodeGenVisitor {
 
   defaultCodeGen(children: NodeChild[]) {
     const pool = CodeGenVisitor._tmpArrayPool;
-    let ret = pool.get();
+    const ret = pool.get();
     ret.dispose();
     for (const child of children) {
       if (child instanceof BaseToken) {
@@ -96,7 +96,7 @@ export abstract class CodeGenVisitor {
   }
 
   visitVariableIdentifier(node: ASTNode.VariableIdentifier): string {
-    for (let name of node.referenceGlobalSymbolNames) {
+    for (const name of node.referenceGlobalSymbolNames) {
       VisitorContext.context.referenceGlobal(name, ESymbolType.Any);
     }
 
@@ -252,6 +252,10 @@ export abstract class CodeGenVisitor {
     return this.defaultCodeGen(children);
   }
 
+  visitVariableDeclaration(node: ASTNode.VariableDeclaration): string {
+    return node.isStatic ? this.defaultCodeGen(node.children) : this.visitGlobalVariableDeclaration(node);
+  }
+
   visitFunctionParameterList(node: ASTNode.FunctionParameterList): string {
     const context = VisitorContext.context;
     const params = node.parameterInfoList.filter(
@@ -271,6 +275,10 @@ export abstract class CodeGenVisitor {
     }
 
     return out;
+  }
+
+  visitParameterDeclaration(node: ASTNode.ParameterDeclaration): string {
+    return this.defaultCodeGen(node.children);
   }
 
   visitFunctionHeader(node: ASTNode.FunctionHeader): string {
@@ -307,6 +315,26 @@ export abstract class CodeGenVisitor {
     return this.defaultCodeGen(node.children);
   }
 
+  visitConditionalExpression(node: ASTNode.ConditionalExpression): string {
+    return this.defaultCodeGen(node.children);
+  }
+
+  visitExpressionStatement(node: ASTNode.ExpressionStatement): string {
+    return this.defaultCodeGen(node.children);
+  }
+
+  visitIterationStatement(node: ASTNode.IterationStatement): string {
+    return this.defaultCodeGen(node.children);
+  }
+
+  visitMultiplicativeExpression(node: ASTNode.MultiplicativeExpression): string {
+    return this.defaultCodeGen(node.children);
+  }
+
+  visitSelectionStatement(node: ASTNode.SelectionStatement): string {
+    return this.defaultCodeGen(node.children);
+  }
+
   visitStructSpecifier(node: ASTNode.StructSpecifier): string {
     const context = VisitorContext.context;
     const { varyingStructs, attributeStructs, mrtStructs } = context;
@@ -327,7 +355,7 @@ export abstract class CodeGenVisitor {
     }
 
     if (isVaryingStruct || isAttributeStruct || isMRTStruct) {
-      let result: ICodeSegment[] = [];
+      const result: ICodeSegment[] = [];
 
       result.push(
         ...node.macroExpressions.map((item) => ({
