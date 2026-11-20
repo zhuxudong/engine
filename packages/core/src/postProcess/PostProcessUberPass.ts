@@ -4,6 +4,7 @@ import { Engine } from "../Engine";
 import { Material } from "../material";
 import { Blitter } from "../RenderPipeline/Blitter";
 import { PipelineUtils } from "../RenderPipeline/PipelineUtils";
+import { RenderBufferLoadAction } from "../renderingHardwareInterface";
 import { RenderTarget, Texture2D, TextureFilterMode, TextureFormat, TextureWrapMode } from "../texture";
 import { BloomDownScaleMode, BloomEffect, TonemappingEffect } from "./effects";
 import { PostProcessManager } from "./PostProcessManager";
@@ -76,7 +77,7 @@ export class PostProcessUberPass extends PostProcessPass {
       uberShaderData.disableMacro(TonemappingEffect._enableMacro);
     }
     const viewport = destTarget === camera.renderTarget ? camera.viewport : undefined;
-    Blitter.blitTexture(camera.engine, srcTexture, destTarget, 0, viewport, this._uberMaterial, undefined);
+    Blitter.blitTexture(camera.engine, srcTexture, destTarget, 0, viewport, this._uberMaterial, undefined, undefined, RenderBufferLoadAction.DontCare);
   }
 
   /**
@@ -177,7 +178,7 @@ export class PostProcessUberPass extends PostProcessPass {
     }
 
     // Prefilter
-    Blitter.blitTexture(engine, srcTexture, mipRT[0], undefined, undefined, bloomMaterial, 0);
+    Blitter.blitTexture(engine, srcTexture, mipRT[0], undefined, undefined, bloomMaterial, 0, undefined, RenderBufferLoadAction.DontCare);
 
     // Progressive single-pass 5x5 9-tap downsample pyramid (Castaño 2013)
     for (let i = 1; i < mipCount; i++) {
@@ -188,7 +189,9 @@ export class PostProcessUberPass extends PostProcessPass {
         undefined,
         undefined,
         bloomMaterial,
-        1
+        1,
+        undefined,
+        RenderBufferLoadAction.DontCare
       );
     }
 
