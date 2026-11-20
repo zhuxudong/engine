@@ -77,7 +77,17 @@ export class PostProcessUberPass extends PostProcessPass {
       uberShaderData.disableMacro(TonemappingEffect._enableMacro);
     }
     const viewport = destTarget === camera.renderTarget ? camera.viewport : undefined;
-    Blitter.blitTexture(camera.engine, srcTexture, destTarget, 0, viewport, this._uberMaterial, undefined, undefined, RenderBufferLoadAction.DontCare);
+    Blitter._blitTexture(
+      camera.engine,
+      srcTexture,
+      destTarget,
+      0,
+      viewport,
+      this._uberMaterial,
+      undefined,
+      undefined,
+      RenderBufferLoadAction.DontCare
+    );
   }
 
   /**
@@ -178,11 +188,21 @@ export class PostProcessUberPass extends PostProcessPass {
     }
 
     // Prefilter
-    Blitter.blitTexture(engine, srcTexture, mipRT[0], undefined, undefined, bloomMaterial, 0, undefined, RenderBufferLoadAction.DontCare);
+    Blitter._blitTexture(
+      engine,
+      srcTexture,
+      mipRT[0],
+      undefined,
+      undefined,
+      bloomMaterial,
+      0,
+      undefined,
+      RenderBufferLoadAction.DontCare
+    );
 
     // Progressive single-pass 5x5 9-tap downsample pyramid (Castaño 2013)
     for (let i = 1; i < mipCount; i++) {
-      Blitter.blitTexture(
+      Blitter._blitTexture(
         engine,
         <Texture2D>mipRT[i - 1].getColorTexture(0),
         mipRT[i],
@@ -197,7 +217,7 @@ export class PostProcessUberPass extends PostProcessPass {
 
     // Progressive in-place upsample (4-tap 3x3 tent by default, bicubic with HQ filtering)
     for (let i = mipCount - 2; i >= 0; i--) {
-      Blitter.blitTexture(
+      Blitter._blitTexture(
         engine,
         <Texture2D>mipRT[i + 1].getColorTexture(0),
         mipRT[i],
