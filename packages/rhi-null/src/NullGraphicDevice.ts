@@ -14,6 +14,7 @@ import { NullTexture2D, NullTexture2DArray, NullTextureCube } from "./NullTextur
 export class NullGraphicDevice implements IHardwareRenderer {
   readonly supportsRendering = false;
   readonly maxUniformBlockSize = 0;
+  readonly uniformBufferOffsetAlignment = 1;
   readonly _options = {};
   readonly capability = {
     maxTextureSize: 0,
@@ -89,6 +90,10 @@ export class NullGraphicDevice implements IHardwareRenderer {
   activeTexture(): void {}
   bindTexture(): void {}
   bindUniformBufferBase(): void {}
+  bindUniformBufferRange(): void {}
+  tryBindUniformBlock(): boolean {
+    return false;
+  }
   setGlobalDepthBias(): void {}
   enableRasterizerDiscard(): void {}
   disableRasterizerDiscard(): void {}

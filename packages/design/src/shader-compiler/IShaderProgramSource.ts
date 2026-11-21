@@ -1,5 +1,25 @@
 import type { ShaderInstruction } from "./ICondition";
 
+/** Byte layout of a fixed, column-major std140 uniform block. */
+export interface IShaderUniformBlock {
+  name: "Scene" | "Camera";
+  byteLength: number;
+  members: IShaderUniformBlockMember[];
+}
+
+export interface IShaderUniformBlockMember {
+  name: string;
+  /** ShaderLab scalar, vector or matrix type. */
+  type: string;
+  offset: number;
+  /** Element count, or zero for a non-array. */
+  arrayLength: number;
+  /** Distance in bytes between consecutive elements, or zero for a non-array. */
+  arrayStride: number;
+  /** Distance in bytes between columns, or zero for a non-matrix. */
+  matrixStride: number;
+}
+
 /** Backend output before runtime macro and inherited-declaration selection. */
 export interface IShaderProgramSource {
   /** Unselected vertex text for inspection; use the instruction stream to compile a variant. */
@@ -8,6 +28,8 @@ export interface IShaderProgramSource {
   fragment: string;
   /** Source vertex output names mapped to their generated GLSL names. */
   vertexOutputNames?: Readonly<Record<string, string>>;
+  /** Explicit uniform blocks used by either stage, before macro selection. */
+  uniformBlocks?: IShaderUniformBlock[];
   /** Vertex program, including declaration ownership that cannot be recovered from the text view. */
   vertexShaderInstructions?: ShaderInstruction[];
   /** Fragment program, including declaration ownership that cannot be recovered from the text view. */

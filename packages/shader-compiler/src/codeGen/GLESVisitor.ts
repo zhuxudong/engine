@@ -1,4 +1,4 @@
-import type { IShaderInfo } from "@galacean/engine-design";
+import type { IShaderInfo, IShaderUniformBlock } from "@galacean/engine-design";
 import type { IPoolElement } from "@galacean/engine-core";
 import { BaseToken } from "@galacean/engine-shader-parser/internal";
 import { EShaderStage } from "@galacean/engine-shader-parser/internal";
@@ -39,6 +39,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
   /** Interface type and variable tokens whose source names GLSL ES rejects. */
   private readonly _escapedDeclarations = new Map<BaseToken, string>();
   private _vertexOutputNames?: Record<string, string>;
+  private _uniformBlocks?: Set<IShaderUniformBlock>;
   private readonly _fragmentVaryingProps = new Set<StructProp>();
   private readonly _globalInputs = new Map<EShaderStage, VarSymbol[]>();
   private readonly _inputHelperBodies = new Map<TreeNode, string>();
@@ -48,6 +49,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
   private readonly _forwardStructIndices = new Map<ASTNode.StructSpecifier, number>();
   private readonly _structCodeSegments = new Map<ASTNode.StructSpecifier, ICodeSegment>();
   private readonly _forwardVariableIndices = new Map<ASTNode.VariableDeclaration, number>();
+  private readonly _forwardBlockIndices = new Map<ASTNode.UniformBlock, number>();
   private readonly _variableCodeSegments = new Map<ASTNode.VariableDeclaration, ICodeSegment>();
   private readonly _declarationOwners = new Map<TreeNode, DeferredDeclarationOwnership>();
   private readonly _deferredPrototypes = new Map<ASTNode.FunctionDefinition, ICodeSegment>();
@@ -66,6 +68,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
     this._forwardStructIndices.clear();
     this._structCodeSegments.clear();
     this._forwardVariableIndices.clear();
+    this._forwardBlockIndices.clear();
     this._variableCodeSegments.clear();
     this._deferredPrototypes.clear();
     this._declarationReferences.clear();
@@ -93,6 +96,11 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
    * @param out - Destination code segments.
    */
   getOtherGlobal(data: ShaderData, out: ICodeSegment[]): void {
+    if (data.uniformBlocks) {
+      for (const block of data.uniformBlocks) {
+        if (block.parent?.parent instanceof ASTNode.GLShaderProgram) this._emitUniformBlock(block, out);
+      }
+    }
     for (const { name, fallback } of this._inputHelperGroups.values()) {
       out.push({
         text:
@@ -225,9 +233,15 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       this._fragmentVaryingProps.clear();
       const fragment = this._fragmentMain(coreInfo.fragmentEntry, shaderData, outerGlobalMacroDeclarations);
       const vertex = this._vertexMain(coreInfo.vertexEntry, shaderData, outerGlobalMacroDeclarations);
-      return { vertex, fragment, vertexOutputNames: this._vertexOutputNames };
+      return {
+        vertex,
+        fragment,
+        vertexOutputNames: this._vertexOutputNames,
+        uniformBlocks: this._uniformBlocks && Array.from(this._uniformBlocks)
+      };
     } finally {
       this._sourceIR = undefined;
+      this._uniformBlocks = undefined;
       this._outerMacroDeclarations = [];
       this._globalInputs.clear();
       this._declarationOwners.clear();
@@ -669,6 +683,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
     const context = this.context;
     // Set iteration includes dependencies discovered while generating earlier declarations.
     for (const sm of context._referencedGlobalSymbols) {
+      if (sm.astNode instanceof ASTNode.VariableDeclaration && sm.astNode.uniformBlock) continue;
       this._currentDeclaration = sm.astNode;
       const codeGenResult = sm.astNode!.codeGen(this);
       this._currentDeclaration = undefined;
@@ -689,6 +704,61 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
     for (const [definition, text] of this._forwardFunctionDeclarations) {
       if (!definition.isInMacroBranch) out.push({ text, index: definition.location.start.index });
     }
+  }
+
+  private _emitUniformBlock(block: ASTNode.UniformBlock, out: ICodeSegment[]): void {
+    if (this._forwardBlockIndices.has(block)) return;
+    const text = this._uniformBlockCode(block);
+    if (text) out.push({ text, index: block.location.start.index });
+  }
+
+  private _uniformBlockCode(block: ASTNode.UniformBlock): string {
+    const referenced = block.members.filter((member) =>
+      this.context._referencedGlobalSymbols.has(member.declarator.symbol)
+    );
+    if (!referenced.length) return "";
+    const layout = block.layout;
+    (this._uniformBlocks ??= new Set()).add(layout);
+    const fields = layout.members.map(({ name, type, arrayLength }, i) => {
+      const member = block.members[i].declarator.symbol;
+      const candidates = this.context._passSymbolTable!.getSymbols(member, true, []);
+      const overrides = candidates.filter(
+        (candidate) =>
+          candidate.astNode instanceof ASTNode.VariableDeclaration &&
+          candidate.astNode.uniformBlock?.layout !== layout &&
+          this._canBranchesOverlap(member.branchSignature, candidate.branchSignature)
+      );
+      if (overrides.length) {
+        if (candidates.includes(member)) {
+          const ir = this._sourceIR!;
+          throw mapExpandedShaderError(
+            new GSError(
+              GSErrorName.CompilationError,
+              `Uniform block member '${name}' cannot switch binding between a block and a loose uniform under overlapping guards.`,
+              member.astNode!.location,
+              ir.source,
+              undefined,
+              "AmbiguousUniformBlockBinding"
+            ),
+            ir.source,
+            ir.sourceMap
+          );
+        }
+        // Inheritance selected a loose declaration. Reserve the original bytes so every
+        // member following it still has the same offset, in both linked stages.
+        name = this.context.names.allocate(`uniformBlock:${layout.name}.${name}`, `gs_${layout.name}_${name}`);
+      }
+      const precision = type === "bool" || type.startsWith("bvec") ? "" : "highp ";
+      return `  ${precision}${type} ${name}${arrayLength ? `[${arrayLength}]` : ""};`;
+    });
+    let text = `layout(std140) uniform ${layout.name} {\n${fields.join("\n")}\n};`;
+    if (this._declarationOwners.size) {
+      const owners = referenced.map((member) => this._declarationOwners.get(member)!);
+      text =
+        owners.map((owner) => ShaderInstructionEncoder.declaration("", owner)).join("") +
+        ShaderInstructionEncoder.sharedDeclaration(text, owners);
+    }
+    return text;
   }
 
   protected override referenceFunction(symbol: FnSymbol, referenceIndex: number, branch: BranchSignature): void {
@@ -860,26 +930,34 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
           this._unsupportedForwardDeclaration(declaration);
         }
         this._prepareForwardTypes(candidate.dataType!.structDeclarations, anchor);
-        this._forwardVariableIndices.set(
-          declaration,
-          Math.min(this._forwardVariableIndices.get(declaration) ?? Infinity, anchor)
-        );
+        if (declaration.uniformBlock) {
+          const block = declaration.uniformBlock;
+          this._forwardBlockIndices.set(block, Math.min(this._forwardBlockIndices.get(block) ?? Infinity, anchor));
+        } else {
+          this._forwardVariableIndices.set(
+            declaration,
+            Math.min(this._forwardVariableIndices.get(declaration) ?? Infinity, anchor)
+          );
+        }
       }
     }
     return this._escapedReference(node) ?? code;
   }
 
   private _getForwardDeclarations(out: ICodeSegment[]): void {
-    type Declaration = ASTNode.StructSpecifier | ASTNode.VariableDeclaration;
+    type Declaration = ASTNode.StructSpecifier | ASTNode.VariableDeclaration | ASTNode.UniformBlock;
     const guarded = new Map<ASTNode.GlobalDeclaration, { index: number; declarations: Declaration[] }>();
     const declarations: [Declaration, number][] = Array.from(this._forwardStructIndices);
     for (const entry of this._forwardVariableIndices) declarations.push(entry);
+    for (const entry of this._forwardBlockIndices) declarations.push(entry);
     const code = (declaration: Declaration) =>
-      this._declaration(
-        declaration.codeGen(this) + (declaration instanceof ASTNode.VariableDeclaration ? ";" : ""),
-        declaration,
-        false
-      );
+      declaration instanceof ASTNode.UniformBlock
+        ? this._uniformBlockCode(declaration)
+        : this._declaration(
+            declaration.codeGen(this) + (declaration instanceof ASTNode.VariableDeclaration ? ";" : ""),
+            declaration,
+            false
+          );
     for (const [declaration, index] of declarations) {
       const owner = this._declarationOwners.get(declaration);
       const macro = this._outerMacroDeclarations.find(
@@ -891,7 +969,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
         const previous =
           declaration instanceof ASTNode.StructSpecifier
             ? this._structCodeSegments.get(declaration)
-            : this._variableCodeSegments.get(declaration);
+            : declaration instanceof ASTNode.VariableDeclaration && this._variableCodeSegments.get(declaration);
         if (previous) {
           if (owner) previous.text = this._declaration("", declaration);
           else out.splice(out.indexOf(previous), 1);
@@ -1146,6 +1224,9 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
             index: child.location.start.index
           });
         }
+      } else if (child instanceof ASTNode.UniformBlock) {
+        this._emitUniformBlock(child, out);
+        continue;
       } else if (child instanceof ASTNode.VariableDeclarationList) {
         const variableDeclarations = child.variableDeclarations;
         for (let i = 0; i < variableDeclarations.length; i++) {

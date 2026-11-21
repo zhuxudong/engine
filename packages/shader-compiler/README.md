@@ -44,6 +44,21 @@ Authoring diagnostics are provided separately by `@galacean/engine-shader-analyz
 
 The asset loader supplies the current logical shader location internally. Moving a shader folder remains valid when the shader asset and its registered include keys move together. Disk paths do not define the logical root.
 
+## Scene and camera uniform blocks
+
+A pass can group numeric uniforms that share a `Scene` or `Camera`. Declare the block at shader scope and refer to each member by name inside the pass.
+
+```glsl
+uniform Scene {
+    vec3 skyCoefficients[9];
+};
+uniform Camera {
+    mat4 viewProjection;
+};
+```
+
+Set these properties on the corresponding owner's `shaderData`. For example, `scene.shaderData.setFloatArray("skyCoefficients", coefficients)` accepts 27 tightly packed floats. The compiler records a 16-byte stride for each `vec3`, and the runtime inserts the padding on upload. Matrices use column-major order. Block members support numeric and boolean scalars, vectors, matrices and fixed-length arrays. Keep each block's member order and array lengths fixed across macro variants. Multiple shaders can share a layout by including the same block declaration.
+
 ## Precompile
 
 Import `ShaderPrecompiler` from `@galacean/engine-shader-compiler/precompile` to generate `.shaderc` data in memory. The CLI writes this data to files.

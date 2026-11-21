@@ -2,8 +2,7 @@
 #define FOG_INCLUDED
 
 #if SCENE_FOG_MODE != 0
-    vec4 scene_FogColor;
-    vec4 scene_FogParams; // (-1/(end-start), end/(end-start), density/ln(2),density/sprt(ln(2)));
+    #include "ShaderLibrary/Common/Scene.glsl"
 
     vec4 fog(vec4 color, vec3 positionVS){
         float fogDepth = length(positionVS);

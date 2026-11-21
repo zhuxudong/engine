@@ -27,14 +27,7 @@ vec3 renderer_PositionScale;
 vec3 renderer_SizeScale;
 vec3 renderer_PivotOffset;
 
-mat4 camera_ViewMat;
-mat4 camera_ProjMat;
-
-#ifdef RENDERER_MODE_STRETCHED_BILLBOARD
-    vec3 camera_Position;
-#endif
-vec3 camera_Forward;
-vec3 camera_Up;
+#include "ShaderLibrary/Common/Camera.glsl"
 
 float renderer_StretchedBillboardLengthScale;
 float renderer_StretchedBillboardSpeedScale;

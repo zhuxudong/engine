@@ -15,7 +15,11 @@ export type {
 export * from "./PreprocessorExpression";
 export * from "./ShaderIncludePath";
 export type { IPrecompiledShader, IPrecompiledSubShader, IPrecompiledPass } from "./IPrecompiledShader";
-export type { IShaderProgramSource as IShaderInfo } from "./IShaderProgramSource";
+export type {
+  IShaderProgramSource as IShaderInfo,
+  IShaderUniformBlock,
+  IShaderUniformBlockMember
+} from "./IShaderProgramSource";
 export type { IRenderStates } from "./shaderSource/IRenderStates";
 export type { IShaderPassSource } from "./shaderSource/IShaderPassSource";
 export type { IShaderPosition } from "./shaderSource/IShaderPosition";

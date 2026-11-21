@@ -21,6 +21,8 @@ export interface IHardwareRenderer {
   /** WebGL access requires a graphics-capable backend. */
   readonly gl: WebGL2RenderingContext;
   readonly maxUniformBlockSize: number;
+  /** Required byte alignment of a uniform buffer range's starting offset. */
+  readonly uniformBufferOffsetAlignment: number;
   /** Whether this device can execute rendering commands. */
   readonly supportsRendering: boolean;
   readonly capability: {
@@ -80,6 +82,9 @@ export interface IHardwareRenderer {
   activeTexture(textureID: number): void;
   bindTexture(texture: IPlatformTexture): void;
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void;
+  bindUniformBufferRange(bindingPoint: number, buffer: IPlatformBuffer, byteOffset: number, byteSize: number): void;
+  /** Assign a binding point if the linked native program uses the named block. */
+  tryBindUniformBlock(program: object, blockName: string, bindingPoint: number): boolean;
   setGlobalDepthBias(bias: number, slopeBias: number): void;
   enableRasterizerDiscard(): void;
   disableRasterizerDiscard(): void;

@@ -1,3 +1,4 @@
+import type { IShaderUniformBlock } from "@galacean/engine-design";
 import type { IHardwareRenderer, IPlatformShaderProgram } from "../renderingHardwareInterface";
 import { Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import { Engine } from "../Engine";
@@ -8,6 +9,8 @@ import { ShaderProperty } from "./ShaderProperty";
 import { ShaderUniform } from "./ShaderUniform";
 import { ShaderUniformBlock } from "./ShaderUniformBlock";
 import { ShaderBlockProperty } from "./ShaderBlockProperty";
+import { GlobalUniformBlock } from "./GlobalUniformBlock";
+import { ConstantBufferBindingPoint } from "./enums/ConstantBufferBindingPoint";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
 import { InstanceBufferLayout, ShaderFactory } from "./ShaderFactory";
 
@@ -84,6 +87,8 @@ export class ShaderProgram implements IPlatformShaderProgram {
   private _glProgram: WebGLProgram | null;
   private _activeTextureUint: number = 0;
   private _groupConflictVersion: number = 0;
+  private _sceneBlock?: GlobalUniformBlock;
+  private _cameraBlock?: GlobalUniformBlock;
 
   /**
    * Whether this shader program is valid.
@@ -92,19 +97,37 @@ export class ShaderProgram implements IPlatformShaderProgram {
     return this._isValid;
   }
 
-  constructor(engine: Engine, vertexSource: string, fragmentSource: string, transformFeedbackVaryings?: string[]) {
+  constructor(
+    engine: Engine,
+    vertexSource: string,
+    fragmentSource: string,
+    transformFeedbackVaryings?: string[],
+    uniformBlocks?: readonly IShaderUniformBlock[]
+  ) {
     this._engine = engine;
     this._gl = engine._hardwareRenderer.gl;
     this._glProgram = this._createProgram(vertexSource, fragmentSource, transformFeedbackVaryings);
 
     if (this._glProgram) {
       this._isValid = true;
-      this._recordLocation();
+      try {
+        if (uniformBlocks) this._bindGlobalBlockLayouts(uniformBlocks);
+        this._recordLocation();
+      } catch (error) {
+        this.destroy();
+        throw error;
+      }
     } else {
       this._isValid = false;
     }
 
     this.id = ShaderProgram._counter++;
+  }
+
+  /** Bind explicit global data, including changes made in place since the previous draw. */
+  bindGlobalBlocks(scene: ShaderData, camera: ShaderData): void {
+    this._sceneBlock?.bind(scene);
+    this._cameraBlock?.bind(camera);
   }
 
   /**
@@ -236,6 +259,9 @@ export class ShaderProgram implements IPlatformShaderProgram {
    * Destroy this shader program.
    */
   destroy(): void {
+    this._sceneBlock?.release();
+    this._cameraBlock?.release();
+    this._sceneBlock = this._cameraBlock = undefined;
     const gl = this._gl;
     this._glProgram && gl.deleteProgram(this._glProgram);
   }
@@ -387,7 +413,6 @@ export class ShaderProgram implements IPlatformShaderProgram {
     const basicResources = this._engine._basicResources;
 
     uniformInfos.forEach(({ name, size, type }) => {
-      const shaderUniform = new ShaderUniform(this._engine);
       let isArray = false;
       let isTexture = false;
 
@@ -400,6 +425,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
       // UBO members have no individual location, skip them
       if (location === null) return;
 
+      const shaderUniform = new ShaderUniform(this._engine);
       shaderUniform.name = name;
       const property = ShaderProperty.getByName(name);
       shaderUniform.propertyId = property._uniqueId;
@@ -573,6 +599,20 @@ export class ShaderProgram implements IPlatformShaderProgram {
       if (bindingPoint !== undefined) {
         gl.uniformBlockBinding(program, i, bindingPoint);
       }
+    }
+  }
+
+  private _bindGlobalBlockLayouts(layouts: readonly IShaderUniformBlock[]): void {
+    const rhi = this._engine._hardwareRenderer;
+    for (const layout of layouts) {
+      const binding = ConstantBufferBindingPoint[layout.name];
+      if (!rhi.tryBindUniformBlock(this._glProgram!, layout.name, binding)) continue;
+      if (layout.name === "Scene" ? this._sceneBlock : this._cameraBlock) {
+        throw new Error(`Duplicate global uniform block '${layout.name}'.`);
+      }
+      const shared = GlobalUniformBlock.acquire(this._engine, layout, binding);
+      if (layout.name === "Scene") this._sceneBlock = shared;
+      else this._cameraBlock = shared;
     }
   }
 

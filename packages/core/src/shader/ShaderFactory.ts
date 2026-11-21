@@ -73,6 +73,7 @@ mat3 _normalMatFromModel(mat3 m) {
   // shader-compiler DCE may have stripped them from Transform.glsl.
   // NOTE: keep this in sync with _derivedDefines above.
   private static readonly _cameraMatrixCandidates: ReadonlyArray<string> = ["camera_ViewMat", "camera_VPMat"];
+  private static readonly _cameraBlock = /layout\s*\(\s*std140\s*\)\s*uniform\s+Camera\s*\{[^{}]*\}\s*;/;
 
   private static readonly _uboUniformRegex =
     /^[ \t]*uniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+(\w+)\s*(\[.+?\])?\s*;/gm;
@@ -196,8 +197,13 @@ mat3 _normalMatFromModel(mat3 m) {
     const fieldDefinesVS = ShaderFactory._buildFieldDefines(instanceFields, "gl_InstanceID");
     const fieldDefinesFS = ShaderFactory._buildFieldDefines(instanceFields, "v_instanceID");
     const derivedDefines = ShaderFactory._derivedDefines;
-    const vsCameraDecls = ShaderFactory._buildMissingCameraDecls(vertexSource);
-    const fsCameraDecls = ShaderFactory._buildMissingCameraDecls(fragmentSource);
+    // Instancing can introduce a camera matrix in a stage that originally only used a
+    // renderer matrix. Both stages must agree on whether it belongs to a named block.
+    const vertexCamera = ShaderFactory._cameraBlock.exec(vertexSource)?.[0];
+    const fragmentCamera = ShaderFactory._cameraBlock.exec(fragmentSource)?.[0];
+    const cameraBlock = vertexCamera ?? fragmentCamera;
+    const vsCameraDecls = ShaderFactory._buildMissingCameraDecls(vertexSource, vertexCamera, cameraBlock);
+    const fsCameraDecls = ShaderFactory._buildMissingCameraDecls(fragmentSource, fragmentCamera, cameraBlock);
 
     const vsBlock = `${uboDecl}flat out int v_instanceID;\n${vsCameraDecls}${fieldDefinesVS}\n${derivedDefines}\n`;
     const fsBlock = `${uboDecl}flat in int v_instanceID;\n${fsCameraDecls}${fieldDefinesFS}\n${derivedDefines}\n`;
@@ -284,11 +290,12 @@ mat3 _normalMatFromModel(mat3 m) {
     return { instanceFields, instanceMaxCount, structSize };
   }
 
-  private static _buildMissingCameraDecls(source: string): string {
-    let out = "";
+  private static _buildMissingCameraDecls(source: string, stageBlock?: string, cameraBlock?: string): string {
+    let out = cameraBlock && !stageBlock ? cameraBlock + "\n" : "";
     const candidates = ShaderFactory._cameraMatrixCandidates;
     for (let i = 0; i < candidates.length; i++) {
       const name = candidates[i];
+      if (cameraBlock && new RegExp(`\\bmat4\\s+${name}\\s*;`).test(cameraBlock)) continue;
       const decl = new RegExp(`^\\s*uniform\\s+(?:(?:lowp|mediump|highp)\\s+)?mat4\\s+${name}\\s*;`, "m");
       if (!decl.test(source)) {
         out += `uniform mat4 ${name};\n`;

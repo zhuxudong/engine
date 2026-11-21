@@ -115,6 +115,7 @@ export class ShaderPrecompiler {
             tags: pass.tags,
             renderStates: serializeRenderStates(pass.renderStates),
             vertexOutputNames: program.vertexOutputNames,
+            uniformBlocks: program.uniformBlocks,
             vertexShaderInstructions: program.vertexShaderInstructions,
             fragmentShaderInstructions: program.fragmentShaderInstructions
           };

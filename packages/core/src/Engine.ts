@@ -22,6 +22,7 @@ import { ColliderShape } from "./physics/shape/ColliderShape";
 import { PostProcessPass } from "./postProcess/PostProcessPass";
 import { PostProcessUberPass } from "./postProcess/PostProcessUberPass";
 import { Shader } from "./shader/Shader";
+import type { GlobalUniformBlock } from "./shader/GlobalUniformBlock";
 import type { BuiltinShaders } from "./shader/BuiltinShaders";
 import { ShaderMacro } from "./shader/ShaderMacro";
 import { ShaderMacroCollection } from "./shader/ShaderMacroCollection";
@@ -77,6 +78,8 @@ export class Engine extends EventDispatcher {
   _nativePhysicsManager: IPhysicsManager;
   /** @internal */
   _hardwareRenderer: IHardwareRenderer;
+  /** @internal Shared by programs with identical global block layouts. */
+  _globalUniformBlocks?: Map<string, GlobalUniformBlock>;
   /** @internal */
   _renderTargetPool: RenderTargetPool;
   /** @internal */
@@ -675,6 +678,10 @@ export class Engine extends EventDispatcher {
 
   private _onDeviceLost(): void {
     this._isDeviceLost = true;
+    // Release programs and their shared uniform buffers while their context is lost.
+    // Deleting those handles after restoration targets the newly created context.
+    Shader._clear(this);
+    this._shaderProgramMaps.length = 0;
     // Lose graphic resources
     this.resourceManager._lostGraphicResources();
     this._renderingStatistics._reset();
@@ -685,7 +692,7 @@ export class Engine extends EventDispatcher {
   private _onDeviceRestored(): void {
     this._hardwareRenderer.resetState();
     this._lastRenderState = new RenderState();
-    // Clear shader program maps
+    // Discard any programs requested while the device was unavailable.
     Shader._clear(this);
     this._shaderProgramMaps.length = 0;
 

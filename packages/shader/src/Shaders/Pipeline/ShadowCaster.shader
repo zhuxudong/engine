@@ -15,8 +15,7 @@ Shader "Pipeline/ShadowCaster" {
       #include "ShaderLibrary/Skin/Skin.glsl"
       #include "ShaderLibrary/Skin/BlendShape.glsl"
 
-      vec2 scene_ShadowBias;
-      vec3 scene_LightDirection;
+      #include "ShaderLibrary/Common/Scene.glsl"
 
       vec4 material_BaseColor;
       sampler2D material_BaseTexture;

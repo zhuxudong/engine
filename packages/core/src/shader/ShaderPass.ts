@@ -1,4 +1,4 @@
-import type { ShaderInstruction } from "@galacean/engine-design";
+import type { IShaderUniformBlock, ShaderInstruction } from "@galacean/engine-design";
 import { Engine } from "../Engine";
 import { InstanceBuffer } from "../RenderPipeline/InstanceBuffer";
 import { PipelineStage } from "../RenderPipeline/enums/PipelineStage";
@@ -43,6 +43,7 @@ export class ShaderPass extends ShaderPart {
   _shaderProgramMaps: ShaderProgramMap[] = [];
 
   private readonly _vertexOutputNames?: Readonly<Record<string, string>>;
+  private readonly _uniformBlocks?: readonly IShaderUniformBlock[];
 
   /**
    * Create a shader pass from precompiled instructions.
@@ -52,6 +53,7 @@ export class ShaderPass extends ShaderPart {
    * @param _platformTarget - Target shader language
    * @param tags - Tags
    * @param vertexOutputNames - Source output names mapped to generated GLSL names
+   * @param uniformBlocks - Explicit global uniform block layouts from the compiler
    */
   constructor(
     name: string,
@@ -59,7 +61,8 @@ export class ShaderPass extends ShaderPart {
     fragmentShaderInstructions: ShaderInstruction[],
     _platformTarget: ShaderLanguage,
     tags?: Record<string, number | string | boolean>,
-    vertexOutputNames?: Readonly<Record<string, string>>
+    vertexOutputNames?: Readonly<Record<string, string>>,
+    uniformBlocks?: readonly IShaderUniformBlock[]
   ) {
     super();
     this._shaderPassId = ShaderPass._shaderPassCounter++;
@@ -68,6 +71,7 @@ export class ShaderPass extends ShaderPart {
     this._vertexShaderInstructions = vertexShaderInstructions;
     this._fragmentShaderInstructions = fragmentShaderInstructions;
     this._vertexOutputNames = vertexOutputNames;
+    this._uniformBlocks = uniformBlocks;
 
     const mergedTags = { pipelineStage: PipelineStage.Forward, ...tags };
     for (const key in mergedTags) {
@@ -128,7 +132,7 @@ export class ShaderPass extends ShaderPart {
       macroCollection,
       isGPUInstance
     );
-    const program = new ShaderProgram(engine, vertexSource, fragmentSource, feedbackVaryings);
+    const program = new ShaderProgram(engine, vertexSource, fragmentSource, feedbackVaryings, this._uniformBlocks);
     program._instanceLayout = instanceLayout;
     return program;
   }

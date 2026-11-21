@@ -119,6 +119,7 @@ export class Sky {
     const program = pass._getShaderProgram(engine, compileMacros);
     program.bind();
     program.regroupUniformBlocks();
+    program.bindGlobalBlocks(sceneData, cameraShaderData);
     program.uploadAll(program.sceneUniformBlock, sceneData);
     program.uploadAll(program.cameraUniformBlock, cameraShaderData);
     program.uploadAll(program.materialUniformBlock, materialShaderData);

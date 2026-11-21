@@ -78,6 +78,7 @@ export interface WebGLGraphicDeviceOptions {
 export class WebGLGraphicDevice implements IHardwareRenderer {
   readonly supportsRendering = true;
   maxUniformBlockSize: number;
+  uniformBufferOffsetAlignment: number;
 
   /** @internal */
   _readFrameBuffer: WebGLFramebuffer | null = null;
@@ -104,6 +105,9 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   private _activeTextureID: number;
   private _activeTextures: (GLTexture | null)[] = new Array(32);
+  private _uniformRangeBuffers: (WebGLBuffer | null)[] = [];
+  private _uniformRangeOffsets: number[] = [];
+  private _uniformRangeSizes: number[] = [];
 
   private _lastViewport: Vector4 = new Vector4(null!, null!, null!, null!);
   private _lastScissor: Vector4 = new Vector4(null!, null!, null!, null!);
@@ -245,6 +249,27 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void {
     const gl = this._gl;
     gl.bindBufferBase(gl.UNIFORM_BUFFER, bindingPoint, (<GLBuffer>buffer)._glBuffer);
+    this._uniformRangeBuffers[bindingPoint] = null;
+  }
+
+  bindUniformBufferRange(bindingPoint: number, buffer: IPlatformBuffer, byteOffset: number, byteSize: number): void {
+    const handle = (<GLBuffer>buffer)._glBuffer;
+    if (
+      this._uniformRangeBuffers[bindingPoint] === handle &&
+      this._uniformRangeOffsets[bindingPoint] === byteOffset &&
+      this._uniformRangeSizes[bindingPoint] === byteSize
+    ) {
+      return;
+    }
+    const gl = this._gl;
+    gl.bindBufferRange(gl.UNIFORM_BUFFER, bindingPoint, handle, byteOffset, byteSize);
+    this._uniformRangeBuffers[bindingPoint] = handle;
+    this._uniformRangeOffsets[bindingPoint] = byteOffset;
+    this._uniformRangeSizes[bindingPoint] = byteSize;
+  }
+
+  tryBindUniformBlock(program: WebGLProgram, blockName: string, bindingPoint: number): boolean {
+    return this.bindUniformBlock(program, blockName, bindingPoint) !== this._gl.INVALID_INDEX;
   }
 
   bindUniformBlock(program: WebGLProgram, blockName: string, bindingPoint: number): number {
@@ -277,6 +302,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
    * Call this after using a custom program (e.g., Transform Feedback) outside the engine's pipeline.
    */
   invalidateShaderProgramState(): void {
+    this._uniformRangeBuffers.fill(null);
     if (this._currentBindShaderProgram) {
       this._gl.useProgram(null);
       this._currentBindShaderProgram = null;
@@ -599,9 +625,14 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
       this._renderer = gl.getParameter(debugRenderInfo.UNMASKED_RENDERER_WEBGL);
     }
     this.maxUniformBlockSize = gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE);
+    this.uniformBufferOffsetAlignment = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT);
+    const bindings = gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS);
+    this._uniformRangeBuffers.length = this._uniformRangeOffsets.length = this._uniformRangeSizes.length = bindings;
+    this._uniformRangeBuffers.fill(null);
   }
 
   destroy(): void {
+    this._uniformRangeBuffers.length = 0;
     const webCanvas = this._webCanvas;
     webCanvas.removeEventListener("webglcontextlost", this._onWebGLContextLost, false);
     webCanvas.removeEventListener("webglcontextrestored", this._onWebGLContextRestored, false);
@@ -612,6 +643,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   private _onWebGLContextLost(event: WebGLContextEvent) {
+    this._uniformRangeBuffers.fill(null);
     event.preventDefault();
     this._onDeviceLost();
   }
