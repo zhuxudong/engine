@@ -25,20 +25,20 @@ describe("global uniform buffer lifetime", () => {
       const values = new Float32Array(512 * 4);
       data.setFloatArray("lifetimeValues", values);
       const ranges = vi.spyOn(engine._hardwareRenderer, "bindUniformBufferRange");
-      first.bindGlobalBlocks(data, data);
+      first.uploadSharedUniforms(data, data);
       const [, backing, firstOffset] = ranges.mock.calls[0];
       const uploads = vi.spyOn(backing, "setData");
-      second.bindGlobalBlocks(data, data);
+      second.uploadSharedUniforms(data, data);
       expect(ranges.mock.calls[1][1]).toBe(backing);
       expect(uploads).not.toHaveBeenCalled();
 
       values[0] = 1;
-      first.bindGlobalBlocks(data, data);
+      first.uploadSharedUniforms(data, data);
       const nextOffset = ranges.mock.calls[2][2];
       expect(nextOffset).toBeGreaterThan(firstOffset);
       expect(nextOffset % engine._hardwareRenderer.uniformBufferOffsetAlignment).toBe(0);
       values[0] = 2;
-      second.bindGlobalBlocks(data, data);
+      second.uploadSharedUniforms(data, data);
       expect(ranges.mock.calls[3][2]).toBe(firstOffset);
       expect(uploads.mock.lastCall![5]).toBe(SetDataOptions.Discard);
 
@@ -47,20 +47,20 @@ describe("global uniform buffer lifetime", () => {
       engine.resourceManager.gc();
       expect(destroy).not.toHaveBeenCalled();
       engine.resourceManager._lostGraphicResources();
-      second.bindGlobalBlocks(data, data);
+      second.uploadSharedUniforms(data, data);
       expect(uploads).toHaveBeenCalledTimes(3);
 
       const other = new Scene(engine);
       const otherData = other.shaderData;
       const readOther = () => {
-        second.bindGlobalBlocks(otherData, otherData);
+        second.uploadSharedUniforms(otherData, otherData);
         const [, buffer, offset] = ranges.mock.lastCall!;
         const result = new Float32Array(8);
         buffer.getData(result, offset, 0, result.length);
         return Array.from(result);
       };
       values.fill(9);
-      second.bindGlobalBlocks(data, data);
+      second.uploadSharedUniforms(data, data);
       expect(readOther()).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
       otherData.setFloatArray("lifetimeValues", new Float32Array([1, 2, 3, 4, 5]));
       expect(readOther()).toEqual([1, 2, 3, 4, 5, 0, 0, 0]);
@@ -99,7 +99,7 @@ describe("global uniform buffer lifetime", () => {
       scene.setFloat("restoredValue", 0.75);
       const ranges = vi.spyOn(engine._hardwareRenderer, "bindUniformBufferRange");
       const first = pass._getShaderProgram(engine, macros);
-      first.bindGlobalBlocks(scene, scene);
+      first.uploadSharedUniforms(scene, scene);
       const initialBuffer = ranges.mock.lastCall![1];
       const lost = new Promise<void>((resolve) => engine.once("devicelost", resolve));
       engine.forceLoseDevice();
@@ -112,7 +112,7 @@ describe("global uniform buffer lifetime", () => {
 
       const second = pass._getShaderProgram(engine, macros);
       expect(second).not.toBe(first);
-      second.bindGlobalBlocks(scene, scene);
+      second.uploadSharedUniforms(scene, scene);
       const [, buffer, offset] = ranges.mock.lastCall!;
       expect(buffer).not.toBe(initialBuffer);
       const result = new Float32Array(1);

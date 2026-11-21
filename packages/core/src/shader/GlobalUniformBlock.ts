@@ -5,8 +5,9 @@ import { Buffer } from "../graphic/Buffer";
 import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
 import { BufferUsage } from "../graphic/enums/BufferUsage";
 import { SetDataOptions } from "../graphic/enums/SetDataOptions";
-import type { ShaderData, ShaderPropertyValueType } from "./ShaderData";
+import { ShaderData, type ShaderPropertyValueType } from "./ShaderData";
 import { ShaderProperty } from "./ShaderProperty";
+import { ShaderDataGroup } from "./enums/ShaderDataGroup";
 
 /** Engine-owned, reference-counted storage for one compiler-defined std140 layout. */
 export class GlobalUniformBlock {
@@ -30,6 +31,7 @@ export class GlobalUniformBlock {
 
   private _references = 0;
   private readonly _fields: UniformBlockField[];
+  private readonly _group: ShaderDataGroup;
   private readonly _staging: Uint32Array;
   private readonly _previous: Uint32Array;
   private readonly _stride: number;
@@ -52,7 +54,8 @@ export class GlobalUniformBlock {
     const integers = new Int32Array(data);
     this._staging = new Uint32Array(data);
     this._previous = new Uint32Array(size / 4);
-    this._fields = layout.members.map((member) => new UniformBlockField(member, floats, integers));
+    this._group = layout.name === "Scene" ? ShaderDataGroup.Scene : ShaderDataGroup.Camera;
+    this._fields = layout.members.map((member) => new UniformBlockField(member, floats, integers, this._group));
     const alignment = rhi.uniformBufferOffsetAlignment;
     this._stride = Math.ceil(size / alignment) * alignment;
     const slots = Math.max(2, Math.floor(16384 / this._stride));
@@ -60,12 +63,24 @@ export class GlobalUniformBlock {
     this._buffer.isGCIgnored = true;
   }
 
-  bind(data: ShaderData): void {
+  bind(
+    scene: ShaderData,
+    camera: ShaderData,
+    renderer?: ShaderData,
+    material?: ShaderData,
+    element?: ShaderData
+  ): void {
     const fields = this._fields;
-    const values = data._propertyValueMap;
+    const values = (this._group === ShaderDataGroup.Scene ? scene : camera)._propertyValueMap;
     for (let i = 0; i < fields.length; ++i) {
       const field = fields[i];
-      field.write(values[field.propertyId]);
+      const property = field.property;
+      const id = property._uniqueId;
+      const value =
+        property._groups & field.overrideGroups
+          ? ShaderData._findValue(id, scene, camera, renderer, material, element)
+          : values[id];
+      field.write(value);
     }
 
     const staging = this._staging;
@@ -111,7 +126,8 @@ export class GlobalUniformBlock {
 /** Caches word offsets and ShaderData property IDs at link time. */
 class UniformBlockField {
   private static readonly _components = [0, 0, 0, 0];
-  readonly propertyId: number;
+  readonly property: ShaderProperty;
+  readonly overrideGroups: number;
   private readonly _view: Float32Array | Int32Array;
   private readonly _offset: number;
   private readonly _arrayCount: number;
@@ -121,14 +137,15 @@ class UniformBlockField {
   private readonly _matrixStride: number;
   private readonly _contiguousLength: number;
 
-  constructor(member: IShaderUniformBlockMember, floats: Float32Array, integers: Int32Array) {
+  constructor(member: IShaderUniformBlockMember, floats: Float32Array, integers: Int32Array, group: ShaderDataGroup) {
     const { type } = member;
     const matrix = /^mat([234])(?:x([234]))?$/.exec(type);
     const vector = /^[iub]?vec([234])$/.exec(type);
     if (!matrix && !vector && !/^(float|int|uint|bool)$/.test(type)) {
       throw new Error(`Unsupported uniform block member type ${type}.`);
     }
-    this.propertyId = ShaderProperty.getByName(member.name)._uniqueId;
+    this.property = ShaderProperty.getByName(member.name);
+    this.overrideGroups = this.property._builtinGlobalGroup === group ? ~group : 0;
     this._view = /^[iub]/.test(type) ? integers : floats;
     this._offset = member.offset / 4;
     this._arrayCount = member.arrayLength || 1;
@@ -143,7 +160,7 @@ class UniformBlockField {
         : 0;
   }
 
-  write(value: ShaderPropertyValueType): void {
+  write(value: ShaderPropertyValueType | undefined): void {
     if (typeof value === "number") {
       this._writeVector(value, 0, 0, 0);
     } else if (value && "x" in value) {

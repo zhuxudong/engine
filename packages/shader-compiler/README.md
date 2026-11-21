@@ -57,7 +57,11 @@ uniform Camera {
 };
 ```
 
-Set these properties on the corresponding owner's `shaderData`. For example, `scene.shaderData.setFloatArray("skyCoefficients", coefficients)` accepts 27 tightly packed floats. The compiler records a 16-byte stride for each `vec3`, and the runtime inserts the padding on upload. Matrices use column-major order. Block members support numeric and boolean scalars, vectors, matrices and fixed-length arrays. Keep each block's member order and array lengths fixed across macro variants. Multiple shaders can share a layout by including the same block declaration.
+Set these properties on the corresponding owner's `shaderData`. For example, `scene.shaderData.setFloatArray("skyCoefficients", coefficients)` accepts 27 tightly packed floats. The compiler records a 16-byte stride for each `vec3`, and the runtime inserts the padding on upload. Matrices use column-major order. Block members support numeric and boolean scalars, vectors, matrices and fixed-length arrays.
+
+Each pass supports one layout per group across both stages, includes and macro variants. For example, `ShaderLibrary/Common/Transform.glsl` already declares the pass's `Camera` layout. Additional camera properties can use the existing loose declaration syntax. Multiple shaders can share a layout by including the same block declaration.
+
+Engine uniforms migrated from public shader includes keep their existing override order. For example, setting `camera_Position` on a material still overrides the camera's value for that draw. A custom member of an explicit `Camera` block reads from `camera.shaderData`.
 
 ## Precompile
 

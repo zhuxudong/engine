@@ -8,6 +8,7 @@ import { PipelineStage } from "../RenderPipeline/index";
 import { CameraClearFlags } from "../enums/CameraClearFlags";
 import { DirectLight } from "../lighting";
 import { ShaderProperty } from "../shader";
+import { ShaderDataGroup } from "../shader/enums/ShaderDataGroup";
 import { TextureFilterMode } from "../texture";
 import { RenderTarget } from "../texture/RenderTarget";
 import { Texture2D } from "../texture/Texture2D";
@@ -22,8 +23,11 @@ import { ShadowCascadesMode } from "./enum/ShadowCascadesMode";
  * Cascade shadow caster pass.
  */
 export class CascadedShadowCasterPass extends PipelinePass {
-  private static _lightShadowBiasProperty = ShaderProperty.getByName("scene_ShadowBias");
-  private static _lightDirectionProperty = ShaderProperty.getByName("scene_LightDirection");
+  private static _lightShadowBiasProperty = ShaderProperty._getBuiltinGlobal("scene_ShadowBias", ShaderDataGroup.Scene);
+  private static _lightDirectionProperty = ShaderProperty._getBuiltinGlobal(
+    "scene_LightDirection",
+    ShaderDataGroup.Scene
+  );
 
   private static _shadowMatricesProperty = ShaderProperty.getByName("scene_ShadowMatrices");
   private static _shadowMapSize = ShaderProperty.getByName("scene_ShadowMapSize");

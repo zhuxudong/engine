@@ -72,10 +72,18 @@ export interface WebGLGraphicDeviceOptions {
   xrCompatible?: boolean;
 }
 
+interface UniformBufferRanges {
+  buffers: (WebGLBuffer | null)[];
+  offsets: number[];
+  sizes: number[];
+}
+
 /**
  * WebGL graphic device, using WebGL2.0.
  */
 export class WebGLGraphicDevice implements IHardwareRenderer {
+  private static readonly _rangesByContext = new WeakMap<WebGL2RenderingContext, UniformBufferRanges>();
+
   readonly supportsRendering = true;
   maxUniformBlockSize: number;
   uniformBufferOffsetAlignment: number;
@@ -105,9 +113,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   private _activeTextureID: number;
   private _activeTextures: (GLTexture | null)[] = new Array(32);
-  private _uniformRangeBuffers: (WebGLBuffer | null)[] = [];
-  private _uniformRangeOffsets: number[] = [];
-  private _uniformRangeSizes: number[] = [];
+  private _uniformRanges: UniformBufferRanges;
 
   private _lastViewport: Vector4 = new Vector4(null!, null!, null!, null!);
   private _lastScissor: Vector4 = new Vector4(null!, null!, null!, null!);
@@ -249,23 +255,34 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void {
     const gl = this._gl;
     gl.bindBufferBase(gl.UNIFORM_BUFFER, bindingPoint, (<GLBuffer>buffer)._glBuffer);
-    this._uniformRangeBuffers[bindingPoint] = null;
+    const slot = bindingPoint >>> 0;
+    if (slot < this._uniformRanges.buffers.length) this._uniformRanges.buffers[slot] = null;
   }
 
   bindUniformBufferRange(bindingPoint: number, buffer: IPlatformBuffer, byteOffset: number, byteSize: number): void {
     const handle = (<GLBuffer>buffer)._glBuffer;
-    if (
-      this._uniformRangeBuffers[bindingPoint] === handle &&
-      this._uniformRangeOffsets[bindingPoint] === byteOffset &&
-      this._uniformRangeSizes[bindingPoint] === byteSize
-    ) {
+    const { buffers, offsets, sizes } = this._uniformRanges;
+    const slot = bindingPoint >>> 0;
+    if (handle && buffers[slot] === handle && offsets[slot] === byteOffset && sizes[slot] === byteSize) {
       return;
     }
     const gl = this._gl;
     gl.bindBufferRange(gl.UNIFORM_BUFFER, bindingPoint, handle, byteOffset, byteSize);
-    this._uniformRangeBuffers[bindingPoint] = handle;
-    this._uniformRangeOffsets[bindingPoint] = byteOffset;
-    this._uniformRangeSizes[bindingPoint] = byteSize;
+    if (slot < buffers.length) {
+      // Leave misaligned or empty ranges to native validation, including repeated calls.
+      if (
+        byteOffset < 0 ||
+        byteOffset % this.uniformBufferOffsetAlignment !== 0 ||
+        !Number.isSafeInteger(byteSize) ||
+        byteSize <= 0
+      ) {
+        buffers[slot] = null;
+        return;
+      }
+      buffers[slot] = handle;
+      offsets[slot] = byteOffset;
+      sizes[slot] = byteSize;
+    }
   }
 
   tryBindUniformBlock(program: WebGLProgram, blockName: string, bindingPoint: number): boolean {
@@ -302,7 +319,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
    * Call this after using a custom program (e.g., Transform Feedback) outside the engine's pipeline.
    */
   invalidateShaderProgramState(): void {
-    this._uniformRangeBuffers.fill(null);
+    this._uniformRanges.buffers.fill(null);
     if (this._currentBindShaderProgram) {
       this._gl.useProgram(null);
       this._currentBindShaderProgram = null;
@@ -627,12 +644,19 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     this.maxUniformBlockSize = gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE);
     this.uniformBufferOffsetAlignment = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT);
     const bindings = gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS);
-    this._uniformRangeBuffers.length = this._uniformRangeOffsets.length = this._uniformRangeSizes.length = bindings;
-    this._uniformRangeBuffers.fill(null);
+    // Indexed bindings belong to the native context. A second device can wrap the same canvas.
+    let ranges = WebGLGraphicDevice._rangesByContext.get(gl);
+    if (!ranges) {
+      ranges = { buffers: [], offsets: [], sizes: [] };
+      WebGLGraphicDevice._rangesByContext.set(gl, ranges);
+    }
+    ranges.buffers.length = ranges.offsets.length = ranges.sizes.length = bindings;
+    ranges.buffers.fill(null);
+    this._uniformRanges = ranges;
   }
 
   destroy(): void {
-    this._uniformRangeBuffers.length = 0;
+    this._uniformRanges.buffers.fill(null);
     const webCanvas = this._webCanvas;
     webCanvas.removeEventListener("webglcontextlost", this._onWebGLContextLost, false);
     webCanvas.removeEventListener("webglcontextrestored", this._onWebGLContextRestored, false);
@@ -643,7 +667,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   private _onWebGLContextLost(event: WebGLContextEvent) {
-    this._uniformRangeBuffers.fill(null);
+    this._uniformRanges.buffers.fill(null);
     event.preventDefault();
     this._onDeviceLost();
   }

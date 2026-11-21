@@ -12,19 +12,13 @@ import {
 import { expect, it, vi } from "vitest";
 
 /** Read the uniform range the current draw actually sees, using the driver's member offset. */
-function readMember(gl: WebGL2RenderingContext, group: string, member: string, length: number): Float32Array {
+function readMember(gl: WebGL2RenderingContext, member: string, length: number): Float32Array {
   const program = gl.getParameter(gl.CURRENT_PROGRAM);
-  const index = gl.getUniformBlockIndex(program, group);
-  expect(index).not.toBe(gl.INVALID_INDEX);
+  const [field] = gl.getUniformIndices(program, [member])!;
+  expect(field).not.toBe(gl.INVALID_INDEX);
+  const [index] = gl.getActiveUniforms(program, [field], gl.UNIFORM_BLOCK_INDEX);
   const binding = gl.getActiveUniformBlockParameter(program, index, gl.UNIFORM_BLOCK_BINDING);
-  const members: Uint32Array = gl.getActiveUniformBlockParameter(
-    program,
-    index,
-    gl.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES
-  );
-  const field = members.find((i) => gl.getActiveUniform(program, i)!.name.split(".").pop() === member);
-  expect(field).toBeDefined();
-  const [offset] = gl.getActiveUniforms(program, [field!], gl.UNIFORM_OFFSET);
+  const [offset] = gl.getActiveUniforms(program, [field], gl.UNIFORM_OFFSET);
   const start = gl.getIndexedParameter(gl.UNIFORM_BUFFER_START, binding);
   const buffer = gl.getIndexedParameter(gl.UNIFORM_BUFFER_BINDING, binding);
   const previous = gl.getParameter(gl.COPY_READ_BUFFER_BINDING);
@@ -61,8 +55,8 @@ it("binds each shadow cascade's scene bias and camera matrix for both cameras in
     vi.spyOn(device, "drawPrimitive").mockImplementation((...args) => {
       const { camera, virtualCamera } = engine._renderContext;
       if (virtualCamera !== camera._virtualCamera) {
-        const matrix = readMember(gl, "Camera", "camera_VPMat", 16);
-        const bias = readMember(gl, "Scene", "scene_ShadowBias", 2);
+        const matrix = readMember(gl, "camera_VPMat", 16);
+        const bias = readMember(gl, "scene_ShadowBias", 2);
         const expectedBias = scene.shaderData.getVector2("scene_ShadowBias");
         expect(matrix).toEqual(camera.shaderData.getMatrix("camera_VPMat").elements);
         expect(bias).toEqual(new Float32Array([expectedBias.x, expectedBias.y]));

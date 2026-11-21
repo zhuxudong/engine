@@ -2,16 +2,20 @@ import {
   BufferBindFlag,
   Camera,
   Material,
+  Matrix,
   MeshRenderer,
   PrimitiveMesh,
   RenderTarget,
   Shader,
   ShaderLanguage,
+  ShaderMacro,
   ShaderMacroCollection,
   Texture2D,
   TextureFormat,
+  Vector3,
   Vector4,
-  WebGLEngine
+  WebGLEngine,
+  WebGLGraphicDevice
 } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { ShaderPrecompiler } from "@galacean/engine-shader-compiler/precompile";
@@ -90,7 +94,7 @@ describe("explicit global uniform blocks on WebGL2", () => {
     expect(program.isValid).toBe(true);
     program.bind();
     const native: WebGLProgram = gl.getParameter(gl.CURRENT_PROGRAM);
-    const index = gl.getUniformBlockIndex(native, block.name);
+    const index = gl.getUniformBlockIndex(native, block.bindingName ?? block.name);
     expect(index).not.toBe(gl.INVALID_INDEX);
     expect(gl.getActiveUniformBlockParameter(native, index, gl.UNIFORM_BLOCK_DATA_SIZE)).toBe(block.byteLength);
     expect(block.byteLength).toBe(sceneBytes);
@@ -104,7 +108,8 @@ describe("explicit global uniform blocks on WebGL2", () => {
     for (let i = 0; i < indices.length; i++) {
       const name = gl
         .getActiveUniform(native, indices[i])!
-        .name.replace(/^Scene\./, "")
+        .name.split(".")
+        .pop()!
         .replace(/\[0\]$/, "");
       expect(block.members.find((member) => member.name === name)).toMatchObject({
         offset: offsets[i],
@@ -169,6 +174,38 @@ describe("explicit global uniform blocks on WebGL2", () => {
     expect(engine._hardwareRenderer.gl.getError()).toBe(engine._hardwareRenderer.gl.NO_ERROR);
   });
 
+  it("preserves material and renderer overrides for migrated built-ins while custom block values use their owner", () => {
+    const probe = Shader.create(`Shader "Tests/GlobalOverrides" { SubShader "s" { Pass "p" {
+      #include "ShaderLibrary/Common/Transform.glsl"
+      uniform Scene { float scene_StrictTint; };
+      struct Attributes { vec4 POSITION; };
+      void vert(Attributes a) { gl_Position = renderer_MVPMat * a.POSITION; }
+      void frag() { gl_FragColor = vec4(camera_Position.xy, scene_StrictTint, 1.0); }
+      VertexShader = vert;
+      FragmentShader = frag;
+    } } }`);
+    try {
+      const material = new Material(engine, probe);
+      renderer.setMaterial(material);
+      const scene = engine.sceneManager.activeScene;
+      const { camera, texture } = makeCamera(0);
+      scene.shaderData.setFloat("scene_StrictTint", 1);
+      material.shaderData.setFloat("scene_StrictTint", 0);
+      camera.render();
+      expect(readPixel(texture)).toEqual([0, 0, 255, 255]);
+
+      material.shaderData.setVector3("camera_Position", new Vector3(1, 0, 0));
+      camera.render();
+      expect(readPixel(texture)).toEqual([255, 0, 255, 255]);
+      renderer.shaderData.setVector3("camera_Position", new Vector3(0, 1, 0));
+      renderer.shaderData.setFloat("scene_StrictTint", 0);
+      camera.render();
+      expect(readPixel(texture)).toEqual([0, 255, 255, 255]);
+    } finally {
+      probe.destroy(true);
+    }
+  });
+
   it("links a fragment-only Camera block into the derived instanced vertex transform", () => {
     const second = engine.sceneManager.activeScene.createRootEntity("SecondInstance").addComponent(MeshRenderer);
     second.mesh = renderer.mesh;
@@ -185,6 +222,73 @@ describe("explicit global uniform blocks on WebGL2", () => {
     expect(readPixel(texture, 2)).toEqual([0, 0, 255, 255]);
     expect(readPixel(texture, 6)).toEqual([0, 0, 255, 255]);
     expect(gl.getError()).toBe(gl.NO_ERROR);
+  });
+
+  it.each(["Scene", "Camera"])("links a helper before its instanced matrix dependency in %s", (owner) => {
+    const probe = Shader.create(`Shader "Tests/ForwardInstance${owner}" { SubShader "s" { Pass "p" {
+      mat4 renderer_MVPMat;
+      vec4 project(vec4 p) { return renderer_MVPMat * p; }
+      uniform ${owner} { mat4 camera_VPMat; float probeGain; };
+      void vert() { gl_Position = project(vec4(probeGain)); }
+      void frag() { gl_FragColor = vec4(probeGain); }
+      VertexShader = vert;
+      FragmentShader = frag;
+    } } }`);
+    try {
+      const macros = new ShaderMacroCollection();
+      const pass = probe.subShaders[0].passes[0];
+      expect(pass._getShaderProgram(engine, macros).isValid).toBe(true);
+      macros.enable(ShaderMacro.getByName("RENDERER_GPU_INSTANCE"));
+      const instanced = pass._getShaderProgram(engine, macros);
+      expect(instanced.isValid).toBe(true);
+      instanced.bind();
+      const gl = engine._hardwareRenderer.gl;
+      const native: WebGLProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+      const layout = pass["_uniformBlocks"]!.find((block) => block.name === owner)!;
+      expect(gl.getUniformBlockIndex(native, layout.bindingName ?? layout.name)).not.toBe(gl.INVALID_INDEX);
+      expect(gl.getUniformLocation(native, "camera_VPMat")).toBeNull();
+    } finally {
+      probe.destroy(true);
+    }
+  });
+
+  it("keeps explicit renderer-named Scene members while transforming each instance separately", () => {
+    const probe = Shader.create(`Shader "Tests/ExplicitInstanceNames" { SubShader "s" { Pass "p" {
+      uniform Scene { mat4 renderer_ModelMat; mat4 renderer_NormalMat; };
+      mat4 renderer_MVPMat;
+      struct Attributes { vec4 POSITION; };
+      void vert(Attributes a) { gl_Position = renderer_MVPMat * a.POSITION; }
+      void frag() { gl_FragColor = vec4(renderer_ModelMat[3].x, 0.0, renderer_NormalMat[3].y, 1.0); }
+      VertexShader = vert;
+      FragmentShader = frag;
+    } } }`);
+    const material = new Material(engine, probe);
+    try {
+      const scene = engine.sceneManager.activeScene;
+      const value = new Matrix();
+      value.elements[12] = value.elements[13] = 1;
+      scene.shaderData.setMatrix("renderer_ModelMat", value);
+      scene.shaderData.setMatrix("renderer_NormalMat", value);
+      renderer.setMaterial(material);
+      renderer.entity.transform.setPosition(-0.55, 0, 0);
+      renderer.entity.transform.setScale(0.6, 1, 1);
+      const { camera, texture } = makeCamera(0);
+      camera.render();
+      expect(readPixel(texture, 2)).toEqual([255, 0, 255, 255]);
+      const second = scene.createRootEntity("Second").addComponent(MeshRenderer);
+      second.mesh = renderer.mesh;
+      second.setMaterial(material);
+      second.entity.transform.setPosition(0.55, 0, 0);
+      second.entity.transform.setScale(0.6, 1, 1);
+      const draws = vi.spyOn(engine._hardwareRenderer.gl, "drawElementsInstanced");
+      camera.render();
+      expect(draws.mock.calls.some((args) => args[4] === 2)).toBe(true);
+      expect(readPixel(texture, 2)).toEqual([255, 0, 255, 255]);
+      expect(readPixel(texture, 6)).toEqual([255, 0, 255, 255]);
+    } finally {
+      material.destroy(true);
+      probe.destroy(true);
+    }
   });
 
   it("reuses an indexed range until the binding or device state changes", () => {
@@ -206,6 +310,69 @@ describe("explicit global uniform blocks on WebGL2", () => {
       device.bindUniformBufferRange(1, buffer, alignment, 16);
       expect(calls).toHaveBeenCalledTimes(4);
       expect(gl.getError()).toBe(gl.NO_ERROR);
+    } finally {
+      buffer.destroy();
+    }
+  });
+
+  it("tracks indexed bindings across devices that share a WebGL context", () => {
+    const device = engine._hardwareRenderer;
+    const gl = device.gl;
+    const buffer = device.createPlatformBuffer(BufferBindFlag.ConstantBuffer, 16);
+    const otherBuffer = device.createPlatformBuffer(BufferBindFlag.ConstantBuffer, 16);
+    const ignoreContextEvent = () => {};
+    let peer = new WebGLGraphicDevice();
+    peer.init(engine.canvas, ignoreContextEvent, ignoreContextEvent);
+    try {
+      const bound = () => gl.getIndexedParameter(gl.UNIFORM_BUFFER_BINDING, 1);
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      const first = bound();
+      peer.bindUniformBufferRange(1, otherBuffer, 0, 16);
+      const second = bound();
+      expect(first).not.toBe(second);
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      expect(bound()).toBe(first);
+      peer.bindUniformBufferBase(1, otherBuffer);
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      expect(bound()).toBe(first);
+
+      gl.bindBufferBase(gl.UNIFORM_BUFFER, 1, second);
+      peer.resetState();
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      expect(bound()).toBe(first);
+
+      peer.destroy();
+      peer = new WebGLGraphicDevice();
+      peer.init(engine.canvas, ignoreContextEvent, ignoreContextEvent);
+      peer.bindUniformBufferRange(1, otherBuffer, 0, 16);
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      expect(bound()).toBe(first);
+      peer.bindUniformBufferRange(1, otherBuffer, 0, 16);
+      expect(bound()).toBe(second);
+      expect(gl.getError()).toBe(gl.NO_ERROR);
+    } finally {
+      peer.destroy();
+      otherBuffer.destroy();
+      buffer.destroy();
+    }
+  });
+
+  it("reports invalid ranges on every call and preserves the previously bound range", () => {
+    const device = engine._hardwareRenderer;
+    const gl = device.gl;
+    const buffer = device.createPlatformBuffer(BufferBindFlag.ConstantBuffer, 32);
+    try {
+      device.bindUniformBufferRange(1, buffer, 0, 16);
+      const invalidRanges = [[0, 0]];
+      if (device.uniformBufferOffsetAlignment > 1) invalidRanges.push([1, 16]);
+      for (const [offset, size] of invalidRanges) {
+        for (let retry = 0; retry < 2; retry++) {
+          device.bindUniformBufferRange(1, buffer, offset, size);
+          expect(gl.getError()).toBe(gl.INVALID_VALUE);
+          expect(gl.getIndexedParameter(gl.UNIFORM_BUFFER_START, 1)).toBe(0);
+          expect(gl.getIndexedParameter(gl.UNIFORM_BUFFER_SIZE, 1)).toBe(16);
+        }
+      }
     } finally {
       buffer.destroy();
     }

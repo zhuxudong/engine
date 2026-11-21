@@ -237,7 +237,9 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
         vertex,
         fragment,
         vertexOutputNames: this._vertexOutputNames,
-        uniformBlocks: this._uniformBlocks && Array.from(this._uniformBlocks)
+        uniformBlocks:
+          this._uniformBlocks &&
+          Array.from(this._uniformBlocks, (layout) => ({ ...layout, bindingName: this._uniformBlockName(layout) }))
       };
     } finally {
       this._sourceIR = undefined;
@@ -706,6 +708,10 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
     }
   }
 
+  private _uniformBlockName(layout: IShaderUniformBlock): string {
+    return this.context.names.allocate(layout, `gs_${layout.name}`);
+  }
+
   private _emitUniformBlock(block: ASTNode.UniformBlock, out: ICodeSegment[]): void {
     if (this._forwardBlockIndices.has(block)) return;
     const text = this._uniformBlockCode(block);
@@ -751,7 +757,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       const precision = type === "bool" || type.startsWith("bvec") ? "" : "highp ";
       return `  ${precision}${type} ${name}${arrayLength ? `[${arrayLength}]` : ""};`;
     });
-    let text = `layout(std140) uniform ${layout.name} {\n${fields.join("\n")}\n};`;
+    let text = `layout(std140) uniform ${this._uniformBlockName(layout)} {\n${fields.join("\n")}\n};`;
     if (this._declarationOwners.size) {
       const owners = referenced.map((member) => this._declarationOwners.get(member)!);
       text =

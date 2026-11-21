@@ -119,11 +119,10 @@ export class Sky {
     const program = pass._getShaderProgram(engine, compileMacros);
     program.bind();
     program.regroupUniformBlocks();
-    program.bindGlobalBlocks(sceneData, cameraShaderData);
     program.uploadAll(program.sceneUniformBlock, sceneData);
     program.uploadAll(program.cameraUniformBlock, cameraShaderData);
     program.uploadAll(program.materialUniformBlock, materialShaderData);
-    program.uploadMultiGroupUniforms(sceneData, cameraShaderData, undefined, materialShaderData, undefined);
+    program.uploadSharedUniforms(sceneData, cameraShaderData, undefined, materialShaderData);
     program.uploadUnGroupTextures();
 
     pass._renderState._applyStates(engine, false, pass._renderStateDataMap, materialShaderData);

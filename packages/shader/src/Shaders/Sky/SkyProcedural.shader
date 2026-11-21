@@ -87,7 +87,10 @@ Shader "Sky/SkyProcedural" {
       };
 
       #include "ShaderLibrary/Common/Camera.glsl"
-      #include "ShaderLibrary/Common/Scene.glsl"
+      uniform Scene {
+        vec4 scene_SunlightColor;
+        vec3 scene_SunlightDirection;
+      };
       vec3 material_SkyTint;
       vec3 material_GroundTint;
       float material_Exposure;

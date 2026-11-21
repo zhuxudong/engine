@@ -1,4 +1,4 @@
-import { ShaderLanguage } from "@galacean/engine-core";
+import { Shader, ShaderFactory, ShaderLanguage, ShaderMacroCollection, WebGLEngine } from "@galacean/engine";
 import { ShaderMacroProcessor } from "@galacean/engine-core/src/shader/ShaderMacroProcessor";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { ShaderPrecompiler } from "@galacean/engine-shader-compiler/precompile";
@@ -49,7 +49,7 @@ describe("explicit uniform blocks", () => {
     ]);
     for (const instructions of [offline.vertexShaderInstructions, offline.fragmentShaderInstructions]) {
       const glsl = ShaderMacroProcessor.evaluate(instructions, new Map());
-      expect(glsl).toContain("layout(std140) uniform Camera {");
+      expect(glsl).toContain(`layout(std140) uniform ${block.bindingName} {`);
       expect(glsl).toContain("highp mat4 views[2];");
       expect(glsl).not.toMatch(/uniform\s+(?:highp\s+)?(?:float|vec3)\s+(?:eye|exposure)/);
     }
@@ -61,6 +61,76 @@ describe("explicit uniform blocks", () => {
       const pass = precompiler.precompile(shader(block, "vec4(0.)", "vec4(1.)")).subShaders[0].passes[0];
       expect(JSON.parse(JSON.stringify(pass))).not.toHaveProperty("uniformBlocks");
     }
+  });
+
+  it("links existing loose uniforms alongside the public Transform and Fog includes", async () => {
+    const source = shader(
+      `#define SCENE_FOG_MODE 1
+       #include "ShaderLibrary/Common/Transform.glsl"
+       #include "ShaderLibrary/Common/Fog.glsl"
+       vec3 camera_Up;
+       vec4 scene_SunlightColor;
+       float gs_Camera;
+       float Scene;
+       struct Camera { vec3 eye; };
+       vec3 readEye() {
+         Camera local;
+         local.eye = camera_Up * gs_Camera;
+         return local.eye;
+       }`,
+      "camera_VPMat * vec4(readEye(), 1.0)",
+      "fog(scene_SunlightColor * Scene, camera_Up)"
+    );
+    const precompiler = new ShaderPrecompiler();
+    precompiler.setIncludeMap(ShaderFactory.includeMap);
+    const compiled = precompiler.precompile(source);
+    const engine = await WebGLEngine.create({ canvas: document.createElement("canvas") });
+    const asset = Shader._createFromPrecompiled(compiled);
+    try {
+      const program = asset.subShaders[0].passes[0]._getShaderProgram(engine, new ShaderMacroCollection());
+      program.bind();
+      const gl = engine._hardwareRenderer.gl;
+      const native: WebGLProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+      expect(gl.getProgramParameter(native, gl.LINK_STATUS)).toBe(true);
+      for (const name of ["camera_Up", "scene_SunlightColor", "gs_Camera", "Scene"]) {
+        expect(gl.getUniformLocation(native, name), name).not.toBeNull();
+      }
+      const blocks = compiled.subShaders[0].passes[0].uniformBlocks!;
+      expect(blocks.map((block) => block.name).sort()).toEqual(["Camera", "Scene"]);
+      for (const block of blocks) {
+        const bindingName = block.bindingName ?? block.name;
+        expect(bindingName).not.toBe(block.name);
+        expect(bindingName).not.toBe("gs_Camera");
+        const index = gl.getUniformBlockIndex(native, bindingName);
+        expect(index).not.toBe(gl.INVALID_INDEX);
+        expect(gl.getActiveUniformBlockParameter(native, index, gl.UNIFORM_BLOCK_BINDING)).toBe(
+          block.name === "Scene" ? 1 : 2
+        );
+      }
+    } finally {
+      asset.destroy(true);
+      engine.destroy();
+    }
+  });
+
+  it.each(["source", "runtime"])("preserves a %s Camera macro around the Transform include", (origin) => {
+    const prefix = origin === "source" ? "#define Camera 3\n" : "";
+    const source = shader(
+      prefix + '#include "ShaderLibrary/Common/Transform.glsl"',
+      "camera_VPMat * vec4(1.0)",
+      "vec4(1.0)"
+    );
+    const precompiler = new ShaderPrecompiler();
+    precompiler.setIncludeMap(ShaderFactory.includeMap);
+    const pass = precompiler.precompile(source).subShaders[0].passes[0];
+    const [camera] = pass.uniformBlocks!;
+    expect(camera.name).toBe("Camera");
+    expect(camera.bindingName).toBeTruthy();
+    expect(camera.bindingName).not.toBe("Camera");
+    const macros = origin === "runtime" ? new Map([["Camera", "3"]]) : new Map<string, string>();
+    const glsl = ShaderMacroProcessor.evaluate(pass.vertexShaderInstructions!, macros);
+    expect(glsl).toContain(`layout(std140) uniform ${camera.bindingName} {`);
+    expect(glsl).toContain("highp mat4 camera_VPMat;");
   });
 
   it("preserves block offsets when a pass overrides one inherited member with a loose uniform", () => {
@@ -84,8 +154,9 @@ describe("explicit uniform blocks", () => {
     );
     const pass = new ShaderPrecompiler().precompile(source).subShaders[0].passes[0];
     const glsl = ShaderMacroProcessor.evaluate(pass.vertexShaderInstructions!, new Map());
-    expect(glsl.match(/layout\(std140\) uniform Camera/g)).toHaveLength(1);
-    expect(glsl.indexOf("layout(std140) uniform Camera")).toBeLessThan(glsl.indexOf("vec3 readEye"));
+    const declaration = `layout(std140) uniform ${pass.uniformBlocks![0].bindingName} {`;
+    expect(glsl.split(declaration)).toHaveLength(2);
+    expect(glsl.indexOf(declaration)).toBeLessThan(glsl.indexOf("vec3 readEye"));
     expect(glsl).not.toContain("uniform vec3 eye");
   });
 

@@ -3,6 +3,8 @@ import type { ShaderInstruction } from "./ICondition";
 /** Byte layout of a fixed, column-major std140 uniform block. */
 export interface IShaderUniformBlock {
   name: "Scene" | "Camera";
+  /** Backend block identifier. A distinct name protects user types, uniforms and macros. */
+  bindingName?: string;
   byteLength: number;
   members: IShaderUniformBlockMember[];
 }

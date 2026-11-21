@@ -32,16 +32,15 @@ const productionAndRules: [GrammarSymbol[], TranslationRule | undefined][] = [
 
   ...GrammarUtils.createProductionWithOptions(
     NoneTerminal.uniform_block,
-    [
-      [
-        Keyword.UNIFORM,
-        ETokenType.ID,
-        ETokenType.LEFT_BRACE,
-        NoneTerminal.uniform_block_members,
-        ETokenType.RIGHT_BRACE,
-        ETokenType.SEMICOLON
-      ]
-    ],
+    // The group is a ShaderLab label, even when a user macro has the same spelling.
+    [ETokenType.ID, Keyword.MACRO_CALL].map((label) => [
+      Keyword.UNIFORM,
+      label,
+      ETokenType.LEFT_BRACE,
+      NoneTerminal.uniform_block_members,
+      ETokenType.RIGHT_BRACE,
+      ETokenType.SEMICOLON
+    ]),
     ASTNode.UniformBlock
   ),
   ...GrammarUtils.createProductionWithOptions(NoneTerminal.uniform_block_members, [

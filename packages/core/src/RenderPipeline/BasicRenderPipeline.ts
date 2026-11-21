@@ -450,10 +450,9 @@ export class BasicRenderPipeline {
     ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
     const program = pass._getShaderProgram(engine, compileMacros);
     program.bind();
-    program.bindGlobalBlocks(camera.scene!.shaderData, camera.shaderData);
     program.uploadAll(program.materialUniformBlock, material.shaderData);
     program.uploadAll(program.cameraUniformBlock, camera.shaderData);
-    program.uploadMultiGroupUniforms(undefined, camera.shaderData, undefined, material.shaderData, undefined);
+    program.uploadSharedUniforms(camera.scene!.shaderData, camera.shaderData, undefined, material.shaderData);
     program.uploadUnGroupTextures();
 
     const renderState = pass._renderState;

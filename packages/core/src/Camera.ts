@@ -47,9 +47,9 @@ export class Camera extends Component {
   static _cameraAOTextureProperty = ShaderProperty.getByName("camera_AOTexture");
 
   private static _inverseViewMatrixProperty = ShaderProperty.getByName("camera_ViewInvMat");
-  private static _cameraPositionProperty = ShaderProperty.getByName("camera_Position");
-  private static _cameraForwardProperty = ShaderProperty.getByName("camera_Forward");
-  private static _cameraUpProperty = ShaderProperty.getByName("camera_Up");
+  private static _cameraPositionProperty = ShaderProperty._getBuiltinGlobal("camera_Position", ShaderDataGroup.Camera);
+  private static _cameraForwardProperty = ShaderProperty._getBuiltinGlobal("camera_Forward", ShaderDataGroup.Camera);
+  private static _cameraUpProperty = ShaderProperty._getBuiltinGlobal("camera_Up", ShaderDataGroup.Camera);
   private static _cameraDepthBufferParamsProperty = ShaderProperty.getByName("camera_DepthBufferParams");
 
   /** Whether to enable frustum culling, it is enabled by default. */

@@ -186,6 +186,7 @@ global_declaration:
 
 uniform_block:
     uniform id '{' uniform_block_members '}' ';'
+    | uniform MACRO_CALL '{' uniform_block_members '}' ';'
     ;
 
 uniform_block_members:

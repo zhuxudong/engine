@@ -5,21 +5,25 @@ import { VirtualCamera } from "../VirtualCamera";
 import { ReplacementFailureStrategy } from "../enums/ReplacementFailureStrategy";
 import { Shader, ShaderProperty } from "../shader";
 import { ShaderTagKey } from "../shader/ShaderTagKey";
+import { ShaderDataGroup } from "../shader/enums/ShaderDataGroup";
 import { RenderTarget, TextureCubeFace } from "../texture";
 
 /**
  * @internal
  */
 export class RenderContext {
-  static vpMatrixProperty = ShaderProperty.getByName("camera_VPMat");
+  static vpMatrixProperty = ShaderProperty._getBuiltinGlobal("camera_VPMat", ShaderDataGroup.Camera);
   static pipelineStageKey: ShaderTagKey = ShaderTagKey.getByName("pipelineStage");
 
   /** @internal */
   static _flipYMatrix = new Matrix(1, 0, 0, 0, 0, -1);
 
-  private static _cameraProjectionProperty = ShaderProperty.getByName("camera_ProjectionParams");
-  private static _viewMatrixProperty = ShaderProperty.getByName("camera_ViewMat");
-  private static _projectionMatrixProperty = ShaderProperty.getByName("camera_ProjMat");
+  private static _cameraProjectionProperty = ShaderProperty._getBuiltinGlobal(
+    "camera_ProjectionParams",
+    ShaderDataGroup.Camera
+  );
+  private static _viewMatrixProperty = ShaderProperty._getBuiltinGlobal("camera_ViewMat", ShaderDataGroup.Camera);
+  private static _projectionMatrixProperty = ShaderProperty._getBuiltinGlobal("camera_ProjMat", ShaderDataGroup.Camera);
   private static _flipYProjectionMatrix = new Matrix();
   private static _flipYViewProjectionMatrix = new Matrix();
 

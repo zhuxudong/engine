@@ -78,12 +78,11 @@ export class Blitter {
 
     program.bind();
     program.regroupUniformBlocks();
-    program.bindGlobalBlocks(camera.scene!.shaderData, camera.shaderData);
     program.uploadAll(program.sceneUniformBlock, camera.scene!.shaderData);
     program.uploadAll(program.cameraUniformBlock, camera.shaderData);
     program.uploadAll(program.rendererUniformBlock, rendererShaderData);
     program.uploadAll(program.materialUniformBlock, blitMaterial.shaderData);
-    program.uploadMultiGroupUniforms(
+    program.uploadSharedUniforms(
       camera.scene!.shaderData,
       camera.shaderData,
       rendererShaderData,

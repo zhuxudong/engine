@@ -37,22 +37,6 @@ export class ShaderProgram implements IPlatformShaderProgram {
       .join("\n");
   }
 
-  private static _findValue(
-    id: number,
-    sceneData: ShaderData | undefined,
-    cameraData: ShaderData | undefined,
-    rendererData: ShaderData | undefined,
-    materialData: ShaderData | undefined,
-    renderElementData: ShaderData | undefined
-  ): ShaderPropertyValueType | undefined {
-    let value: ShaderPropertyValueType | undefined;
-    if (renderElementData && (value = renderElementData._propertyValueMap[id]) != null) return value;
-    if (rendererData && (value = rendererData._propertyValueMap[id]) != null) return value;
-    if (materialData && (value = materialData._propertyValueMap[id]) != null) return value;
-    if (cameraData && (value = cameraData._propertyValueMap[id]) != null) return value;
-    return sceneData?._propertyValueMap[id];
-  }
-
   id: number;
 
   readonly sceneUniformBlock: ShaderUniformBlock = new ShaderUniformBlock();
@@ -124,12 +108,6 @@ export class ShaderProgram implements IPlatformShaderProgram {
     this.id = ShaderProgram._counter++;
   }
 
-  /** Bind explicit global data, including changes made in place since the previous draw. */
-  bindGlobalBlocks(scene: ShaderData, camera: ShaderData): void {
-    this._sceneBlock?.bind(scene);
-    this._cameraBlock?.bind(camera);
-  }
-
   /**
    * Upload all shader data in shader uniform block.
    * @param uniformBlock - shader Uniform block
@@ -174,19 +152,21 @@ export class ShaderProgram implements IPlatformShaderProgram {
   }
 
   /**
-   * Upload uniforms shared by multiple shader data groups.
+   * Bind global blocks and resolve uniforms shared by multiple shader data groups.
    */
-  uploadMultiGroupUniforms(
-    sceneData: ShaderData | undefined,
-    cameraData: ShaderData | undefined,
-    rendererData: ShaderData | undefined,
-    materialData: ShaderData | undefined,
-    renderElementData: ShaderData | undefined
+  uploadSharedUniforms(
+    sceneData: ShaderData,
+    cameraData: ShaderData,
+    rendererData?: ShaderData,
+    materialData?: ShaderData,
+    renderElementData?: ShaderData
   ): void {
+    this._sceneBlock?.bind(sceneData, cameraData, rendererData, materialData, renderElementData);
+    this._cameraBlock?.bind(sceneData, cameraData, rendererData, materialData, renderElementData);
     const { constUniforms, textureUniforms } = this.multiGroupUniformBlock;
     for (let i = 0, n = constUniforms.length; i < n; i++) {
       const uniform = constUniforms[i];
-      const value = ShaderProgram._findValue(
+      const value = ShaderData._findValue(
         uniform.propertyId,
         sceneData,
         cameraData,
@@ -198,7 +178,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
     }
     for (let i = 0, n = textureUniforms.length; i < n; i++) {
       const uniform = textureUniforms[i];
-      const value = ShaderProgram._findValue(
+      const value = ShaderData._findValue(
         uniform.propertyId,
         sceneData,
         cameraData,
@@ -606,7 +586,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
     const rhi = this._engine._hardwareRenderer;
     for (const layout of layouts) {
       const binding = ConstantBufferBindingPoint[layout.name];
-      if (!rhi.tryBindUniformBlock(this._glProgram!, layout.name, binding)) continue;
+      if (!rhi.tryBindUniformBlock(this._glProgram!, layout.bindingName ?? layout.name, binding)) continue;
       if (layout.name === "Scene" ? this._sceneBlock : this._cameraBlock) {
         throw new Error(`Duplicate global uniform block '${layout.name}'.`);
       }

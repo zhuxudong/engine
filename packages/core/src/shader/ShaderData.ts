@@ -15,6 +15,24 @@ import { ShaderPropertyType } from "./enums/ShaderPropertyType";
  * Shader data collection,Correspondence includes shader properties data and macros data.
  */
 export class ShaderData extends DataObject implements IReferable, IClone, ICloneHook<ShaderData> {
+  /** @internal Resolve a shared property from the most specific owner available on this draw. */
+  static _findValue(
+    id: number,
+    scene: ShaderData | undefined,
+    camera: ShaderData | undefined,
+    renderer?: ShaderData,
+    material?: ShaderData,
+    element?: ShaderData
+  ): ShaderPropertyValueType | undefined {
+    return (
+      element?._propertyValueMap[id] ??
+      renderer?._propertyValueMap[id] ??
+      material?._propertyValueMap[id] ??
+      camera?._propertyValueMap[id] ??
+      scene?._propertyValueMap[id]
+    );
+  }
+
   private static readonly _batchSharedTypeMask =
     ShaderPropertyType.Texture |
     ShaderPropertyType.TextureArray |

@@ -192,8 +192,7 @@ export class RenderQueue {
             program.uploadUnGroupTextures();
           }
         }
-        program.bindGlobalBlocks(sceneData, cameraData);
-        program.uploadMultiGroupUniforms(sceneData, cameraData, rendererData, materialData, renderElementShaderData);
+        program.uploadSharedUniforms(sceneData, cameraData, rendererData, materialData, renderElementShaderData);
 
         // Apply render state
         renderState._applyStates(

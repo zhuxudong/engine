@@ -7,7 +7,6 @@ uniform Camera {
     mat4 camera_VPMat;
     vec3 camera_Position;
     vec3 camera_Forward;
-    vec3 camera_Up;
 };
 
 #endif

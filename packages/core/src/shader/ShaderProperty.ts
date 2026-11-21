@@ -31,10 +31,19 @@ export class ShaderProperty {
     }
   }
 
+  /** @internal Built-in global uniforms retain their ShaderData override order when packed in their owner's block. */
+  static _getBuiltinGlobal(name: string, group: ShaderDataGroup.Camera | ShaderDataGroup.Scene): ShaderProperty {
+    const property = ShaderProperty.getByName(name);
+    property._builtinGlobalGroup = group;
+    return property;
+  }
+
   /** @internal */
   _uniqueId: number;
   /** @internal */
   _groups: ShaderDataGroup = ShaderDataGroup.None;
+  /** @internal */
+  _builtinGlobalGroup: ShaderDataGroup = ShaderDataGroup.None;
   /** @internal */
   _types: ShaderPropertyType = ShaderPropertyType.None;
 
