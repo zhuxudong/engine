@@ -456,73 +456,127 @@ function glPostTimer(gl, engine) {
 
 function nativeTimer(device) {
   if (!device?.features.has("timestamp-query")) return null;
-  // Place both markers in each application's queue.submit call. Issuing the first
-  // marker before engine.update would charge the GPU for CPU-side command recording.
-  const capacity = 64;
-  const queries = device.createQuerySet({ type: "timestamp", count: capacity * 2 });
-  const resolve = device.createBuffer({
-    size: capacity * 16,
-    usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
-  });
-  const readback = device.createBuffer({
-    size: capacity * 16,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-  });
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: {
-      module: device.createShaderModule({ code: "@compute @workgroup_size(1) fn marker() {}" }),
-      entryPoint: "marker"
+  const capacity = 4096;
+  const queries = device.createQuerySet({ type: "timestamp", count: capacity });
+  // Two independent resolve destinations must each be 256-byte aligned.
+  const resolve = device.createBuffer({ size: 264, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+  const readback = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const diagnostics = { calibratedLastPass: null, skipped: [] };
+  let terminal = null;
+
+  function observe(update, stamp) {
+    const encoders = new WeakMap(),
+      commands = new WeakMap(),
+      undo = [];
+    let first,
+      final,
+      passes = 0,
+      submissions = 0,
+      writes = 0;
+    function allocate() {
+      if (writes >= capacity) throw Error("Seed frame boundary timestamps exceeded the native query capacity.");
+      return writes++;
     }
-  });
-  function marker(slot, first) {
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass({
-      label: first ? "Seed timing start" : "Seed timing end",
-      timestampWrites: first
-        ? { querySet: queries, endOfPassWriteIndex: slot }
-        : { querySet: queries, beginningOfPassWriteIndex: slot }
-    });
-    pass.setPipeline(pipeline);
-    pass.dispatchWorkgroups(1);
-    pass.end();
-    return encoder.finish();
-  }
-  return {
-    source: "WebGPU native command-buffer elapsed, markers inside each queue submission",
-    async sample(update) {
-      const queue = device.queue,
-        submit = queue.submit;
-      let sets = 0;
-      const restore = replace(queue, "submit", function (buffers) {
-        const commands = Array.from(buffers);
-        if (!commands.length) return submit.call(this, commands);
-        if (sets === capacity) throw Error("Too many queue submissions in one timestamp sample.");
-        const slot = sets++ * 2;
-        return submit.call(this, [marker(slot, true), ...commands, marker(slot + 1, false)]);
-      });
-      try {
-        update();
-      } finally {
-        restore();
+    try {
+      const proto = GPUCommandEncoder.prototype;
+      for (const [method, kind] of [
+        ["beginRenderPass", "render"],
+        ["beginComputePass", "compute"]
+      ]) {
+        const begin = proto[method];
+        undo.push(
+          replace(proto, method, function (descriptor = {}) {
+            let state = encoders.get(this);
+            const label = kind + ": " + (descriptor.label || "(unlabeled)");
+            // Multiple encoders may be recorded before the first submit, in a different order
+            // from their eventual execution. Mark the first pass of each candidate encoder.
+            const start = stamp && !first && !state ? allocate() : -1;
+            const end = stamp && label === terminal ? allocate() : -1;
+            if (!state) {
+              state = { firstLabel: label, start, count: 0 };
+              encoders.set(this, state);
+            }
+            ++state.count;
+            state.lastLabel = label;
+            state.end = end;
+            if (start < 0 && end < 0) return begin.call(this, descriptor);
+            if (descriptor.timestampWrites) throw Error("Disable the engine timer when using the Seed frame timer.");
+            const timestampWrites = { querySet: queries };
+            if (start >= 0) timestampWrites.beginningOfPassWriteIndex = start;
+            if (end >= 0) timestampWrites.endOfPassWriteIndex = end;
+            return begin.call(this, { ...descriptor, timestampWrites });
+          })
+        );
       }
-      if (!sets) throw Error("The engine did not submit any command buffers in this frame.");
-      const end = device.createCommandEncoder();
-      const bytes = sets * 16;
-      end.resolveQuerySet(queries, 0, sets * 2, resolve, 0);
-      end.copyBufferToBuffer(resolve, 0, readback, 0, bytes);
-      queue.submit([end.finish()]);
-      await readback.mapAsync(GPUMapMode.READ, 0, bytes);
+      const finish = proto.finish;
+      undo.push(
+        replace(proto, "finish", function (...args) {
+          const buffer = finish.apply(this, args);
+          commands.set(buffer, encoders.get(this) ?? null);
+          return buffer;
+        })
+      );
+      const queuePrototype = GPUQueue.prototype,
+        submit = queuePrototype.submit;
+      undo.push(
+        replace(queuePrototype, "submit", function (buffers) {
+          if (this !== device.queue) return submit.call(this, buffers);
+          const ordered = Array.isArray(buffers) ? buffers : Array.from(buffers);
+          for (const buffer of ordered) {
+            if (!commands.has(buffer)) throw Error("A Seed command buffer was recorded outside the sampled frame.");
+            const state = commands.get(buffer);
+            if (!state) continue; // A copy-only command buffer has no pass boundary.
+            first ??= state;
+            final = state;
+            passes += state.count;
+          }
+          if (ordered.length) ++submissions;
+          return submit.call(this, ordered);
+        })
+      );
+      update();
+    } finally {
+      for (const restore of undo.reverse()) restore();
+    }
+    if (!passes) throw Error("The sampled Seed frame submitted no native render or compute passes.");
+    return { first, final, passes, submissions, writes };
+  }
+
+  return {
+    source: "WebGPU native pass-boundary timestamps: first submitted pass begin to final submitted pass end",
+    diagnostics,
+    calibrate(update) {
+      terminal = observe(update, false).final.lastLabel;
+      diagnostics.calibratedLastPass = terminal;
+    },
+    async sample(update, frameIndex) {
+      const previous = terminal;
+      const { first, final, passes, submissions, writes } = observe(update, previous !== null);
+      terminal = final.lastLabel;
+      if (previous !== terminal) {
+        diagnostics.skipped.push({ frame: frameIndex, expected: previous, actual: terminal });
+        return null;
+      }
+      if (first.start < 0 || final.end < 0 || first.start === final.end || first.start >= writes || final.end >= writes)
+        throw Error("Missing native first or final pass timestamp.");
+      const encoder = device.createCommandEncoder();
+      encoder.resolveQuerySet(queries, first.start, 1, resolve, 0);
+      encoder.resolveQuerySet(queries, final.end, 1, resolve, 256);
+      encoder.copyBufferToBuffer(resolve, 0, readback, 0, 8);
+      encoder.copyBufferToBuffer(resolve, 256, readback, 8, 8);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
       try {
-        const stamps = new BigUint64Array(readback.getMappedRange(0, bytes));
-        let elapsed = 0n;
-        for (let i = 0; i < stamps.length; i += 2) {
-          const start = stamps[i],
-            stop = stamps[i + 1];
-          if (!start || !stop || stop < start) throw Error("Invalid native command buffer timestamps.");
-          elapsed += stop - start;
-        }
-        return { milliseconds: Number(elapsed) / 1e6, submissions: sets };
+        const [start, end] = new BigUint64Array(readback.getMappedRange());
+        if (!start || !end || end < start) throw Error("Invalid native pass boundary timestamps.");
+        return {
+          milliseconds: Number(end - start) / 1e6,
+          firstPass: first.firstLabel,
+          lastPass: final.lastLabel,
+          passesSubmitted: passes,
+          submissions,
+          timestampWrites: writes
+        };
       } finally {
         readback.unmap();
       }
@@ -728,7 +782,8 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
       await frame();
       // Traverse the measured route to compile visible material/LOD variants before sampling.
       applyPath(transform, path, warmup > 1 ? i / (warmup - 1) : 0);
-      engine.update();
+      if (i === warmup - 1 && timer?.calibrate) timer.calibrate(() => engine.update());
+      else engine.update();
     }
     let previous,
       skipNextInterval = true;
@@ -761,7 +816,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
           }
         : update;
       if (timed) {
-        const sample = await timer.sample(draw);
+        const sample = await timer.sample(draw, i);
         if (sample) gpu.push({ frame: i, ...sample });
       } else {
         const start = performance.now();
@@ -818,6 +873,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
       cpuUpdateMs: distribution(cpu),
       frameIntervalMs: distribution(intervals),
       gpuSource: timer?.source ?? null,
+      ...(timer?.diagnostics && { gpuTimingDiagnostics: timer.diagnostics }),
       gpuMs: distribution(gpu.map((x) => x.milliseconds)),
       gpuSamples: gpu,
       ...(boundaries && { frameBoundariesEpochMs: [...boundaries, performance.timeOrigin + (await frame())] }),

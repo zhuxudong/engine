@@ -152,6 +152,7 @@ function summarize(pair) {
     frameInterval: cpu?.frameIntervalMs ?? null,
     gpu: gpu?.gpuMs ?? null,
     gpuSource: gpu?.gpuSource ?? null,
+    gpuTimingDiagnostics: gpu?.gpuTimingDiagnostics ?? null,
     cpuHash: cpu?.hash ?? null,
     gpuHash: gpu?.hash ?? null,
     inspections,
@@ -309,12 +310,13 @@ function change(summary, full) {
   if (!summary?.identity || !full?.identity) return null;
   const incompatible = differences(summary.identity, full.identity, { variantMustMatch: false });
   if (incompatible.length) return { incompatible };
-  const timerChanged = summary.backend === full.backend && summary.gpuSource !== full.gpuSource;
+  const timerChanged = summary.gpuSource !== full.gpuSource;
+  const comparableGpu = !!summary.gpuSource && !timerChanged && summary.backend === full.backend;
   return {
     cpuMedian: ratio(summary.cpu?.median, full.cpu?.median),
     cpuP90: ratio(summary.cpu?.p90, full.cpu?.p90),
-    gpuMedian: timerChanged ? null : ratio(summary.gpu?.median, full.gpu?.median),
-    gpuP90: timerChanged ? null : ratio(summary.gpu?.p90, full.gpu?.p90),
+    gpuMedian: comparableGpu ? ratio(summary.gpu?.median, full.gpu?.median) : null,
+    gpuP90: comparableGpu ? ratio(summary.gpu?.p90, full.gpu?.p90) : null,
     timerChanged
   };
 }
@@ -391,7 +393,7 @@ try {
 const report = [
   "# Seed template benchmark",
   "",
-  "Durations are milliseconds. CPU times cover engine update. GPU and CPU samples come from separate fresh pages. WebGL2 reports the native elapsed query. In the default WebGPU visit, each queue submission brackets its engine command buffers with GPU timestamps. The frame value sums these spans and excludes CPU recording time, gaps between submissions and queue writes issued before submission. The optional per-pass diagnostic records a different span. Each result records its timer in gpuSource. Workload triplets show the start, midpoint and end of the camera path.",
+  "Durations are milliseconds. CPU times cover engine update. Separate visits collect diagnostic API GPU timings. WebGL2 uses its elapsed query. The default WebGPU timer spans the beginning of the first submitted native pass to the end of the last submitted native pass. The span can include gaps between passes and submissions. Each GPU row identifies its timer in gpuSource. Within-backend GPU percentages require the same timer. Direct cross-backend GPU comparisons use matched Metal System Trace active intervals. Workload triplets show the start, midpoint and end of the camera path.",
   ""
 ];
 const triplet = (v) => (v ? v.map((n) => n ?? "—").join(" / ") : "—");
@@ -400,7 +402,7 @@ for (const template of new Set(rows.map((x) => x.template))) {
   report.push(
     "## " + template,
     "",
-    "| Backend | Variant | CPU median / P90 | GPU median / P90 | CPU median vs full | GPU median vs full | Native draws |",
+    "| Backend | Variant | CPU median / P90 | API GPU median / P90 | CPU median vs full | API GPU median vs full | Native draws |",
     "| --- | --- | ---: | ---: | ---: | ---: | --- |"
   );
   for (const row of selected)
