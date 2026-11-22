@@ -21,6 +21,10 @@
 
 ## Usage
 
+### Run the Seed World demo
+
+On `dev/webgpu`, follow the [Seed World launch guide](examples/seed-world/README.md) to run the desert and cherry blossom templates on WebGPU or WebGL2, or to open a build on a phone.
+
 ### Using Editor
 
 We recommend using [**Editor**](https://galacean.antgroup.com/editor) for a streamlined workflow that enables seamless integration between artists and developers. Its intuitive visual tools allow artists to quickly create scenes and enable developers to write custom logic, with convenient platform export. You can even create projects based on pre-built case templates.

@@ -1,6 +1,8 @@
 import type { Color, Vector4 } from "@galacean/engine-math";
 import type { Canvas } from "../Canvas";
 import type { Engine } from "../Engine";
+import type { RenderState } from "../shader/state/RenderState";
+import type { RenderStateElementMap } from "../BasicResources";
 import type { GLCapabilityType } from "../base/Constant";
 import type { BufferBindFlag, BufferUsage, Primitive, SubPrimitive } from "../graphic";
 import type { CameraClearFlags } from "../enums/CameraClearFlags";
@@ -8,19 +10,41 @@ import type { RenderTarget, Texture2D, Texture2DArray, TextureCube, TextureCubeF
 import type { IPlatformBuffer } from "./IPlatformBuffer";
 import type { IPlatformPrimitive } from "./IPlatformPrimitive";
 import type { IPlatformRenderTarget } from "./IPlatformRenderTarget";
-import type { IPlatformShaderProgram } from "./IPlatformShaderProgram";
+import type { IPlatformShaderProgram, IPlatformShaderSource } from "./IPlatformShaderProgram";
 import type { IPlatformTexture } from "./IPlatformTexture";
 import type { IPlatformTexture2D } from "./IPlatformTexture2D";
 import type { IPlatformTexture2DArray } from "./IPlatformTexture2DArray";
 import type { IPlatformTextureCube } from "./IPlatformTextureCube";
 import type { IPlatformTransformFeedback } from "./IPlatformTransformFeedback";
 import type { IPlatformTransformFeedbackPrimitive } from "./IPlatformTransformFeedbackPrimitive";
+import type { RenderBufferLoadAction } from "./RenderBufferLoadAction";
+import type { RenderBufferStoreAction } from "./RenderBufferStoreAction";
 
 /** Graphics resource and command boundary used by the engine. */
 export interface IHardwareRenderer {
-  /** WebGL access requires a graphics-capable backend. */
-  readonly gl: WebGL2RenderingContext;
+  /** An XR compositor requested the scene depth produced by this eye camera. */
+  readonly hasExternalProjectionDepth?: boolean;
+  storeExternalProjectionDepth?(source: RenderTarget, viewport: Vector4): void;
+  readonly supportsCompute: boolean;
+  readonly supportsTransformFeedback: boolean;
+  createFeedbackCompute?(): import("./IPlatformFeedbackCompute").IPlatformFeedbackCompute;
+  readonly backend: "webgl2" | "webgpu" | "null";
   readonly maxUniformBlockSize: number;
+  readonly maxUniformBufferBindings: number;
+  readonly maxVertexUniformBlocks: number;
+  readonly maxFragmentUniformBlocks: number;
+  readonly maxSampledTexturesPerShaderStage?: number;
+  readonly maxSamplersPerShaderStage?: number;
+  /** Textures with the same key can be copied into layers of one GPU texture. */
+  getTextureArrayKey?(texture: import("../texture/Texture").Texture): string | undefined;
+  getTextureSamplerKey?(
+    texture: import("../texture/Texture").Texture | undefined,
+    kind: "filtering" | "non-filtering" | "comparison"
+  ): object;
+  /** Resolve a language-defined device limit used in a shader constant expression. */
+  readonly resolveShaderConstant: (name: string) => number | undefined;
+  /** Required byte alignment of a uniform buffer range's starting offset. */
+  readonly uniformBufferOffsetAlignment: number;
   /** Whether this device can execute rendering commands. */
   readonly supportsRendering: boolean;
   readonly capability: {
@@ -35,10 +59,6 @@ export interface IHardwareRenderer {
     readonly _forceFlush?: boolean;
     readonly _maxAllowSkinUniformVectorCount?: number;
   };
-  /** @internal */
-  _currentBindShaderProgram: IPlatformShaderProgram | null;
-  /** @internal */
-  _enableGlobalDepthBias: boolean;
 
   init(canvas: Canvas, onDeviceLost: () => void, onDeviceRestored: () => void): void;
   canIUse(capability: GLCapabilityType): boolean;
@@ -47,6 +67,16 @@ export interface IHardwareRenderer {
   supportsRenderTargetColorFormat(format: TextureFormat): boolean;
   supportsGenerateMipmaps(format: TextureFormat, isSRGBColorSpace: boolean): boolean;
   createPlatformPrimitive(primitive: Primitive): IPlatformPrimitive;
+  createPlatformShaderProgram(engine: Engine, source: IPlatformShaderSource): IPlatformShaderProgram;
+  applyRenderState(
+    state: RenderState,
+    lastState: RenderState,
+    frontFaceInvert: boolean,
+    custom?: RenderStateElementMap | null
+  ): void;
+  beginFrame(): void;
+  endRenderPass(): void;
+  endFrame(): void;
   createPlatformBuffer(
     type: BufferBindFlag,
     byteLength: number,
@@ -64,7 +94,12 @@ export interface IHardwareRenderer {
     viewport: Vector4,
     isFlipProjection: boolean | null,
     mipLevel?: number,
-    faceIndex?: TextureCubeFace
+    faceIndex?: TextureCubeFace,
+    colorLoadAction?: RenderBufferLoadAction,
+    colorStoreAction?: RenderBufferStoreAction,
+    depthLoadAction?: RenderBufferLoadAction,
+    depthStoreAction?: RenderBufferStoreAction,
+    label?: string
   ): void;
   clearRenderTarget(engine: Engine, flags: CameraClearFlags, color?: Color | null): void;
   drawPrimitive(primitive: Primitive, subPrimitive: SubPrimitive | null, program: IPlatformShaderProgram): void;
@@ -77,10 +112,16 @@ export interface IHardwareRenderer {
   copyRenderTargetToSubTexture(source: RenderTarget | null, texture: Texture2D, viewport: Vector4): void;
   viewport(x: number, y: number, width: number, height: number): void;
   scissor(x: number, y: number, width: number, height: number): void;
-  activeTexture(textureID: number): void;
-  bindTexture(texture: IPlatformTexture): void;
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void;
-  setGlobalDepthBias(bias: number, slopeBias: number): void;
+  /** Bind a byte range; optionally orphan the existing store and upload the full range before the draw. */
+  bindUniformBufferRange(
+    bindingPoint: number,
+    buffer: IPlatformBuffer,
+    byteOffset: number,
+    byteSize: number,
+    data?: ArrayBufferView,
+    discard?: boolean
+  ): void;
   enableRasterizerDiscard(): void;
   disableRasterizerDiscard(): void;
   invalidateShaderProgramState(): void;
