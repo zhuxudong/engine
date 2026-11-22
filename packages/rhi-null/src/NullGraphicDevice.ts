@@ -1,4 +1,4 @@
-import { GLCapabilityType } from "@galacean/engine";
+import { GLCapabilityType, SetDataOptions } from "@galacean/engine";
 import type {
   IHardwareRenderer,
   IPlatformRenderTarget,
@@ -94,7 +94,19 @@ export class NullGraphicDevice implements IHardwareRenderer {
   activeTexture(): void {}
   bindTexture(): void {}
   bindUniformBufferBase(): void {}
-  bindUniformBufferRange(): void {}
+  bindUniformBufferRange(
+    _binding: number,
+    buffer: NullBuffer,
+    byteOffset: number,
+    _byteSize: number,
+    data?: ArrayBufferView,
+    discard?: boolean
+  ): void {
+    if (data) {
+      const options = discard ? SetDataOptions.Discard : SetDataOptions.None;
+      buffer.setData(buffer.byteLength, data, byteOffset, 0, undefined, options);
+    }
+  }
   tryBindUniformBlock(): boolean {
     return false;
   }

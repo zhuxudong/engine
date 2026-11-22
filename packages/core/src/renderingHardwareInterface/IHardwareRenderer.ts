@@ -87,7 +87,15 @@ export interface IHardwareRenderer {
   activeTexture(textureID: number): void;
   bindTexture(texture: IPlatformTexture): void;
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void;
-  bindUniformBufferRange(bindingPoint: number, buffer: IPlatformBuffer, byteOffset: number, byteSize: number): void;
+  /** Bind a byte range; optionally orphan the existing store and upload the full range before the draw. */
+  bindUniformBufferRange(
+    bindingPoint: number,
+    buffer: IPlatformBuffer,
+    byteOffset: number,
+    byteSize: number,
+    data?: ArrayBufferView,
+    discard?: boolean
+  ): void;
   /** Assign a binding point if the linked native program uses the named block. */
   tryBindUniformBlock(program: object, blockName: string, bindingPoint: number): boolean;
   setGlobalDepthBias(bias: number, slopeBias: number): void;

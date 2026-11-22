@@ -357,6 +357,40 @@ describe("explicit global uniform blocks on WebGL2", () => {
     }
   });
 
+  it("uploads through the indexed bind after raw GL changes the generic uniform binding", () => {
+    const device = engine._hardwareRenderer;
+    const gl = device.gl;
+    const first = device.createPlatformBuffer(BufferBindFlag.ConstantBuffer, 16);
+    const second = device.createPlatformBuffer(BufferBindFlag.ConstantBuffer, 16);
+    try {
+      const values = new Uint32Array([1, 2, 3, 4]);
+      device.bindUniformBufferRange(1, first, 0, 16, values);
+      device.bindUniformBufferRange(2, second, 0, 16, values);
+      const invalid = new Uint32Array([99, 99, 99, 99]);
+      expect(() => device.bindUniformBufferRange(1, first, device.uniformBufferOffsetAlignment, 16, invalid)).toThrow(
+        RangeError
+      );
+      expect(() => device.bindUniformBufferRange(1, first, 0, 8, invalid)).toThrow(RangeError);
+      gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+      const binds = vi.spyOn(gl, "bindBuffer");
+      const ranges = vi.spyOn(gl, "bindBufferRange");
+      values[0] = 9;
+      device.bindUniformBufferRange(1, first, 0, 16, values, true);
+      device.bindUniformBufferRange(1, first, 0, 16);
+      expect(ranges).toHaveBeenCalledOnce();
+      expect(binds).not.toHaveBeenCalled();
+      const stored = new Uint32Array(4);
+      first.getData(stored);
+      expect(Array.from(stored)).toEqual([9, 2, 3, 4]);
+      second.getData(stored);
+      expect(Array.from(stored)).toEqual([1, 2, 3, 4]);
+      expect(gl.getError()).toBe(gl.NO_ERROR);
+    } finally {
+      first.destroy();
+      second.destroy();
+    }
+  });
+
   it("reports invalid ranges on every call and preserves the previously bound range", () => {
     const device = engine._hardwareRenderer;
     const gl = device.gl;

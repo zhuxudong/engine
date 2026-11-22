@@ -15,6 +15,7 @@ import { ShaderPropertyType } from "./enums/ShaderPropertyType";
  * Shader data collection,Correspondence includes shader properties data and macros data.
  */
 export class ShaderData extends DataObject implements IReferable, IClone, ICloneHook<ShaderData> {
+  private static _nextRendererId = 0;
   /** @internal Resolve a shared property from the most specific owner available on this draw. */
   static _findValue(
     id: number,
@@ -58,6 +59,9 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
   /** @internal */
   @ignoreClone
   _group: ShaderDataGroup;
+  /** @internal Stable cache key without retaining a renderer's property or texture references. */
+  @ignoreClone
+  readonly _rendererId: number;
   /** @internal */
   @ignoreClone
   _propertyValueMap: Record<number, ShaderPropertyValueType> = Object.create(null);
@@ -78,6 +82,7 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
   constructor(group: ShaderDataGroup) {
     super();
     this._group = group;
+    this._rendererId = group === ShaderDataGroup.Renderer ? ++ShaderData._nextRendererId : 0;
   }
 
   /**

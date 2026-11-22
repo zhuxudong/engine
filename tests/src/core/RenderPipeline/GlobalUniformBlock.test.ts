@@ -1,4 +1,4 @@
-import { Scene, SetDataOptions, Shader, ShaderMacroCollection, Vector2, WebGLEngine } from "@galacean/engine";
+import { Scene, Shader, ShaderMacroCollection, Vector2, WebGLEngine } from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { describe, expect, it, vi } from "vitest";
 
@@ -27,7 +27,9 @@ describe("global uniform buffer lifetime", () => {
       const ranges = vi.spyOn(engine._hardwareRenderer, "bindUniformBufferRange");
       first.uploadSharedUniforms(data, data);
       const [, backing, firstOffset] = ranges.mock.calls[0];
-      const uploads = vi.spyOn(backing, "setData");
+      const gl = engine._hardwareRenderer.gl;
+      const uploads = vi.spyOn(gl, "bufferSubData");
+      const orphans = vi.spyOn(gl, "bufferData");
       second.uploadSharedUniforms(data, data);
       expect(ranges.mock.calls[1][1]).toBe(backing);
       expect(uploads).not.toHaveBeenCalled();
@@ -40,7 +42,8 @@ describe("global uniform buffer lifetime", () => {
       values[0] = 2;
       second.uploadSharedUniforms(data, data);
       expect(ranges.mock.calls[3][2]).toBe(firstOffset);
-      expect(uploads.mock.lastCall![5]).toBe(SetDataOptions.Discard);
+      expect(orphans).toHaveBeenCalledOnce();
+      expect(orphans.mock.lastCall![0]).toBe(gl.UNIFORM_BUFFER);
 
       const destroy = vi.spyOn(backing, "destroy");
       shaders[0].destroy(true);

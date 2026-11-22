@@ -3,8 +3,8 @@ import type { Engine } from "../Engine";
 import { Buffer } from "../graphic/Buffer";
 import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
 import { BufferUsage } from "../graphic/enums/BufferUsage";
-import { SetDataOptions } from "../graphic/enums/SetDataOptions";
 import { ShaderData } from "./ShaderData";
+import { RendererUniformCache } from "./RendererUniformCache";
 import { Std140FieldWriter } from "./Std140FieldWriter";
 import { ShaderProperty } from "./ShaderProperty";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
@@ -37,6 +37,7 @@ export class GlobalUniformBlock {
   private readonly _previous: Uint32Array;
   private readonly _materialRanges?: { words: Uint32Array; offset: number }[];
   private _nextMaterialRange = 0;
+  private _rendererRanges?: RendererUniformCache;
   private readonly _stride: number;
   private readonly _buffer: Buffer;
   private _offset = -1;
@@ -95,6 +96,7 @@ export class GlobalUniformBlock {
     const fields = this._fields;
     const values = (this._group === ShaderDataGroup.Scene ? scene : camera)?._propertyValueMap;
     let groups = ShaderDataGroup.None;
+    let hasRendererValue = false;
     for (let i = 0; i < fields.length; ++i) {
       const field = fields[i];
       const property = field.property;
@@ -104,35 +106,48 @@ export class GlobalUniformBlock {
         this._group === ShaderDataGroup.None || property._groups & field.overrideGroups
           ? ShaderData._findValue(id, scene, camera, renderer, material, element, property._groups)
           : values?.[id];
+      if (
+        value != null &&
+        property._groups & ShaderDataGroup.Renderer &&
+        (property._groups === ShaderDataGroup.Renderer ||
+          (renderer?._propertyValueMap[id] != null && element?._propertyValueMap[id] == null))
+      ) {
+        hasRendererValue = true;
+      }
       field.writer.write(field.view, field.offset, value);
     }
 
-    const offset = this._getRange(groups === ShaderDataGroup.Material);
-    this._engine._hardwareRenderer.bindUniformBufferRange(
-      this._binding,
-      this._buffer._platformBuffer,
-      offset,
-      this._staging.byteLength
-    );
+    if (this._materialRanges && hasRendererValue && renderer?._rendererId) {
+      const ranges = (this._rendererRanges ??= new RendererUniformCache(this._engine, this._binding, this._stride));
+      if (ranges.bind(renderer._rendererId, this._staging)) return;
+    }
+    this._bindRange(groups === ShaderDataGroup.Material);
   }
 
   release(): void {
     if (--this._references === 0) {
       this._engine._globalUniformBlocks!.delete(this._key);
+      this._rendererRanges?.destroy();
       this._buffer.destroy();
     }
   }
 
-  private _getRange(materialOnly: boolean): number {
+  private _bindRange(materialOnly: boolean): void {
     const { _buffer: buffer, _staging: staging, _materialRanges: ranges, _offset: last } = this;
     const contentLost = buffer.isContentLost;
     if (!contentLost && last >= 0) {
-      if (this._matches(this._previous)) return last;
+      if (this._matches(this._previous)) {
+        buffer._bindUniformRange(this._binding, last, staging.byteLength);
+        return;
+      }
       if (materialOnly && ranges) {
         for (let i = 0; i < ranges.length; ++i) {
           const range = ranges[i];
           if (range.offset < 0) break;
-          if (this._matches(range.words)) return range.offset;
+          if (this._matches(range.words)) {
+            buffer._bindUniformRange(this._binding, range.offset, staging.byteLength);
+            return;
+          }
         }
       }
     }
@@ -145,7 +160,7 @@ export class GlobalUniformBlock {
       for (let i = 0; i < ranges.length; ++i) ranges[i].offset = -1;
       this._nextMaterialRange = 0;
     }
-    buffer.setData(staging, next, 0, staging.length, discard ? SetDataOptions.Discard : SetDataOptions.None);
+    buffer._bindUniformRange(this._binding, next, staging.byteLength, staging, discard);
     this._previous.set(staging);
     this._offset = next;
     if (materialOnly && ranges) {
@@ -154,7 +169,6 @@ export class GlobalUniformBlock {
       range.offset = next;
       this._nextMaterialRange = (this._nextMaterialRange + 1) % ranges.length;
     }
-    return next;
   }
 
   private _matches(previous: Uint32Array): boolean {

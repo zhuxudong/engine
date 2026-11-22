@@ -80,6 +80,8 @@ export class Engine extends EventDispatcher {
   _hardwareRenderer: IHardwareRenderer;
   /** @internal Shared by programs with identical global block layouts. */
   _globalUniformBlocks?: Map<string, GlobalUniformBlock>;
+  /** @internal Reserved storage for bounded renderer uniform candidates and their GPU pages. */
+  _rendererUniformCacheBytes = 0;
   /** @internal */
   _renderTargetPool: RenderTargetPool;
   /** @internal */

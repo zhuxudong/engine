@@ -311,29 +311,50 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     if (slot < this._uniformRanges.buffers.length) this._uniformRanges.buffers[slot] = null;
   }
 
-  bindUniformBufferRange(bindingPoint: number, buffer: IPlatformBuffer, byteOffset: number, byteSize: number): void {
-    const handle = (<GLBuffer>buffer)._glBuffer;
+  bindUniformBufferRange(
+    bindingPoint: number,
+    buffer: IPlatformBuffer,
+    byteOffset: number,
+    byteSize: number,
+    data?: ArrayBufferView,
+    discard?: boolean
+  ): void {
+    const platform = <GLBuffer>buffer;
+    const handle = platform._glBuffer;
     const { buffers, offsets, sizes } = this._uniformRanges;
     const slot = bindingPoint >>> 0;
-    if (handle && buffers[slot] === handle && offsets[slot] === byteOffset && sizes[slot] === byteSize) {
+    if (!data && handle && buffers[slot] === handle && offsets[slot] === byteOffset && sizes[slot] === byteSize) {
       return;
     }
     const gl = this._gl;
+    const validRange =
+      byteOffset >= 0 &&
+      byteOffset % this.uniformBufferOffsetAlignment === 0 &&
+      Number.isSafeInteger(byteSize) &&
+      byteSize > 0;
+    if (
+      data &&
+      (!validRange ||
+        bindingPoint !== slot ||
+        slot >= buffers.length ||
+        data.byteLength !== byteSize ||
+        !platform.canUploadUniformRange(gl, byteOffset + byteSize))
+    ) {
+      throw new RangeError("Invalid uniform buffer upload range.");
+    }
     gl.bindBufferRange(gl.UNIFORM_BUFFER, bindingPoint, handle, byteOffset, byteSize);
     if (slot < buffers.length) {
       // Leave misaligned or empty ranges to native validation, including repeated calls.
-      if (
-        byteOffset < 0 ||
-        byteOffset % this.uniformBufferOffsetAlignment !== 0 ||
-        !Number.isSafeInteger(byteSize) ||
-        byteSize <= 0
-      ) {
+      if (!validRange) {
         buffers[slot] = null;
         return;
       }
       buffers[slot] = handle;
       offsets[slot] = byteOffset;
       sizes[slot] = byteSize;
+      // The indexed cache cannot tell which buffer another slot or raw GL bound to the generic target.
+      // bindBufferRange above establishes both bindings before a write, including on an indexed cache hit.
+      if (data) platform.uploadBoundUniformRange(byteOffset, data, discard);
     }
   }
 

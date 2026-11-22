@@ -12,7 +12,7 @@ export class GLBuffer implements IPlatformBuffer {
   constructor(
     rhi: WebGLGraphicDevice,
     type: BufferBindFlag,
-    byteLength: number,
+    private _byteLength: number,
     bufferUsage: BufferUsage = BufferUsage.Static,
     data?: ArrayBuffer | ArrayBufferView
   ) {
@@ -41,13 +41,25 @@ export class GLBuffer implements IPlatformBuffer {
     if (data) {
       gl.bufferData(glBindTarget, data, glBufferUsage);
     } else {
-      gl.bufferData(glBindTarget, byteLength, glBufferUsage);
+      gl.bufferData(glBindTarget, this._byteLength, glBufferUsage);
     }
     gl.bindBuffer(glBindTarget, null);
   }
 
   bind(): void {
     this._gl.bindBuffer(this._glBindTarget, this._glBuffer);
+  }
+
+  /** @internal A failed native range binding must never direct a write into a different generic buffer. */
+  canUploadUniformRange(gl: WebGL2RenderingContext, end: number): boolean {
+    return this._gl === gl && !!this._glBuffer && this._glBindTarget === gl.UNIFORM_BUFFER && end <= this._byteLength;
+  }
+
+  /** @internal A native bindBufferRange has already bound this buffer to the generic uniform target. */
+  uploadBoundUniformRange(offset: number, data: ArrayBufferView, discard?: boolean): void {
+    const gl = this._gl;
+    if (discard) gl.bufferData(gl.UNIFORM_BUFFER, this._byteLength, this._glBufferUsage);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, offset, data);
   }
 
   setData(
@@ -65,6 +77,7 @@ export class GLBuffer implements IPlatformBuffer {
 
     if (options === SetDataOptions.Discard) {
       gl.bufferData(glBindTarget, byteLength, this._glBufferUsage);
+      this._byteLength = byteLength;
     }
 
     // TypeArray is BYTES_PER_ELEMENT, unTypeArray is 1

@@ -209,18 +209,22 @@ describe("automatically packed uniforms", () => {
     });
     const upload = vi.spyOn(gl, "bufferSubData");
     const allocate = vi.spyOn(gl, "bufferData");
+    const bind = vi.spyOn(gl, "bindBuffer");
     let order = Array.from({ length: 24 }, (_, i) => i % 8);
     let uploads = 0;
     let allocations = 0;
+    let genericUniformBinds = 0;
     class MaterialStripes extends PostProcessPass {
       override onRender(camera: Camera, source: Texture2D, destination: RenderTarget | null): void {
         upload.mockClear();
         allocate.mockClear();
+        bind.mockClear();
         for (const i of order) {
           Blitter.blitTexture(engine, source, destination, 0, new Vector4(i / 8, 0, 1 / 8, 1), materials[i]);
         }
         uploads = upload.mock.calls.filter(([target]) => target === gl.UNIFORM_BUFFER).length;
         allocations = allocate.mock.calls.filter(([target]) => target === gl.UNIFORM_BUFFER).length;
+        genericUniformBinds = bind.mock.calls.filter(([target]) => target === gl.UNIFORM_BUFFER).length;
       }
     }
     camera.enablePostProcess = true;
@@ -236,6 +240,7 @@ describe("automatically packed uniforms", () => {
     engine.update();
     expect(allocations).toBe(1);
     expect(uploads).toBe(2);
+    expect(genericUniformBinds).toBe(0);
     expect(pixel(0)).toEqual([128, 64, 191, 255]);
     expect(pixel(1)).toEqual([255, 0, 0, 255]);
 

@@ -185,7 +185,21 @@ export class Buffer extends GraphicsResource {
     options: SetDataOptions = SetDataOptions.None
   ): void {
     this._platformBuffer.setData(this._byteLength, data, bufferByteOffset, dataOffset, dataLength, options);
+    this._onDataUploaded(data, bufferByteOffset, dataOffset, dataLength);
+  }
 
+  /** @internal Bind a uniform range and optionally upload the complete contents of that slice. */
+  _bindUniformRange(binding: number, offset: number, size: number, data?: ArrayBufferView, discard?: boolean): void {
+    this._engine._hardwareRenderer.bindUniformBufferRange(binding, this._platformBuffer, offset, size, data, discard);
+    if (data) this._onDataUploaded(data, offset, 0);
+  }
+
+  private _onDataUploaded(
+    data: ArrayBuffer | ArrayBufferView,
+    bufferByteOffset: number,
+    dataOffset: number,
+    dataLength?: number
+  ): void {
     if (this._readable) {
       const arrayBuffer = data.constructor === ArrayBuffer ? data : (<ArrayBufferView>data).buffer;
 
