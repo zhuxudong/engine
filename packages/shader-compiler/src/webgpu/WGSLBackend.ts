@@ -3,12 +3,14 @@ import type {
   IWebGPUShaderProgram,
   IWebGPUShaderOptions,
   IWebGPUShaderReflection,
+  IWebGPUShaderUniformBlock,
   IWebGPUShaderAttribute
 } from "@galacean/engine-design";
 import {
   attribute,
   declarations,
   matching,
+  padUniformArrays,
   resourceGroup,
   texture,
   tokens,
@@ -189,10 +191,12 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
     stage: Stage,
     globals: Declaration[],
     reflection: IWebGPUShaderReflection,
-    locations: Map<string, number>[]
+    locations: Map<string, number>[],
+    directArrays = true
   ): string {
     const patches = new Map<number, Patch>();
     const init: string[] = [];
+    const padded: { block: IWebGPUShaderUniformBlock; count: number }[] = [];
     let generated = "gs_wgpu_";
     while (t.some((name) => name.startsWith(generated))) generated += "x";
     const samplerTypes = new Map<string, string>();
@@ -206,9 +210,10 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
           result.reads.forEach((patch, index) => patches.set(index, patch));
           continue;
         }
-        const result = uniformBlock(d, b, reflection.uniformBlocks.indexOf(b), generated);
+        const result = uniformBlock(t, d, b, reflection.uniformBlocks.indexOf(b), generated, directArrays);
         set(d.start, d.end, result.source);
         if (result.initialize) init.push(result.initialize);
+        if (result.paddedArrays) padded.push({ block: b, count: result.paddedArrays });
       } else if (d.qualifier === "uniform" && samplerType.test(d.type)) {
         const binding = reflection.textures.find((b) => b.name === d.name)!;
         samplerTypes.set(d.name, d.type);
@@ -328,7 +333,13 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
           .map((name) => `${type} ${name.trim()};`)
           .join(" ")
       );
-    return "diagnostic(off, derivative_uniformity);\n" + this.translate(clean, stage);
+    let module = this.translate(clean, stage);
+    for (const { block, count } of padded) {
+      const compatible = padUniformArrays(module, block, count);
+      if (!compatible) return this._generate(t, stage, globals, reflection, locations, false);
+      module = compatible;
+    }
+    return "diagnostic(off, derivative_uniformity);\n" + module;
   }
   private _shaderInputType(a: IWebGPUShaderAttribute): string {
     return a.components === 1

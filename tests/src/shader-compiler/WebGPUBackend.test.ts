@@ -104,6 +104,75 @@ it("preserves public leaf and array names when separating opaque struct resource
 });
 
 describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
+  it("reads indexed and whole std140 arrays with their original byte strides", async () => {
+    const device = await (await navigator.gpu.requestAdapter())!.requestDevice();
+    try {
+      const vertex = "void main(){int i=gl_VertexID; gl_Position=vec4(vec2((i<<1)&2,i&2)*2.0-1.0,0.0,1.0);}";
+      for (const whole of [false, true]) {
+        const fragment = `uniform float weights[2]; uniform vec2 pairs[2]; uniform int indices[2];
+          float readWeight(float values[2], int index) { return values[index]; }
+          out vec4 color; void main() { color=vec4(${whole ? "readWeight(weights,indices[0])" : "weights[indices[0]]"},
+            pairs[indices[0]].y, weights[0], 1.0); }`;
+        const shader = compiler.compileWebGPUVariant(vertex, fragment);
+        const [block] = shader.reflection.uniformBlocks;
+        expect(block.members.map((field) => field.arrayStride)).toEqual([16, 16, 16]);
+        if (!whole) expect(shader.fragment).not.toContain("var<private> weights:");
+        const bytes = new ArrayBuffer(block.byteLength);
+        for (const field of block.members) {
+          const index = field.offset / 4;
+          if (field.name === "indices") new Int32Array(bytes)[index] = 1;
+          if (field.name === "pairs") new Float32Array(bytes)[index + 5] = 0.5;
+          if (field.name === "weights") {
+            new Float32Array(bytes)[index] = 0.25;
+            new Float32Array(bytes)[index + 4] = 1;
+          }
+        }
+        const uniform = device.createBuffer({
+          size: bytes.byteLength,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(uniform, 0, bytes);
+        const pipeline = device.createRenderPipeline({
+          layout: "auto",
+          vertex: { module: device.createShaderModule({ code: shader.vertex }) },
+          fragment: {
+            module: device.createShaderModule({ code: shader.fragment }),
+            targets: [{ format: "rgba8unorm" }]
+          }
+        });
+        const target = device.createTexture({
+          size: [1, 1],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+        });
+        const read = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const commands = device.createCommandEncoder();
+        const pass = commands.beginRenderPass({
+          colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }]
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(
+          block.group,
+          device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(block.group),
+            entries: [{ binding: block.binding, resource: { buffer: uniform } }]
+          })
+        );
+        pass.draw(3);
+        pass.end();
+        commands.copyTextureToBuffer({ texture: target }, { buffer: read }, [1, 1]);
+        device.queue.submit([commands.finish()]);
+        await read.mapAsync(GPUMapMode.READ);
+        expect(Array.from(new Uint8Array(read.getMappedRange()))).toEqual([255, 128, 64, 255]);
+        read.destroy();
+        target.destroy();
+        uniform.destroy();
+      }
+    } finally {
+      device.destroy();
+    }
+  });
+
   it("draws 21 PBR properties with 17 independent material textures on a 16-view device", async () => {
     const engine = await WebGPUEngine.create({
       canvas: document.createElement("canvas"),

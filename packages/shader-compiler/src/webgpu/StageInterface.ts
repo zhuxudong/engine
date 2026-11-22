@@ -163,17 +163,27 @@ export function texture(
 /** Use std140 directly where WGSL has identical natural offsets. Other layouts are
  * read through aligned 16-byte words using the existing CPU reflection. */
 export function uniformBlock(
+  tokens: string[],
   decl: Declaration,
   block: IWebGPUShaderUniformBlock,
   ordinal: number,
-  prefix: string
-): { source: string; initialize: string } {
+  prefix: string,
+  directArrays: boolean
+): { source: string; initialize: string; paddedArrays?: number } {
   const header = `layout(std140,set=${block.group},binding=${block.binding}) uniform ${decl.name}`;
   const instance = decl.instance ?? "";
-  if (
-    !block.members.some((m) => m.arrayLength || m.name.includes(".") || /^(?:bool|bvec|mat(?:2$|[234]x2))/.test(m.type))
-  ) {
-    return { source: `${header} { ${decl.body} } ${instance};`, initialize: "" };
+  if (!block.members.some((m) => m.name.includes(".") || /^(?:bool|bvec|mat(?:2$|[234]x2))/.test(m.type))) {
+    const arrays = block.members.filter((m) => m.arrayLength);
+    const names = new Set(arrays.map((m) => m.name));
+    // Whole-array arguments need the helper parameter's ordinary array stride during GLSL overload resolution.
+    if (
+      !arrays.length ||
+      (directArrays &&
+        !tokens.some((t, i) => (i < decl.start || i >= decl.end) && names.has(t) && tokens[i + 1] !== "["))
+    ) {
+      const paddedArrays = arrays.filter((m) => /^(?:float|int|uint|[iu]?vec2)$/.test(m.type)).length;
+      return { source: `${header} { ${decl.body} } ${instance};`, initialize: "", paddedArrays };
+    }
   }
   const raw = `${prefix}data_${ordinal}`;
   const indexName = prefix + "index";
@@ -218,6 +228,60 @@ export function uniformBlock(
     );
   }
   return { source, initialize: writes.join("\n") };
+}
+
+/** Scalar and two-lane std140 arrays occupy a 16-byte slot per element. Use a native
+ * uniform array of four-lane vectors and project the requested element at its read.
+ * Naga has already resolved GLSL names, member shadowing and array index expressions. */
+export function padUniformArrays(
+  source: string,
+  block: IWebGPUShaderUniformBlock,
+  expected: number
+): string | undefined {
+  const binding = new RegExp(
+    `@group\\(${block.group}\\)\\s*@binding\\(${block.binding}\\)\\s*var<uniform> (\\w+): (\\w+);`
+  ).exec(source);
+  if (!binding) return;
+  const [, variable, type] = binding;
+  const declaration = new RegExp(`struct ${type} \\{([^}]*)\\}`).exec(source);
+  if (!declaration || source.match(new RegExp(`\\b${type}\\b`, "g"))?.length !== 2) return;
+  const fields = new Map<string, string>();
+  const wide = declaration[0].replace(
+    /(\w+): array<(vec2<)?([fiu]32)>?, (\d+)>/g,
+    (_, name, vector, scalar, length) => {
+      fields.set(name, vector ? ".xy" : ".x");
+      return `${name}: array<vec4<${scalar}>, ${length}>`;
+    }
+  );
+  if (fields.size !== expected) return;
+  const insertions: { at: number; suffix: string }[] = [];
+  const uses = new RegExp(`\\b${variable}\\b(?:\\.(\\w+))?`, "g");
+  for (let use = uses.exec(source); use; use = uses.exec(source)) {
+    if (!use[1]) {
+      if (use.index < binding.index || use.index >= binding.index + binding[0].length) return;
+      continue;
+    }
+    const suffix = fields.get(use[1]);
+    if (!suffix) continue;
+    let end = uses.lastIndex;
+    // A whole-array value passed to a helper requires the original GLSL element type.
+    if (source[end++] !== "[") return;
+    for (let depth = 1; depth && end < source.length; end++) {
+      if (source[end] === "[") depth++;
+      else if (source[end] === "]") depth--;
+    }
+    insertions.push({ at: end, suffix });
+  }
+  // Nested indices can end in a different order from the start of their expressions.
+  insertions.sort((a, b) => a.at - b.at);
+  const pieces: string[] = [];
+  let start = 0;
+  for (const { at, suffix } of insertions) {
+    pieces.push(source.slice(start, at), suffix);
+    start = at;
+  }
+  pieces.push(source.slice(start));
+  return pieces.join("").replace(declaration[0], wide);
 }
 
 /** Read exactly the instanced member a stage requests. This handles bool and
