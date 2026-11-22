@@ -1,7 +1,10 @@
 // Seed ships these shaders as compiled instruction streams. Change only the text at
 // screen-space coordinate conversions, keeping every branch and absolute jump target.
-function orientWaterInstructions(data) {
-  if (!/^(?:Water\/|AIWorld\/(?:HeightfieldWater|Ocean))/.test(data.name)) return data;
+function orientSeedScreenSpaceInstructions(data) {
+  const water = /^(?:Water\/|AIWorld\/(?:HeightfieldWater|Ocean))/.test(data.name);
+  // These precompiled wet-surface shaders inline the same SSR clip-to-texture conversion.
+  const terrain = /^Terrain\/(?:Grass|Surface|Vegetation|Terrain)$/.test(data.name);
+  if (!water && !terrain) return data;
   const orient = (source) =>
     source
       .replace(
@@ -33,7 +36,7 @@ export function adaptSeedCapabilities(source, id) {
   if (id.endsWith("/core/src/shader/Shader.ts")) {
     const marker = "const subShaderList = data.subShaders.map";
     if (source.split(marker).length !== 2) throw Error("Cannot locate Seed compiled shader loading.");
-    return source.replace(marker, "data = (" + orientWaterInstructions.toString() + ")(data);\n" + marker);
+    return source.replace(marker, "data = (" + orientSeedScreenSpaceInstructions.toString() + ")(data);\n" + marker);
   }
   if (id.endsWith("/building/runtime/BrickPackKernel.ts")) {
     // The PBO path publishes four RGBA32UI texels per computed brick. Preserve that byte layout in the same GPU command stream.
