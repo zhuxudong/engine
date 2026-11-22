@@ -30,8 +30,10 @@ afterEach(() => {
   engine.destroy();
 });
 
-// Frozen compiler outputs from dev/2.0 at 3ea2e78f2 and from the explicit-block compiler at 5b0ead9cc.
+// Frozen outputs from the published alpha.59 GLES300 compiler (target 1),
+// dev/2.0 at 3ea2e78f2 and the explicit-block compiler at 5b0ead9cc (both target 0).
 it.each([
+  ["released-alpha59", "camera_LegacyTint"],
   ["legacy-global-uniform", "camera_LegacyTint"],
   ["legacy-explicit-uniform", "historicalTint"]
 ])("draws single and instanced meshes from historical %s.shaderc", async (fixture, property) => {
@@ -43,15 +45,22 @@ it.each([
   camera.entity.transform.setPosition(0, 0, 3);
   camera.isOrthographic = true;
   camera.orthographicSize = 1;
-  const data = fixture === "legacy-global-uniform" ? camera.shaderData : scene.shaderData;
+  const data = fixture === "legacy-explicit-uniform" ? scene.shaderData : camera.shaderData;
   data.setVector4(property, new Vector4(1, 0, 1, 1));
   const color = new Texture2D(engine, 16, 16, undefined, false);
   camera.renderTarget = new RenderTarget(engine, 16, 16, color);
   const renderer = scene.createRootEntity().addComponent(MeshRenderer);
   renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
-  renderer.setMaterial(new Material(engine, shader));
-  camera.render();
+  const material = new Material(engine, shader);
+  renderer.setMaterial(material);
   const pixel = new Uint8Array(4);
+  if (fixture === "released-alpha59") {
+    camera.render();
+    color.getPixelBuffer(8, 8, 1, 1, pixel);
+    expect(Array.from(pixel)).toEqual([0, 0, 255, 255]);
+    material.shaderData.enableMacro("LEGACY_SHOW_TINT");
+  }
+  camera.render();
   color.getPixelBuffer(8, 8, 1, 1, pixel);
   expect(Array.from(pixel)).toEqual([255, 0, 255, 255]);
   renderer.entity.transform.setPosition(-0.55, 0, 0);
