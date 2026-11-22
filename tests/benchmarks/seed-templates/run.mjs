@@ -1,5 +1,5 @@
 import { chromium } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const out = path.resolve(process.env.RESULTS || process.argv[2] || "seed-measurements");
@@ -49,8 +49,9 @@ try {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    for (const variant of variants) {
-      for (const backend of backends) {
+    for (const [variantIndex, variant] of variants.entries()) {
+      const order = (templates.indexOf(template) + variantIndex) % 2 ? [...backends].reverse() : backends;
+      for (const backend of order) {
         for (const mode of modes) {
           const id = [template, variant, backend, mode].join("-");
           const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
@@ -116,6 +117,7 @@ try {
             });
             Object.assign(result, { browser: browser.version(), adapter, url: url.href, errors, validation });
             await writeFile(path.join(out, id + ".json"), JSON.stringify(result, null, 2));
+            await rm(path.join(out, id + "-error.json"), { force: true });
             console.log(
               id,
               JSON.stringify({
@@ -125,7 +127,14 @@ try {
                 validation: validation.count
               })
             );
-            if (errors.length || validation.count) failures++;
+            if (
+              errors.length ||
+              validation.count ||
+              result.webglErrors?.length ||
+              (mode === "gpu" && !result.gpuMs?.samples)
+            ) {
+              failures++;
+            }
           } catch (error) {
             failures++;
             console.error(id, String(error), errors.slice(0, 3));
