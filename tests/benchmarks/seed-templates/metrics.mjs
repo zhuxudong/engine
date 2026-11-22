@@ -923,8 +923,6 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
           if (device && before === submissions) throw Error("An engine update submitted no WebGPU work.");
         },
         afterBlock: (index) => {
-          // Read back only once, after the final native completion fence and outside its timing interval.
-          if (index === frames - 1) captured = pixels(canvas, image);
           if (step !== warmup + index + 1) throw Error("Unexpected simulation frame count.");
           const actual = triple(transform.worldPosition),
             direction = triple(transform.worldForward);
@@ -941,8 +939,15 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
         completion: gl ? "WebGL2.finish" : "GPUQueue.onSubmittedWorkDone",
         engineFrames: completed,
         nativeSubmissions: device ? submissions : null,
+        presentationCheck: { frame: frames, measured: false },
         warmupDraws
       });
+      // Waiting for the completion fence can present and retire the canvas texture.
+      // Draw once more at the final pose and capture within that texture's lifetime.
+      await frame();
+      applyPath(transform, path, 1);
+      update();
+      captured = pixels(canvas, image);
     }
     for (let i = 0; mode !== "throughput" && i < frames; ++i) {
       if (options.profileCpu && i > 0 && checkpoints.has(i) && !checkpoints.has(i - 1)) {

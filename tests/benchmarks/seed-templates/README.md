@@ -2,6 +2,8 @@
 
 The benchmark loads the original Sakura Pearl and Titan Wasteland projects from Galacean's `experimental/engine-next` commit `92ea60eaee49b2f1188b373c178c34ca511c9f87`. It exercises the native grass, vegetation, terrain horizon, SSR, Bloom and published assets. The WebGL2 and WebGPU comparison uses the same Seed packages, source overrides and target-specific compilations of the same shader catalog. A third server can run the original WebGL2 distribution for calibration.
 
+The [desktop results](results.md) report GPU-active time, CPU update time and image comparisons for both templates. The [Metal procedure](metal/README.md) reproduces the native GPU measurements on macOS.
+
 ## Prepare the sources
 
 From the candidate engine checkout, install its dependencies and build `pnpm b:module`. The checkout needs the Git objects for the Seed commit and the two engine revisions pinned in `merge-engine.py`. Python 3.9+, Node, pnpm, Git and the repo's Playwright Chromium build are required. Use an empty scratch directory outside the checkout. The following commands create an extracted project, merged engine sources and compiled shaders without checking out another branch.
@@ -50,3 +52,7 @@ For these visits the JSON records the exact entity path, immediate child count a
 The horizon switch removes terrain-horizon rejection while retaining frustum culling and LOD. The Hi-Z trace inside SSR serves reflections. Shader passes, effect flags, camera poses and repeat captures should be checked alongside the timing rows. Seed publishes some fine detail under a frame budget and fresh visits can differ by a few draws.
 
 The stationary camera routes exercise the terrain horizon with rocks behind a ridge. [Stationary viewpoints and geometry reference](horizon/README.md)
+
+## Completed rendering throughput
+
+Use `MODES=throughput BLOCK_FRAMES=15 WARMUP=90 FRAMES=180` with the same camera files. Each visit runs twelve blocks. The host drains the queue before starting a block, calls the actual engine update for every frame, and times through GPU completion of the last frame. WebGL2 flushes each frame and finishes at the end of the block. WebGPU submits each frame and awaits queue completion at the block boundary. The event loop runs between blocks. The JSON includes each block duration, the actual frame and submission counts, and the weighted milliseconds per completed frame. After timing, one additional update at the final pose verifies the presentation canvas and supplies the PNG. Browsers can present just the latest frame of a block. Use this measure for combined CPU and GPU rendering throughput. Interactive frame pacing and hardware GPU-active time have their own measurements above.
