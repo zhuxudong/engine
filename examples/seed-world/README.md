@@ -4,24 +4,25 @@ Preview the Sakura Pearl and Titan Wasteland templates with either renderer. Bot
 
 ## Prepare
 
-From an engine checkout with Git history, use Node.js, pnpm 9, Python 3.9+, Git and tar. Install dependencies and build the engine packages, then prepare the previews in a directory outside the checkout.
+Use Node.js 20.19+, pnpm 9.3.0, Python 3.9+, Git and tar. Start with the experiment branch and its Git history. If you already have this branch checked out, start at `pnpm install` in that checkout.
 
 ```sh
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch dev/webgpu --single-branch https://github.com/zhuxudong/engine.git engine-webgpu
+cd engine-webgpu
 pnpm install --frozen-lockfile
 pnpm b:module
-work=$(mktemp -d)
-pnpm seed prepare "$work"
+pnpm seed prepare ../engine-webgpu-preview
 ```
 
-Preparation uses the current engine commit and the Seed template revision `experimental/engine-next@679453a52`. It fetches the pinned Seed commit from the official repository if needed. It overlays Seed's native engine changes (including grass feedback, realtime IBL and SSR), applies the integration patch and compiles the shared shader catalog for GLES 3 and WGSL. The two production bundles and their source revisions are recorded under the specified directory. The templates load their original CDN assets at runtime.
+The renderer comes from the current engine commit (`HEAD`). The Seed World demo, templates and engine extensions for features such as grass feedback, realtime IBL and SSR come from [the pinned `experimental/engine-next` commit](https://github.com/galacean/engine/commit/679453a52c8aa874b81124b9990320f9580369a8). `prepare` fetches that Git object if needed, applies the integration patch from this branch and compiles the shared shader catalog for GLES 3 and WGSL. The templates load their original CDN assets at runtime.
 
 ## Run
 
-Start these previews from the checkout using the same working directory. Each command prints direct links to both templates.
+From the engine checkout, run the command for the backend you want. To compare both, run one command per terminal. Each prints links to both templates. Another terminal on the same machine can reuse the prepared directory immediately.
 
 ```sh
-pnpm seed serve "$work" --backend webgl2 &
-pnpm seed serve "$work" --backend webgpu
+pnpm seed serve ../engine-webgpu-preview --backend webgpu
+pnpm seed serve ../engine-webgpu-preview --backend webgl2
 ```
 
 | Template | WebGL2 | WebGPU |
@@ -31,4 +32,17 @@ pnpm seed serve "$work" --backend webgpu
 
 Use a WebGPU-capable browser for the WebGPU preview. Compare the two backends in the foreground with the same template, seed, browser window size and device pixel ratio. Use `--port` to change the port and `fps=0` to hide the counter.
 
-After committing engine changes, rebuild the engine packages, run `pnpm seed prepare "$work"` again and restart the two previews. Previously prepared bundles stay in the working directory so existing servers can finish using them.
+To check exactly what you are serving, read `../engine-webgpu-preview/seed-preview.json`. Its `engine` and `seed` fields identify the source commits, and `build` selects the active build directory. After committing engine changes, rerun `pnpm b:module` and `pnpm seed prepare ../engine-webgpu-preview`, then restart the preview.
+
+## Open on a phone
+
+The preview command listens on the computer's loopback address. For a phone on the same Wi-Fi, serve the generated WebGPU directory as the HTTPS document root. Use a hostname that resolves to the computer's LAN address and a matching certificate the phone trusts.
+
+For example, with Python 3.14 and the paths to the certificate chain and private key in `SEED_TLS_CERT` and `SEED_TLS_KEY`, run this from the engine checkout
+
+```sh
+webgpu_dir=$(node -p 'require("node:path").resolve("../engine-webgpu-preview", require("../engine-webgpu-preview/seed-preview.json").build, "webgpu")')
+python3.14 -m http.server 8443 --directory "$webgpu_dir" --tls-cert "$SEED_TLS_CERT" --tls-key "$SEED_TLS_KEY"
+```
+
+Open `https://<hostname>:8443/world/demos/seed-world/index.html?template=titan-wasteland&seed=20261122&view=3d&fps=1` on the phone. For cherry blossoms, use `template=sakura-pearl`. The served bundle determines the backend. To compare WebGL2 on the phone, serve the sibling `webgl2` directory on a second HTTPS port and keep the template URL parameters identical.
