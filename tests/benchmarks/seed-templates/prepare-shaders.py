@@ -46,6 +46,15 @@ def merge_shader(name, ours, base, seed, scratch):
 
 
 def native_coordinates(root):
+    # The camera reverses projection winding for native cube attachments. These
+    # two fullscreen passes write clip coordinates directly, bypassing that camera.
+    for name in ("RealtimeIBLResolve", "RealtimeIBLAccumulate"):
+        file = root / "Shaders/Lighting" / (name + ".shader")
+        source = file.read_text()
+        line = "        gl_Position.y *= -1.0;"
+        if source.count(line) != 1:
+            raise ValueError("Cannot find the cube-face clip transform in " + name)
+        file.write_text(source.replace(line, "        #ifndef GRAPHICS_API_WEBGPU\n" + line + "\n        #endif"))
     library = root / "ShaderLibrary/Lighting/ScreenSpaceReflection"
     common = library / "ScreenSpaceReflectionCommon.glsl"
     source = common.read_text().replace(
