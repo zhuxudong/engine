@@ -20,6 +20,7 @@ import {
 } from "./StageInterface";
 import { poolSamplerBindings, removeUnusedSamplers } from "./SamplerBindings";
 import { lowerOutputArguments } from "./OutputArguments";
+import { lowerReturningSwitches } from "./SwitchCases";
 import { flattenUniformResources, recoverUniforms } from "./UniformDeclarations";
 import { describeTextureBindings, fitTextureBindings } from "./TextureBindings";
 import { ShaderMacroProcessor } from "@galacean/engine-core";
@@ -65,6 +66,9 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
       stages = [tokens(recovered.vertexSource), tokens(recovered.fragmentSource)];
       decls = stages.map(declarations);
       options = { ...options, uniformBlocks: [...(options.uniformBlocks ?? []), ...recovered.uniformBlocks] };
+    }
+    for (let s = 0; s < stages.length; s++) {
+      if (lowerReturningSwitches(stages[s])) decls[s] = declarations(stages[s]);
     }
     const groupBinding = [0, 0, 0, 0];
     const reflection: IWebGPUShaderReflection = {
