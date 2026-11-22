@@ -134,6 +134,63 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     }
   });
 
+  it("restores a uniform-only group after a bundled draw uses a sampled group in the same slot", async () => {
+    const device = rhi.device;
+    const format = "rgba8unorm";
+    const output = device.createTexture({ size: [1, 1], format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const uniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM });
+    const module = device.createShaderModule({
+      code: `@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+         return vec4f(vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2 - 1, 0, 1);
+       }
+       @group(0) @binding(0) var<uniform> u: vec4f;
+       @group(0) @binding(1) var s: sampler;
+       @group(0) @binding(2) var t: texture_2d<f32>;
+       @fragment fn solid() -> @location(0) vec4f { return u; }
+       @fragment fn sampled() -> @location(0) vec4f { return textureSample(t, s, vec2f(0)); }`
+    });
+    const pipeline = (entryPoint: string) =>
+      device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module, entryPoint: "vs" },
+        fragment: { module, entryPoint, targets: [{ format }] }
+      });
+    const solid = pipeline("solid"),
+      sampled = pipeline("sampled");
+    const a = device.createBindGroup({
+      layout: solid.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: uniform } }]
+    });
+    const texture = device.createTexture({ size: [1, 1], format, usage: GPUTextureUsage.TEXTURE_BINDING });
+    const b = device.createBindGroup({
+      layout: sampled.getBindGroupLayout(0),
+      entries: [
+        { binding: 1, resource: device.createSampler() },
+        { binding: 2, resource: texture.createView() }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: output.createView(), loadOp: "clear", clearValue: [0, 0, 0, 0], storeOp: "store" }]
+    });
+    const bundles = rhi["_bundles"];
+    bundles.begin(pass, output, "alternating groups", [format], undefined, 1, true);
+    const offsets = new Uint32Array(0);
+    for (const usesTexture of [false, true, false]) {
+      bundles.beginDraw();
+      bundles.setPipeline(usesTexture ? sampled : solid);
+      rhi._setBindGroup(bundles, 0, usesTexture ? b : a, offsets, usesTexture);
+      bundles.draw(3);
+    }
+    bundles.end();
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    uniform.destroy();
+    texture.destroy();
+    output.destroy();
+  });
+
   it("keeps both draws when an external UInt8 index buffer and a uniform range are overwritten in one frame", async () => {
     const color = new Texture2D(engine, 8, 4, TextureFormat.R8G8B8A8_UNorm, false, false);
     const target = new RenderTarget(engine, 8, 4, color, null);
