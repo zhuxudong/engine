@@ -95,13 +95,14 @@ try {
               mode,
               frames,
               warmup,
+              ...(mode === "throughput" && { blockFrames: Number(process.env.BLOCK_FRAMES || 15) }),
               width,
               height,
               gpuPassTimings: process.env.PASS_TIMINGS === "1",
               ...(profileCpu && { profileCpu }),
               ...(uploadSources && { uploadSources }),
               path: cameraPath,
-              image: mode === "cpu"
+              image: mode === "cpu" || mode === "throughput"
             };
             const result = await page.evaluate(
               (options) => globalThis.measureSeedTemplate(undefined, options),
@@ -137,6 +138,7 @@ try {
               JSON.stringify({
                 cpu: result.cpuUpdateMs,
                 gpu: result.gpuMs,
+                ...(mode === "throughput" && { completedMsPerFrame: result.throughput.millisecondsPerFrame }),
                 errors: errors.length,
                 validation: validation.count
               })

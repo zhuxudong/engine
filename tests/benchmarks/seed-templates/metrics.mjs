@@ -715,6 +715,48 @@ function distribution(values) {
   return { samples: sorted.length, median: percentile(0.5), p90: percentile(0.9), p99: percentile(0.99) };
 }
 
+/** Time real update submissions in blocks, including completion of the last submission in each block. */
+export async function measureSubmissionBlocks({
+  frames,
+  blockFrames,
+  update,
+  drain,
+  completed,
+  yieldTask,
+  afterBlock,
+  now = () => performance.now()
+}) {
+  if (!Number.isInteger(frames) || frames < 1 || !Number.isInteger(blockFrames) || blockFrames < 1)
+    throw Error("Invalid submission block length.");
+  const blocks = [];
+  let totalMs = 0;
+  for (let first = 0; first < frames; first += blockFrames) {
+    await yieldTask();
+    await drain();
+    const count = Math.min(blockFrames, frames - first);
+    const before = completed();
+    const start = now();
+    for (let index = first; index < first + count; ++index) update(index);
+    await drain();
+    const milliseconds = now() - start;
+    if (completed() - before !== count || !Number.isFinite(milliseconds) || milliseconds <= 0)
+      throw Error("Incomplete or invalid submission block.");
+    blocks.push({ first, frames: count, milliseconds, msPerFrame: milliseconds / count });
+    totalMs += milliseconds;
+    afterBlock?.(first + count - 1);
+  }
+  return {
+    blockFrames,
+    frames,
+    totalMs,
+    millisecondsPerFrame: totalMs / frames,
+    completedFramesPerSecond: (1000 * frames) / totalMs,
+    blockDurationMs: distribution(blocks.map((b) => b.milliseconds)),
+    blockMsPerFrame: distribution(blocks.map((b) => b.msPerFrame)),
+    blocks
+  };
+}
+
 /** Run one freshly loaded template/variant per page. Pass a reference run's returned path to each comparison. */
 export async function measureSeedTemplate(context = globalThis.__seedBenchmarkContext, options = {}) {
   const { engine, camera, navigation, orbit } = context;
@@ -738,7 +780,8 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
     warmup < 0 ||
     !Number.isInteger(gpuStride) ||
     gpuStride < 1 ||
-    !["cpu", "gpu"].includes(mode)
+    !["cpu", "gpu", "throughput"].includes(mode) ||
+    (mode === "throughput" && (warmup < 1 || options.frameBoundaries || options.profileCpu || options.uploadSources))
   )
     throw Error("Invalid measurement parameters.");
   const state = globalThis[stateKey];
@@ -825,19 +868,83 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
         this._frameCount++;
       })
     );
+    let warmupDraws;
     for (let i = 0; i < warmup; ++i) {
       await frame();
       // Traverse the measured route to compile visible material/LOD variants before sampling.
       applyPath(transform, path, warmup > 1 ? i / (warmup - 1) : 0);
       if (i === warmup - 1 && timer?.calibrate) timer.calibrate(() => engine.update());
+      else if (i === warmup - 1 && mode === "throughput")
+        warmupDraws = oneFrameDraws(gl, state, engine, () => engine.update());
       else engine.update();
     }
     let previous,
       skipNextInterval = true;
     const update = () => engine.update();
     const effects = status(context, world, subtree);
-    let captured;
-    for (let i = 0; i < frames; ++i) {
+    let captured, throughput;
+    if (mode === "throughput") {
+      let completed = 0,
+        submissions = 0;
+      const blockFrames = options.blockFrames ?? 15;
+      let expectedPosition, expectedDirection;
+      const endFrame = renderer.endFrame;
+      undo.push(
+        replace(renderer, "endFrame", function () {
+          endFrame.call(this);
+          // WebGPU endFrame already submits the command encoder. Give GL the same frame submission boundary.
+          gl?.flush();
+          ++completed;
+        })
+      );
+      if (device) {
+        const submit = device.queue.submit;
+        undo.push(
+          replace(device.queue, "submit", function (buffers) {
+            submit.call(this, buffers);
+            ++submissions;
+          })
+        );
+      }
+      throughput = await measureSubmissionBlocks({
+        frames,
+        blockFrames,
+        drain: gl ? () => gl.finish() : () => device.queue.onSubmittedWorkDone(),
+        yieldTask: () => new Promise((resolve) => setTimeout(resolve, 0)),
+        completed: () => completed,
+        update: (index) => {
+          applyPath(transform, path, index / (frames - 1));
+          if ((index + 1) % blockFrames === 0 || index === frames - 1) {
+            expectedPosition = triple(transform.worldPosition);
+            expectedDirection = triple(transform.worldForward);
+          }
+          const before = submissions;
+          update();
+          if (device && before === submissions) throw Error("An engine update submitted no WebGPU work.");
+        },
+        afterBlock: (index) => {
+          // Read back only once, after the final native completion fence and outside its timing interval.
+          if (index === frames - 1) captured = pixels(canvas, image);
+          if (step !== warmup + index + 1) throw Error("Unexpected simulation frame count.");
+          const actual = triple(transform.worldPosition),
+            direction = triple(transform.worldForward);
+          usedPath.push({ frame: index, position: actual, rotation: triple(transform.worldRotation) });
+          if (
+            actual.some((v, i) => Math.abs(v - expectedPosition[i]) > 0.02) ||
+            direction.some((v, i) => Math.abs(v - expectedDirection[i]) > 0.001)
+          )
+            throw Error("Template overwrote the benchmark camera path.");
+          if (index === frames - 1) inspections.push({ frame: index, ...snapshot(context, world) });
+        }
+      });
+      Object.assign(throughput, {
+        completion: gl ? "WebGL2.finish" : "GPUQueue.onSubmittedWorkDone",
+        engineFrames: completed,
+        nativeSubmissions: device ? submissions : null,
+        warmupDraws
+      });
+    }
+    for (let i = 0; mode !== "throughput" && i < frames; ++i) {
       if (options.profileCpu && i > 0 && checkpoints.has(i) && !checkpoints.has(i - 1)) {
         await globalThis.__seedProfileCpu("stop", i - 1);
       }
@@ -926,6 +1033,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
       ...(timer?.diagnostics && { gpuTimingDiagnostics: timer.diagnostics }),
       gpuMs: distribution(gpu.map((x) => x.milliseconds)),
       gpuSamples: gpu,
+      ...(throughput && { throughput }),
       ...(boundaries && { frameBoundariesEpochMs: [...boundaries, performance.timeOrigin + (await frame())] }),
       webglErrors,
       ...captured
