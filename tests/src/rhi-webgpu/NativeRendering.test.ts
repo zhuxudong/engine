@@ -98,6 +98,42 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     }
   });
 
+  it("preserves physical group numbers and omits unused trailing slots from raster layouts", () => {
+    const createLayout = vi.spyOn(rhi.device, "createPipelineLayout");
+    try {
+      const program = rhi.createPlatformShaderProgram(engine, {
+        vertexSource: "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0,0,0,1); }",
+        fragmentSource:
+          "@group(2) @binding(0) var<uniform> value: vec4f; @fragment fn main() -> @location(0) vec4f { return value; }",
+        reflection: {
+          vertexInputs: [],
+          vertexOutputs: [],
+          fragmentOutputs: [0],
+          textures: [],
+          uniformBlocks: [
+            {
+              name: "Material",
+              bindingName: "Material",
+              physicalBinding: 3,
+              group: 2,
+              binding: 0,
+              visibility: GPUShaderStage.FRAGMENT,
+              byteLength: 16,
+              members: []
+            }
+          ]
+        }
+      });
+      const groups = Array.from(createLayout.mock.calls[0][0].bindGroupLayouts);
+      expect(groups.length).toBe(3);
+      expect(groups.slice(0, 2)).toEqual([null, null]);
+      expect(groups[2]).toBeTruthy();
+      program.destroy();
+    } finally {
+      createLayout.mockRestore();
+    }
+  });
+
   it("keeps both draws when an external UInt8 index buffer and a uniform range are overwritten in one frame", async () => {
     const color = new Texture2D(engine, 8, 4, TextureFormat.R8G8B8A8_UNorm, false, false);
     const target = new RenderTarget(engine, 8, 4, color, null);

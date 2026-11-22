@@ -36,6 +36,7 @@ import {
 import { Texture, TextureWrapMode, TextureFilterMode, TextureDepthCompareFunction } from "@galacean/engine-core";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { GLBuffer } from "./GLBuffer";
+import { GLPrimitiveFormats } from "./GLPrimitiveFormats";
 import { GLCapability } from "./GLCapability";
 import { GLExtensions } from "./GLExtensions";
 import { GLPrimitive } from "./GLPrimitive";
@@ -195,6 +196,8 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   /** @internal */
   readonly _options: WebGLGraphicDeviceOptions;
   private _webGLOptions: WebGLContextAttributes & { xrCompatible?: boolean };
+  /** @internal */
+  _primitiveFormats: GLPrimitiveFormats;
   private _gl: WebGL2RenderingContext;
   private _renderStates: GLRenderStates;
   private _extensions: GLExtensions;
@@ -298,6 +301,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
         throw new Error("WebGL2 is not supported.");
       }
       this._gl = gl;
+      this._primitiveFormats = new GLPrimitiveFormats(gl);
       this._initGLState(gl);
     } finally {
       webCanvas.removeEventListener("webglcontextcreationerror", this._onContextCreationError, false);
@@ -344,7 +348,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   createPlatformTransformFeedbackPrimitive(): IPlatformTransformFeedbackPrimitive {
-    return new GLTransformFeedbackPrimitive(this._gl);
+    return new GLTransformFeedbackPrimitive(this);
   }
 
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void {

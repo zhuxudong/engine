@@ -69,6 +69,14 @@ export class WebGPUBuffer implements IPlatformBuffer {
     return offset;
   }
 
+  /** Vertex and index bindings expose the entire allocation to a recorded draw. */
+  _useForDraw(): GPUBuffer {
+    this._serial = this._device.submissionSerial;
+    this._usedStart = 0;
+    this._usedEnd = this.byteLength;
+    return this._gpuBuffer;
+  }
+
   _markUsed(offset = 0, size = this.byteLength): void {
     const serial = this._device.submissionSerial;
     if (this._serial !== serial) {

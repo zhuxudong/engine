@@ -37,7 +37,9 @@ export async function verifyRecovery(engine, waitForVisibility) {
   const before = await sample(1, 0);
   const visibility = [document.visibilityState];
   if (waitForVisibility) {
-    document.querySelector("#result").dataset.recovery = "awaiting-background";
+    const result = document.querySelector("#result");
+    result.textContent = "Switch to another app, then return to check device recovery.";
+    result.dataset.recovery = "awaiting-background";
     await new Promise((resolve) => {
       function onChange() {
         visibility.push(document.visibilityState);

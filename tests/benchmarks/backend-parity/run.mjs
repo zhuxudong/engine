@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { compareImages } from "./compare.mjs";
+import { compareImages, withinTolerance } from "./compare.mjs";
 
 const examples = [
   "ui-batch-order",
@@ -145,7 +145,7 @@ try {
             const reference = await readGolden(entry);
             const golden = await page.evaluate(compareImages, [reference.toString("base64"), actual.image]);
             console.log(backend, entry, "gallery reference", JSON.stringify(golden));
-            if (golden.meanRGB > 3 || golden.changedFraction > 0.025) {
+            if (!withinTolerance(golden)) {
               console.error(backend, entry, "Image differs from the existing gallery reference.");
               failures++;
             }
@@ -158,8 +158,7 @@ try {
           if (!reference) throw new Error("Missing WebGL2 capture for this scene.");
           const delta = await page.evaluate(compareImages, [reference, actual.image]);
           console.log(entry, JSON.stringify(delta));
-          if (delta.meanRGB > 3 || delta.changedFraction > 0.025)
-            throw new Error("Image differs from the WebGL2 reference.");
+          if (!withinTolerance(delta)) throw new Error("Image differs from the WebGL2 reference.");
         } catch (error) {
           console.error(backend, entry, error.message, errors.slice(0, 3));
           failures++;

@@ -1,7 +1,6 @@
 import { Engine } from "../Engine";
 import { GraphicsResource } from "../asset/GraphicsResource";
 import type { IPlatformPrimitive, IPlatformShaderProgram } from "../renderingHardwareInterface";
-import { BufferUtil } from "./BufferUtil";
 import { IndexBufferBinding } from "./IndexBufferBinding";
 import { SubPrimitive } from "./SubPrimitive";
 import { VertexBufferBinding } from "./VertexBufferBinding";
@@ -14,16 +13,15 @@ import type { WebGPUShaderInputType } from "@galacean/engine-design";
  * Primitive.
  */
 export class Primitive extends GraphicsResource {
+  // Independently uploaded meshes frequently use the same vertex input types.
+  // Keep one descriptor for those meshes without retaining an unbounded set of user layouts.
+  private static _lastShaderInputs?: { key: string; types: Record<string, WebGPUShaderInputType> };
   enableVAO: boolean = true;
   instanceCount: number = 0;
   vertexBufferBindings: (VertexBufferBinding | null)[] = [];
 
   /** @internal */
   _vertexElementMap: Record<string, VertexElement> = {};
-  /** @internal */
-  _glIndexType: number | undefined;
-  /** @internal */
-  _glIndexByteCount: number;
   /** @internal */
   _bufferStructChanged: boolean = false;
 
@@ -46,9 +44,11 @@ export class Primitive extends GraphicsResource {
             ? "uint"
             : "float";
       types[element.attribute] = type;
-      fields.push(element.attribute + ":" + type);
+      fields.push(element.attribute.length + ":" + element.attribute + ":" + type);
     }
-    return (this._shaderInputs = { key: fields.sort().join(","), types });
+    const key = fields.sort().join(",");
+    const previous = Primitive._lastShaderInputs;
+    return (this._shaderInputs = previous?.key === key ? previous : (Primitive._lastShaderInputs = { key, types }));
   }
 
   get vertexElements(): VertexElement[] {
@@ -162,14 +162,8 @@ export class Primitive extends GraphicsResource {
     if (lastBinding !== binding) {
       this._indexBufferBinding = binding;
       referCount > 0 && lastBinding?.buffer._addReferCount(-referCount);
-      if (binding) {
-        referCount > 0 && binding.buffer._addReferCount(referCount);
-        this._glIndexType = BufferUtil._getGLIndexType(binding.format);
-        this._glIndexByteCount = BufferUtil._getGLIndexByteCount(binding.format);
-      } else {
-        this._glIndexType = undefined;
-      }
-      this._bufferStructChanged = lastBinding?.buffer !== binding?.buffer;
+      if (referCount > 0) binding?.buffer._addReferCount(referCount);
+      this._bufferStructChanged ||= lastBinding?.buffer !== binding?.buffer;
     }
   }
 

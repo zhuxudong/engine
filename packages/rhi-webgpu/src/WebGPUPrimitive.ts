@@ -1,4 +1,5 @@
 import {
+  type Buffer,
   IndexFormat,
   type IPlatformPrimitive,
   type IPlatformShaderProgram,
@@ -10,6 +11,7 @@ import {
 import type { IPlatformShaderSource } from "@galacean/engine-core";
 interface VertexStream {
   binding: number;
+  buffer: Buffer;
   rate: number;
   slot: number;
   expanded?: GPUBuffer;
@@ -37,11 +39,13 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   readonly primitive: Primitive;
 
   private readonly _device: WebGPUGraphicDevice;
+  private _layoutDevice: GPUDevice;
   private readonly _layouts = new Map<readonly IShaderVertexInputReflection[], VertexLayout>();
   private _emulation?: WebGPUPrimitiveEmulation;
 
   constructor(device: WebGPUGraphicDevice, primitive: Primitive) {
     this._device = device;
+    this._layoutDevice = device.device;
     this.primitive = primitive;
   }
 
@@ -70,13 +74,18 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     }
     const binding = this.primitive.indexBufferBinding;
     if (!binding) return undefined;
-    const buffer = binding.buffer._platformBuffer as WebGPUBuffer;
-    return binding.format === IndexFormat.UInt8 ? buffer._getUInt16Indices() : buffer._gpuBuffer;
+    if (binding.format === IndexFormat.UInt8)
+      return (binding.buffer._platformBuffer as WebGPUBuffer)._getUInt16Indices();
   }
 
   /** @internal */
   _getVertexState(inputs: readonly IShaderVertexInputReflection[]): VertexLayout {
-    if (this.primitive._bufferStructChanged) this._layouts.clear();
+    if (this._layoutDevice !== this._device.device) {
+      this._layoutDevice = this._device.device;
+      this._emulation?.destroy();
+      this._emulation = undefined;
+      this._layouts.clear();
+    } else if (this.primitive._bufferStructChanged) this._layouts.clear();
     const cached = this._layouts.get(inputs);
     if (cached) return cached;
     const locations = new Map(inputs.map((input) => [input.name, input.location]));
@@ -115,7 +124,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       for (const [instanceStepRate, attributes] of byRate) {
         const slot = first ? bindingIndex : buffers.length;
         first = false;
-        streams.push({ binding: bindingIndex, rate: instanceStepRate, slot });
+        streams.push({ binding: bindingIndex, buffer: binding.buffer, rate: instanceStepRate, slot });
         attributes.sort((left, right) => left.shaderLocation - right.shaderLocation);
         buffers[slot] = {
           arrayStride: binding.stride,
@@ -182,9 +191,8 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     const { defaultBufferSlot, streams } = vertex;
     for (let i = 0; i < streams.length; i++) {
       const stream = streams[i];
-      const buffer = primitive.vertexBufferBindings[stream.binding]!.buffer._platformBuffer as WebGPUBuffer;
-      buffer._markUsed();
-      this._device._setVertexBuffer(pass, stream.slot, stream.expanded ?? buffer._gpuBuffer);
+      const buffer = (stream.buffer._platformBuffer as WebGPUBuffer)._useForDraw();
+      this._device._setVertexBuffer(pass, stream.slot, stream.expanded ?? buffer);
     }
     if (defaultBufferSlot !== undefined) {
       this._device._setVertexBuffer(pass, defaultBufferSlot, this._device._getDefaultVertexBuffer());
@@ -197,9 +205,8 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       pass.drawIndexed(this._emulation!.expandedCount(subPrimitive), instanceCount);
     } else if (indexBinding) {
       const format = this._indexFormat();
-      const buffer = indexBinding.buffer._platformBuffer as WebGPUBuffer;
-      buffer._markUsed();
-      this._device._setIndexBuffer(pass, indexBuffer!, format);
+      const native = (indexBinding.buffer._platformBuffer as WebGPUBuffer)._useForDraw();
+      this._device._setIndexBuffer(pass, indexBuffer ?? native, format);
       pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
     } else {
       pass.draw(subPrimitive.count, instanceCount, subPrimitive.start, 0);

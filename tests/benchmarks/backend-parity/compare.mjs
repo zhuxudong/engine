@@ -42,6 +42,11 @@ export async function compareImages([a, b]) {
   };
 }
 
+/** Shared tolerances for the gallery and the standalone framebuffer comparison. */
+export function withinTolerance({ meanRGB, changedFraction }) {
+  return meanRGB <= 3 && changedFraction <= 0.025;
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   if (process.argv.length !== 4) throw new Error("Pass a reference image and a captured image.");
   const images = await Promise.all(
@@ -50,7 +55,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    console.log(JSON.stringify(await page.evaluate(compareImages, images), null, 2));
+    const delta = await page.evaluate(compareImages, images);
+    console.log(JSON.stringify(delta, null, 2));
+    if (!withinTolerance(delta)) process.exitCode = 1;
   } finally {
     await browser.close();
   }

@@ -284,7 +284,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   };
   private _viewportDirty = true;
   private _scissorDirty = true;
-  private _appliedBlendConstant?: number[];
+  private readonly _appliedBlendConstant: GPUColorDict = { r: NaN, g: 0, b: 0, a: 0 };
   private _appliedStencilReference?: number;
   private _destroyed = false;
   private _renderPassLabel = "render";
@@ -890,6 +890,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._destroyed = true;
       this._endCurrentPass();
       this._computePipelines.clear();
+      this._vertexLayoutIds.clear();
       this._ops.destroy();
       this._gpuTimingProfiler.destroy();
       this._mainDepthTexture?.destroy();
@@ -1184,20 +1185,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     const blendColor = state.blendState.blendColor;
     const blendConstant = this._appliedBlendConstant;
     if (
-      !blendConstant ||
-      blendConstant[0] !== blendColor.r ||
-      blendConstant[1] !== blendColor.g ||
-      blendConstant[2] !== blendColor.b ||
-      blendConstant[3] !== blendColor.a
+      blendConstant.r !== blendColor.r ||
+      blendConstant.g !== blendColor.g ||
+      blendConstant.b !== blendColor.b ||
+      blendConstant.a !== blendColor.a
     ) {
       this._flushBundles();
-      pass.setBlendConstant({
-        r: blendColor.r,
-        g: blendColor.g,
-        b: blendColor.b,
-        a: blendColor.a
-      });
-      this._appliedBlendConstant = [blendColor.r, blendColor.g, blendColor.b, blendColor.a];
+      blendConstant.r = blendColor.r;
+      blendConstant.g = blendColor.g;
+      blendConstant.b = blendColor.b;
+      blendConstant.a = blendColor.a;
+      pass.setBlendConstant(blendConstant);
     }
     const stencilReference =
       customStates?.[RenderStateElementKey.StencilStateReferenceValue] ?? state.stencilState.referenceValue;
@@ -1208,19 +1206,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     }
   }
 
-  /**
-   * Set the active pipeline when it differs from the current render-pass state.
-   * @param pass - Active render-pass encoder.
-   * @param pipeline - Pipeline required by the next draw.
-   * @internal
-   */
+  /** @internal */
   _setBindGroup(
     pass: RenderDrawCommands | GPUComputePassEncoder,
     index: number,
     group: GPUBindGroup,
-    offsets: Uint32Array
+    offsets: Uint32Array,
+    containsTextures = false
   ): void {
-    if (pass !== this._renderPass && pass !== this._bundles) {
+    // Recording every sampled group for each bundled draw keeps its material views intact on
+    // WebKit's Metal backend when a later mesh switches textures. The finished bundle remains reusable.
+    if (pass === this._bundles ? containsTextures : pass !== this._renderPass) {
       pass.setBindGroup(index, group, offsets, 0, offsets.length);
       return;
     }
@@ -1426,7 +1422,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._resetDrawBindings();
     this._viewportDirty = true;
     this._scissorDirty = true;
-    this._appliedBlendConstant = undefined;
+    this._appliedBlendConstant.r = NaN;
     this._appliedStencilReference = undefined;
   }
 }

@@ -30,7 +30,7 @@ it.skipIf(!navigator.gpu)("draws an older shaderc with a runtime macro on its fi
             renderStates: { constantMap: {}, variableMap: {} },
             vertexShaderInstructions: [[0, "in vec3 POSITION; void main(){gl_Position=vec4(POSITION.xy,0.,1.);}"]],
             fragmentShaderInstructions: [
-              [0, "uniform float oldTint; out vec4 c; void main(){c=vec4(oldTint*USER_STRENGTH,0.,0.,1.);}"]
+              [0, "uniform float oldTint; out vec4 c; void main(){float r=oldTint*USER_STRENGTH;c=vec4(r,1.-r,0.,1.);}"]
             ]
           }
         ]
@@ -51,11 +51,13 @@ it.skipIf(!navigator.gpu)("draws an older shaderc with a runtime macro on its fi
     const material = new Material(engine, shader);
     renderer.setMaterial(material);
     material.shaderData.setFloat("oldTint", 0.5);
-    material.shaderData.enableMacro("USER_STRENGTH", "2.0");
-    camera.render();
     const bytes = new Uint8Array(4);
-    await texture.getPixelBufferAsync(8, 8, 1, 1, bytes);
-    expect([...bytes]).toEqual([255, 0, 0, 255]);
+    for (const strength of ["2.0", "0.0", "2.0"]) {
+      material.shaderData.enableMacro("USER_STRENGTH", strength);
+      camera.render();
+      await texture.getPixelBufferAsync(8, 8, 1, 1, bytes);
+      expect([...bytes]).toEqual(strength === "2.0" ? [255, 0, 0, 255] : [0, 255, 0, 255]);
+    }
     expect(await device.popErrorScope()).toBeNull();
   } finally {
     URL.revokeObjectURL(url);

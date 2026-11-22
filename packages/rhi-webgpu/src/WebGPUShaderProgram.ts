@@ -227,7 +227,12 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       });
       this._groupLayouts.push(device.createBindGroupLayout({ entries }));
     }
-    this._pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: this._groupLayouts });
+    // Some WebKit drivers count trailing null slots when validating a draw.
+    // Keep the full slot map for feedback kernels, which append storage resources at group 3.
+    const lastGroup = this._groups[this._groups.length - 1];
+    this._pipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: this._groupLayouts.slice(0, lastGroup ? lastGroup.index + 1 : 0)
+    });
   }
 
   bind(): boolean {
@@ -380,7 +385,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         i++;
       }
       if (dirty) group.cached = this._resolveGroup(index, group);
-      this._graphicDevice._setBindGroup(pass, index, group.cached!, group.offsets);
+      this._graphicDevice._setBindGroup(pass, index, group.cached!, group.offsets, group.textures.length > 0);
     }
   }
 
