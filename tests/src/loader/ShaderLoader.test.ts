@@ -34,6 +34,7 @@ afterEach(() => {
 // dev/2.0 at 3ea2e78f2 and the explicit-block compiler at 5b0ead9cc (both target 0).
 it.each([
   ["released-alpha59", "camera_LegacyTint"],
+  ["legacy-seed-text", "camera_LegacyTint"],
   ["legacy-global-uniform", "camera_LegacyTint"],
   ["legacy-explicit-uniform", "historicalTint"]
 ])("draws single and instanced meshes from historical %s.shaderc", async (fixture, property) => {
@@ -54,7 +55,7 @@ it.each([
   const material = new Material(engine, shader);
   renderer.setMaterial(material);
   const pixel = new Uint8Array(4);
-  if (fixture === "released-alpha59") {
+  if (fixture === "released-alpha59" || fixture === "legacy-seed-text") {
     camera.render();
     color.getPixelBuffer(8, 8, 1, 1, pixel);
     expect(Array.from(pixel)).toEqual([0, 0, 255, 255]);

@@ -104,6 +104,31 @@ it("preserves public leaf and array names when separating opaque struct resource
 });
 
 describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
+  it("compiles early-return picking variants while preserving conditional returns and later switch cases", async () => {
+    const source = `out vec4 color;
+      float pick(int id) {
+        if (id == 0) return 0.1;
+        float value;
+        switch (id) {
+          case 1: value = 0.4; break;
+          default: value = 0.5;
+        }
+        return value;
+        { float ignored = 0.2; }
+      }
+      void writePick() { color = vec4(pick(int(gl_FragCoord.x))); return; color = vec4(1.0); }
+      void main() { writePick(); }`;
+    const program = compiler.compileWebGPUVariant(vs, source);
+    const device = await (await navigator.gpu.requestAdapter())!.requestDevice();
+    try {
+      await validatePipeline(device, program, "early-return pick");
+      expect(program.fragment).toContain("0.4");
+      expect(program.fragment).toContain("0.5");
+    } finally {
+      device.destroy();
+    }
+  });
+
   it("writes back named and indexed vector output arguments at the call site", async () => {
     const vertex = "void main(){int i=gl_VertexID; gl_Position=vec4(vec2((i<<1)&2,i&2)*2.0-1.0,0.0,1.0);}";
     const fragment = `out vec4 color;
@@ -500,36 +525,39 @@ describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
       device.destroy();
     }
   }, 30000);
-  it("preserves the camera tint and macro branches in a released alpha.59 instruction asset", async () => {
-    const engine = await WebGPUEngine.create({ canvas: document.createElement("canvas") });
-    try {
-      engine.canvas.setResolution(16, 16);
-      const url = new URL("/fixtures/shader-loader/released-alpha59.shaderc", location.origin).href;
-      const shader = await engine.resourceManager.load<Shader>({ url, type: AssetType.Shader });
-      const scene = engine.sceneManager.activeScene;
-      const camera = scene.createRootEntity().addComponent(Camera);
-      camera.entity.transform.setPosition(0, 0, 3);
-      camera.isOrthographic = true;
-      camera.orthographicSize = 1;
-      camera.shaderData.setVector4("camera_LegacyTint", new Vector4(1, 0, 1, 1));
-      const color = new Texture2D(engine, 16, 16, undefined, false);
-      camera.renderTarget = new RenderTarget(engine, 16, 16, color);
-      const renderer = scene.createRootEntity().addComponent(MeshRenderer);
-      renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
-      const material = new Material(engine, shader);
-      renderer.setMaterial(material);
-      const pixel = new Uint8Array(4);
-      camera.render();
-      await color.getPixelBufferAsync(8, 8, 1, 1, pixel);
-      expect(Array.from(pixel)).toEqual([0, 0, 255, 255]);
-      material.shaderData.enableMacro("LEGACY_SHOW_TINT");
-      camera.render();
-      await color.getPixelBufferAsync(8, 8, 1, 1, pixel);
-      expect(Array.from(pixel)).toEqual([255, 0, 255, 255]);
-    } finally {
-      engine.destroy();
+  it.each(["released-alpha59", "legacy-seed-text"])(
+    "draws both camera tint branches of %s.shaderc",
+    async (fixture) => {
+      const engine = await WebGPUEngine.create({ canvas: document.createElement("canvas") });
+      try {
+        engine.canvas.setResolution(16, 16);
+        const url = new URL(`/fixtures/shader-loader/${fixture}.shaderc`, location.origin).href;
+        const shader = await engine.resourceManager.load<Shader>({ url, type: AssetType.Shader });
+        const scene = engine.sceneManager.activeScene;
+        const camera = scene.createRootEntity().addComponent(Camera);
+        camera.entity.transform.setPosition(0, 0, 3);
+        camera.isOrthographic = true;
+        camera.orthographicSize = 1;
+        camera.shaderData.setVector4("camera_LegacyTint", new Vector4(1, 0, 1, 1));
+        const color = new Texture2D(engine, 16, 16, undefined, false);
+        camera.renderTarget = new RenderTarget(engine, 16, 16, color);
+        const renderer = scene.createRootEntity().addComponent(MeshRenderer);
+        renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
+        const material = new Material(engine, shader);
+        renderer.setMaterial(material);
+        const pixel = new Uint8Array(4);
+        camera.render();
+        await color.getPixelBufferAsync(8, 8, 1, 1, pixel);
+        expect(Array.from(pixel)).toEqual([0, 0, 255, 255]);
+        material.shaderData.enableMacro("LEGACY_SHOW_TINT");
+        camera.render();
+        await color.getPixelBufferAsync(8, 8, 1, 1, pixel);
+        expect(Array.from(pixel)).toEqual([255, 0, 255, 255]);
+      } finally {
+        engine.destroy();
+      }
     }
-  });
+  );
 });
 
 async function validatePipeline(

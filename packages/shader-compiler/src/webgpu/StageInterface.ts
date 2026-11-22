@@ -27,6 +27,20 @@ export function tokens(source: string): string[] {
   // Historical instructions and raw GLSL may share one qualifier/type across
   // several resources. Each resource needs its own binding and declaration span.
   for (let i = 0; i < words.length; i++) {
+    // A baked picking or depth-only variant may return and leave its lighting code
+    // in the same block. Naga cannot emit WGSL with statements after a terminator.
+    if (words[i] === "return" && ["{", "}", ";", ":"].includes(words[i - 1])) {
+      const endReturn = words.indexOf(";", i + 1);
+      if (endReturn < 0) throw new Error("Unterminated GLSL return statement.");
+      let next = endReturn + 1;
+      while (next < words.length && !["}", "case", "default"].includes(words[next])) {
+        if (words[next] === "{") next = matching(words, next);
+        next++;
+      }
+      if (next > endReturn + 1) words.splice(endReturn + 1, next - endReturn - 1);
+      i = endReturn;
+      continue;
+    }
     if (words[i] !== "uniform") continue;
     const type = /^(?:lowp|mediump|highp)$/.test(words[i + 1]) ? i + 2 : i + 1;
     if (words[type + 1] === "{") {
