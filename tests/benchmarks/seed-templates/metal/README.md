@@ -15,6 +15,8 @@ python3 "$metal/analyze.py" "$RESULTS" --compress-exports
 
 The default workload visits Sakura Pearl and Titan Wasteland twice. Each comparison runs both backends in the same Chromium GPU process and the second pair reverses the order. Each page warms up for 90 frames and records 120 frames at 960 × 540, DPR 1. The other page stays paused and frozen. Xcode attaches directly to the GPU process and the capture checks its PID before and after each workload.
 
+The recorder starts Xcode using the Mac’s native CPU architecture and host-device default. It verifies that the PID supplied by Chromium belongs to a local GPU process. Analysis checks the recorded macOS hardware UUID and process ID against the capture manifest and requires native GPU activity during each workload.
+
 For module attribution, use a new output directory and include a contemporaneous full-scene visit. The stationary horizon route uses the [checked-in camera files](../horizon/README.md).
 
 ```sh

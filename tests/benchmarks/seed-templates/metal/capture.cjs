@@ -117,18 +117,21 @@ async function prepare(browser, backend, template, install) {
     throw e;
   }
 }
-async function recorder(pid, dir, group, developer, localDevice) {
+async function recorder(pid, dir, group, developer, nativeArch) {
+  const command = execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+  if (!/(?:^|\s)--type=gpu-process(?:\s|$)/.test(command)) throw Error("Expected a local Chromium GPU subprocess");
   const key = "com.galacean.seedmetal." + process.pid + "." + Math.random().toString(36).slice(2);
   const notify = spawn("/usr/bin/notifyutil", ["-1", key], { stdio: "ignore" });
   const ready = childEnd(notify);
   const log = createWriteStream(path.join(dir, "xctrace.log"));
   const proc = spawn(
-    "/usr/bin/xcrun",
+    "/usr/bin/arch",
     [
+      "-" + nativeArch,
+      "/usr/bin/xcrun",
       "xctrace",
       "record",
-      "--device",
-      localDevice,
+      // Omitting --device selects the host. The exported trace is also checked against the Mac's hardware UUID.
       "--template",
       "Metal System Trace",
       "--no-prompt",
@@ -193,6 +196,10 @@ async function main() {
     execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8" })
   )?.[1];
   if (!localDevice) throw Error("Cannot identify the local Mac for Metal System Trace.");
+  const nativeArch =
+    execFileSync("/usr/sbin/sysctl", ["-in", "hw.optional.arm64"], { encoding: "utf8" }).trim() === "1"
+      ? "arm64"
+      : "x86_64";
   if (
     ![frames, warmup, width, height].every(Number.isSafeInteger) ||
     frames < 4 ||
@@ -310,6 +317,7 @@ async function main() {
     const metadata = {
       gpuPid,
       localDevice,
+      nativeArch,
       browser: browser.version(),
       chromiumExecutable: env.CHANNEL || chromium.executablePath(),
       urls,
@@ -345,7 +353,7 @@ async function main() {
       try {
         for (const backend of group.order) pages.set(backend, await prepare(browser, backend, group.template, install));
         samePid(await pid(), gpuPid);
-        trace = await recorder(gpuPid, dir, group, developer, localDevice);
+        trace = await recorder(gpuPid, dir, group, developer, nativeArch);
         for (const [index, backend] of group.order.entries()) {
           const record = pages.get(backend);
           const { page, lifecycle, errors, url } = record;

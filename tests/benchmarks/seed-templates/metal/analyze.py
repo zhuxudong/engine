@@ -82,14 +82,17 @@ def samples(ns):
             "p99Ms": q(.99), "nonzero": sum(n > 0 for n in ns)}
 
 
-def origin_and_duration(toc, expected_pid=None):
+def origin_and_duration(toc, expected_pid=None, expected_device=None):
     run = ET.parse(toc).find(".//run")
     info = run.find("info")
     if info is None:
         raise ValueError("Trace lacks a run info section")
     target = info.find("target")
-    if target.find("device").get("platform") != "macOS":
+    device = target.find("device")
+    if device is None or device.get("platform") != "macOS":
         raise ValueError("The trace did not target the local desktop Mac")
+    if expected_device and device.get("uuid", "").lower() != expected_device.lower():
+        raise ValueError("Recorded Mac UUID differs from the capture host")
     if expected_pid is not None and not any(p.get("pid") == str(expected_pid) and p.get("type") == "attached"
                                            for p in target.findall("process")):
         raise ValueError("Recorded process differs from the browser GPU process")
@@ -144,7 +147,7 @@ def trace_report(directory, metadata, group, compress=False):
     group_pid = json.loads((base / f"0-{group['order'][0]}.json").read_text())["gpuPid"]
     if group_pid not in metadata.get("sessionPids", [metadata["gpuPid"]]):
         raise ValueError("Unrecognized local capture session")
-    origin, duration = origin_and_duration(xml["toc"], group_pid)
+    origin, duration = origin_and_duration(xml["toc"], group_pid, metadata.get("localDevice"))
     windows = []
     for i, backend in enumerate(group["order"]):
         file = base / f"{i}-{backend}.json"
