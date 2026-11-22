@@ -195,6 +195,47 @@ describe.skipIf(!navigator.gpu)("WebGPU compatibility inputs", () => {
     }
   });
 
+  it("reads a relocated LOD candidate range when a feedback input element changes in place", async () => {
+    const program = hardware.createPlatformShaderProgram(engine, {
+      vertexSource: `struct Result { @builtin(position) position: vec4f, @location(0) group: f32 }
+        @vertex fn main(@location(0) candidate: f32) -> Result { return Result(vec4f(0.0), candidate); }`,
+      fragmentSource: "@fragment fn main() {}",
+      feedbackVaryings: ["group"],
+      reflection: {
+        uniformBlocks: [],
+        textures: [],
+        fragmentOutputs: [],
+        vertexInputs: [{ name: "candidate", location: 0, type: "float", components: 1 }],
+        vertexOutputs: [{ name: "group", location: 0, type: "float", components: 1 }]
+      }
+    });
+    const source = new VertexBufferBinding(
+      new Buffer(engine, BufferBindFlag.VertexBuffer, new Float32Array([64, 128, 256, 512])),
+      4
+    );
+    const output = new VertexBufferBinding(new Buffer(engine, BufferBindFlag.VertexBuffer, 8), 4);
+    const elements = [new VertexElement("candidate", 0, VertexElementFormat.Float, 0)];
+    const kernel = hardware.createFeedbackCompute();
+    try {
+      kernel.bind(program, source, output, [], [source], elements);
+      kernel.dispatch(0, 2);
+      const result = new Float32Array(2);
+      await output.buffer.getDataAsync(result);
+      expect([...result]).toEqual([64, 128]);
+
+      elements[0].offset = 8;
+      kernel.bind(program, source, output, [], [source], elements);
+      kernel.dispatch(0, 2);
+      await output.buffer.getDataAsync(result);
+      expect([...result]).toEqual([256, 512]);
+    } finally {
+      kernel.destroy();
+      source.buffer.destroy();
+      output.buffer.destroy();
+      program.destroy();
+    }
+  });
+
   it("gathers each parent trajectory into the requested child slots without overwriting neighboring particles", async () => {
     const parent = new Float32Array(4 * 12);
     for (let i = 0; i < parent.length; i++) parent[i] = i + 0.5;

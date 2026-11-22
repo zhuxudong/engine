@@ -21,6 +21,15 @@ interface Kernel {
   groups: GroupCache;
 }
 
+/** Vertex fetch addresses are compiled into the compute shader. Elements can be edited in place. */
+function elementLayoutKey(elements: readonly VertexElement[]): string {
+  let key = "";
+  for (const { attribute, bindingIndex, offset, format, instanceStepRate } of elements) {
+    key += `${attribute.length}:${attribute},${bindingIndex},${offset},${format},${instanceStepRate};`;
+  }
+  return key;
+}
+
 const workgroupSize = 64;
 
 function entriesForBuffers(
@@ -47,7 +56,7 @@ function entriesForBuffers(
 /** Dispatches the selected particle simulation function over the active slots of the engine's particle ring. */
 export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
   private _device: GPUDevice;
-  private _kernels = new WeakMap<WebGPUShaderProgram, Kernel>();
+  private _kernels = new WeakMap<WebGPUShaderProgram, { layoutKey: string; kernel: Kernel }>();
   private _gatherKernel?: Kernel;
   private _kernel: Kernel;
   private _program: WebGPUShaderProgram;
@@ -71,13 +80,16 @@ export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
   ): void {
     this._checkDevice();
     const program = (this._program = platformProgram as WebGPUShaderProgram);
-    let kernel = this._kernels.get(program);
-    if (!kernel) {
+    let strides = `${read.stride},${write.stride}`;
+    for (const input of inputs) strides += "," + input.stride;
+    const layoutKey = `${strides}|${elementLayoutKey(feedbackElements)}|${elementLayoutKey(elements)}`;
+    let cached = this._kernels.get(program);
+    if (cached?.layoutKey !== layoutKey) {
       const source = feedbackShader(program, read.stride, write.stride, feedbackElements, inputs, elements);
-      kernel = this._createKernel(source, inputs.length + 1, program._groupLayouts.slice(0, 3));
-      this._kernels.set(program, kernel);
+      const kernel = this._createKernel(source, inputs.length + 1, program._groupLayouts.slice(0, 3));
+      this._kernels.set(program, (cached = { layoutKey, kernel }));
     }
-    this._kernel = kernel;
+    this._kernel = cached.kernel;
     this._bindings[0] = this._storage(read);
     for (let i = 0; i < inputs.length; i++) this._bindings[i + 1] = this._storage(inputs[i]);
     this._bindings.length = inputs.length + 2;
