@@ -1659,9 +1659,9 @@ diff --git a/packages/rhi-webgpu/src/WebGPUFeedbackKernel.ts b/packages/rhi-webg
    private _pageStart = 0;
    private _serial = -1;
 @@ -78,17 +79,21 @@
-       this._kernels.set(program, kernel);
+       this._kernels.set(program, (cached = { layoutKey, kernel }));
      }
-     this._kernel = kernel;
+     this._kernel = cached.kernel;
 -    this._bindings[0] = this._storage(read);
 +    if (read.buffer === write.buffer) {
 +      if (feedbackElements.length) throw new Error("In-place feedback with a read/write dependency is invalid.");
