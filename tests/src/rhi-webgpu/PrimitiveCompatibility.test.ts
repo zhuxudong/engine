@@ -112,6 +112,40 @@ describe.skipIf(!navigator.gpu)("WebGPU compatibility inputs", () => {
     expect([...output.subarray(0, 4)]).toEqual([41, 42, 43, 44]);
   });
 
+  it("dispatches a feedback vertex function with no input parameters", async () => {
+    const program = hardware.createPlatformShaderProgram(engine, {
+      vertexSource: `struct Result {
+        @builtin(position) position: vec4f,
+        @location(0) generated: f32,
+      }
+      @vertex fn main() -> Result { return Result(vec4f(0.0), 4.5); }`,
+      fragmentSource: "@fragment fn main() {}",
+      feedbackVaryings: ["generated"],
+      reflection: {
+        uniformBlocks: [],
+        textures: [],
+        vertexInputs: [],
+        fragmentOutputs: [],
+        vertexOutputs: [{ name: "generated", location: 0, type: "float", components: 1 }]
+      }
+    });
+    const input = new VertexBufferBinding(new Buffer(engine, BufferBindFlag.VertexBuffer, 16), 4);
+    const output = new VertexBufferBinding(new Buffer(engine, BufferBindFlag.VertexBuffer, 16), 4);
+    const kernel = hardware.createFeedbackCompute();
+    try {
+      kernel.bind(program, input, output, [], [], []);
+      kernel.dispatch(1, 2);
+      const result = new Float32Array(4);
+      await output.buffer.getDataAsync(result);
+      expect(Array.from(result)).toEqual([0, 4.5, 4.5, 0]);
+    } finally {
+      kernel.destroy();
+      input.buffer.destroy();
+      output.buffer.destroy();
+      program.destroy();
+    }
+  });
+
   it("gathers each parent trajectory into the requested child slots without overwriting neighboring particles", async () => {
     const parent = new Float32Array(4 * 12);
     for (let i = 0; i < parent.length; i++) parent[i] = i + 0.5;

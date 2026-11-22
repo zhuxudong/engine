@@ -8,6 +8,7 @@ import {
   type IWebGPUShaderProgram
 } from "@galacean/engine-design";
 import { WGSLBackend } from "./webgpu/WGSLBackend";
+import { ShaderInstructionEncoder } from "./ShaderInstructionEncoder";
 import type { InitInput } from "web-naga";
 
 /** Compile an instruction-based pass for a concrete macro set and vertex layout. */
@@ -21,8 +22,20 @@ export function compileWebGPUShaderPass(
   features.forEach((value, name) => macros.set(name, value));
   const vs: IShaderUniformSelection[] = [],
     fs: IShaderUniformSelection[] = [];
-  const v = ShaderMacroProcessor.evaluate(pass.vertexShaderInstructions!, macros, pass.uniformPlan?.vertex, vs);
-  const f = ShaderMacroProcessor.evaluate(pass.fragmentShaderInstructions!, macros, pass.uniformPlan?.fragment, fs);
+  const vertex = pass.vertexShaderInstructions!,
+    fragment = pass.fragmentShaderInstructions!;
+  const v = ShaderMacroProcessor.evaluate(
+    pass.uniformPlan ? vertex : ShaderInstructionEncoder.normalizeRawStage(vertex),
+    macros,
+    pass.uniformPlan?.vertex,
+    vs
+  );
+  const f = ShaderMacroProcessor.evaluate(
+    pass.uniformPlan ? fragment : ShaderInstructionEncoder.normalizeRawStage(fragment),
+    macros,
+    pass.uniformPlan?.fragment,
+    fs
+  );
   const variant = finalizeShaderUniforms(v, f, vs, fs, {
     maxBlockBytes: options.maxUniformBlockBytes ?? 16384,
     maxBindings: 24,
@@ -59,6 +72,7 @@ export async function createWebGPUShaderCompiler(moduleOrPath?: InitInput): Prom
     }
   });
   return {
+    normalizeRawStage: ShaderInstructionEncoder.normalizeRawStage,
     compileWebGPUVariant: backend.compileWebGPUVariant.bind(backend),
     compileDefaultVariant(program: IShaderInfo) {
       return compileWebGPUShaderPass(backend, program);

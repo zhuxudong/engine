@@ -16,6 +16,27 @@ export type { ShaderInstruction } from "@galacean/engine-design";
  * @internal
  */
 export class ShaderInstructionEncoder {
+  private static readonly _rawStages = new WeakMap<ShaderInstruction[], ShaderInstruction[]>();
+
+  /** Historical hand-authored stages can put preprocessor directives inside one Text instruction. */
+  static normalizeRawStage(instructions: ShaderInstruction[]): ShaderInstruction[] {
+    if (instructions.length !== 1 || instructions[0][0] !== ShaderPreprocessorDirective.Text) return instructions;
+    let stage = ShaderInstructionEncoder._rawStages.get(instructions);
+    if (!stage) {
+      stage = ShaderInstructionEncoder.parseRawStage(String(instructions[0][1])) ?? instructions;
+      ShaderInstructionEncoder._rawStages.set(instructions, stage);
+    }
+    return stage;
+  }
+
+  static parseRawStage(source: string): ShaderInstruction[] | undefined {
+    if (!/^[ \t]*#[ \t]*(?:if|ifdef|ifndef|define|undef)\b/m.test(source)) return;
+    const logicalSource = source
+      .replace(/\\(?:\r\n?|\n)/g, "")
+      .replace(/\/\*[\s\S]*?\*\//g, (s) => s.replace(/[^\r\n]/g, " "));
+    return ShaderInstructionEncoder.parse(logicalSource);
+  }
+
   private static _DIRECTIVE_RE = /^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif|define|undef)\b(.*)/;
   private static _FUNC_MACRO_RE = /^(\w+)\(([^)]*)\)\s*(.*)/;
 

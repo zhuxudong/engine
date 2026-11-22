@@ -1,3 +1,4 @@
+import { upgradeLegacyShaderStage } from "./upgradeLegacyShaderStage";
 import {
   finalizeShaderUniforms,
   type IShaderUniformBlock,
@@ -386,25 +387,20 @@ export class ShaderPass extends ShaderPart {
     macroMap.set("__VERSION__", "300");
 
     const plan = this._uniformPlan;
+    const normalize = !plan && engine._webGPUShaderCompiler?.normalizeRawStage;
+    const vertexInstructions = normalize ? normalize(this._vertexShaderInstructions) : this._vertexShaderInstructions;
+    const fragmentInstructions = normalize
+      ? normalize(this._fragmentShaderInstructions)
+      : this._fragmentShaderInstructions;
     const instancing = isGPUInstance ? plan?.instancing : undefined;
     const vertexSites: IShaderUniformSelection[] | undefined = plan ? [] : undefined;
     const fragmentSites: IShaderUniformSelection[] | undefined = plan ? [] : undefined;
-    let vertexSource = ShaderMacroProcessor.evaluate(
-      this._vertexShaderInstructions,
-      macroMap,
-      plan?.vertex,
-      vertexSites
-    );
-    let fragmentSource = ShaderMacroProcessor.evaluate(
-      this._fragmentShaderInstructions,
-      macroMap,
-      plan?.fragment,
-      fragmentSites
-    );
+    let vertexSource = ShaderMacroProcessor.evaluate(vertexInstructions, macroMap, plan?.vertex, vertexSites);
+    let fragmentSource = ShaderMacroProcessor.evaluate(fragmentInstructions, macroMap, plan?.fragment, fragmentSites);
     if (canUseBaked) {
       const [vertex, fragment] = (this._defaultWebGPUStages ??= [
-        evaluateDefaultStage(this._vertexShaderInstructions, plan?.vertex),
-        evaluateDefaultStage(this._fragmentShaderInstructions, plan?.fragment)
+        evaluateDefaultStage(vertexInstructions, plan?.vertex),
+        evaluateDefaultStage(fragmentInstructions, plan?.fragment)
       ]);
       if (
         matchesDefaultStage(vertex, vertexSource, vertexSites) &&
@@ -446,6 +442,10 @@ export class ShaderPass extends ShaderPart {
       instanceLayout = injected.instanceLayout;
     }
 
+    if (!plan) {
+      vertexSource = upgradeLegacyShaderStage(vertexSource, false);
+      fragmentSource = upgradeLegacyShaderStage(fragmentSource, true);
+    }
     const versionStr = "#version 300 es";
 
     return {

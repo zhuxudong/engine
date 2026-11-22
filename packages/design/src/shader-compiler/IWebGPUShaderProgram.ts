@@ -1,3 +1,4 @@
+import type { ShaderInstruction } from "./ICondition";
 import type { IShaderUniformBlock } from "./IShaderProgramSource";
 import type { IShaderProgramSource } from "./IShaderProgramSource";
 
@@ -80,6 +81,8 @@ export interface IWebGPUShaderOptions {
 }
 
 export interface IWebGPUShaderCompiler {
+  /** Expand embedded GLSL directives into instructions before evaluating a historical raw pass's active macros. */
+  normalizeRawStage?(instructions: ShaderInstruction[]): ShaderInstruction[];
   compileWebGPUVariant(
     vertexSource: string,
     fragmentSource: string,

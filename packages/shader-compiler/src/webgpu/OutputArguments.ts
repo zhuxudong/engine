@@ -4,7 +4,7 @@
  * mutable index operands in let bindings before the call. Reuse those operands on
  * writeback so nested calls, conditional execution and indexing keep their order. */
 export function lowerOutputArguments(source: string): string {
-  if (!/\(&[^\n]*(?:\.[xyzw]|\])\)/.test(source)) return source;
+  if (!source.includes("(&")) return source;
   const functions = new Set<string>();
   for (const signature of source.matchAll(/\bfn (\w+)\([^\n]*\bptr<function,/g)) functions.add(signature[1]);
   let prefix = "gs_output_arg";
@@ -15,6 +15,7 @@ export function lowerOutputArguments(source: string): string {
     const before: string[] = [];
     const after: string[] = [];
     const call: string[] = [];
+    const seen = new Set<string>();
     let start = 0;
     for (let index = line.indexOf("(&"); index >= 0; index = line.indexOf("(&", start)) {
       let end = index + 2;
@@ -25,8 +26,9 @@ export function lowerOutputArguments(source: string): string {
       }
       const target = line.slice(index + 2, end - 1);
       call.push(line.slice(start, index));
-      // Indexed output arguments also cover vector lanes addressed by a runtime index.
-      if (/(?:\.[xyzw]|\])$/.test(target)) {
+      // WGSL alias analysis treats fields from one struct as the same root.
+      // Copy subobjects, and repeated whole variables, using GLSL value/result semantics.
+      if (/(?:\.\w+|\])$/.test(target) || seen.has(target)) {
         const local = prefix + next++;
         before.push(indent + "var " + local + " = " + target + ";");
         call.push("(&" + local + ")");
@@ -34,6 +36,7 @@ export function lowerOutputArguments(source: string): string {
       } else {
         call.push(line.slice(index, end));
       }
+      seen.add(target);
       start = end;
     }
     if (!before.length) return line;

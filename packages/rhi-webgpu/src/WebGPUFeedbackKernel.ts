@@ -231,7 +231,7 @@ function feedbackShader(
   const fields = new Map<number, string>();
   for (const m of outputStruct[1].matchAll(/@location\((\d+)\)\s+(\w+)\s*:/g)) fields.set(Number(m[1]), m[2]);
   const values: string[] = [];
-  for (const arg of signature[1].split(",")) {
+  for (const arg of signature[1].trim() ? signature[1].split(",") : []) {
     const location = /@location\((\d+)\)/.exec(arg);
     if (!location) {
       if (!arg.includes("@builtin(vertex_index)")) throw new Error("Unsupported particle feedback builtin: " + arg);
