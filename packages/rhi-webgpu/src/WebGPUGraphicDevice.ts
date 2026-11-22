@@ -411,6 +411,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       requiredLimits: {
         maxSampledTexturesPerShaderStage: adapter.limits.maxSampledTexturesPerShaderStage,
         maxSamplersPerShaderStage: adapter.limits.maxSamplersPerShaderStage,
+        maxVertexBuffers: adapter.limits.maxVertexBuffers,
+        maxVertexAttributes: adapter.limits.maxVertexAttributes,
         ...options.requiredLimits
       }
     });

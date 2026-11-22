@@ -22,9 +22,11 @@ interface VertexLayout {
   key: number;
   streams: VertexStream[];
   expandedStreams: VertexStream[];
+  packedStreams?: WebGPUPackedVertexStream[];
 }
 type IShaderVertexInputReflection = NonNullable<IPlatformShaderSource["reflection"]>["vertexInputs"][number];
 import { WebGPUPrimitiveEmulation } from "./WebGPUPrimitiveEmulation";
+import { WebGPUPackedVertexStream } from "./WebGPUPackedVertexStream";
 import type { RenderDrawCommands } from "./WebGPUDrawBundles";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
@@ -55,10 +57,20 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
 
   destroy(): void {
     this._emulation?.destroy();
+    this._clearLayouts();
+  }
+
+  private _clearLayouts(): void {
+    for (const layout of this._layouts.values()) {
+      if (layout.packedStreams) for (const stream of layout.packedStreams) stream.destroy();
+    }
     this._layouts.clear();
   }
 
   _prepareIndexBuffer(sub: SubPrimitive, vertex: VertexLayout): GPUBuffer | undefined {
+    if (vertex.packedStreams) {
+      for (const stream of vertex.packedStreams) stream.prepare(this.primitive.instanceCount || 1);
+    }
     for (let i = 0; i < vertex.expandedStreams.length; i++) {
       const stream = vertex.expandedStreams[i];
       this._emulation ??= new WebGPUPrimitiveEmulation(this._device);
@@ -84,15 +96,15 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       this._layoutDevice = this._device.device;
       this._emulation?.destroy();
       this._emulation = undefined;
-      this._layouts.clear();
-    } else if (this.primitive._bufferStructChanged) this._layouts.clear();
+      this._clearLayouts();
+    } else if (this.primitive._bufferStructChanged) this._clearLayouts();
     const cached = this._layouts.get(inputs);
     if (cached) return cached;
     const locations = new Map(inputs.map((input) => [input.name, input.location]));
     const boundLocations = new Set<number>();
     const primitive = this.primitive;
     const bufferCount = primitive.vertexBufferBindings.length;
-    const buffers = new Array<GPUVertexBufferLayout | null>(bufferCount).fill(null);
+    const buffers: GPUVertexBufferLayout[] = [];
 
     const streams: VertexStream[] = [];
     for (let bindingIndex = 0; bindingIndex < bufferCount; bindingIndex++) {
@@ -120,10 +132,19 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
         boundLocations.add(shaderLocation);
       }
 
-      let first = true;
       for (const [instanceStepRate, attributes] of byRate) {
-        const slot = first ? bindingIndex : buffers.length;
-        first = false;
+        // A mesh binding index is engine metadata. Only shader-active physical streams need native slots.
+        const existing = streams.find(
+          (stream) =>
+            stream.buffer === binding.buffer &&
+            stream.rate === instanceStepRate &&
+            buffers[stream.slot].arrayStride === binding.stride
+        );
+        if (existing) {
+          (buffers[existing.slot].attributes as GPUVertexAttribute[]).push(...attributes);
+          continue;
+        }
+        const slot = buffers.length;
         streams.push({ binding: bindingIndex, buffer: binding.buffer, rate: instanceStepRate, slot });
         attributes.sort((left, right) => left.shaderLocation - right.shaderLocation);
         buffers[slot] = {
@@ -135,18 +156,57 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     }
 
     const missingInputs = inputs.filter((input) => !boundLocations.has(input.location));
+    const limits = this._device.device.limits;
+    const excess = buffers.length + Number(missingInputs.length > 0) - limits.maxVertexBuffers;
+    let packedStreams: WebGPUPackedVertexStream[] | undefined;
+    const requiresPack = (s: VertexStream) =>
+      WebGPUPackedVertexStream.requiresPacking(buffers[s.slot], limits.maxVertexBufferArrayStride);
+    if (excess > 0 || streams.some(requiresPack)) {
+      const selected = streams.filter(requiresPack);
+      let needed = excess;
+      for (const instance of [false, true]) {
+        needed -= Math.max(0, selected.filter((s) => Boolean(s.rate) === instance).length - 1);
+      }
+      for (const instance of [false, true]) {
+        if (needed <= 0) break;
+        const alreadyPacked = selected.some((s) => Boolean(s.rate) === instance);
+        const candidates = streams.filter((s) => Boolean(s.rate) === instance && !selected.includes(s));
+        const reserve = alreadyPacked ? 0 : 1;
+        if (candidates.length <= reserve) continue;
+        // Keep independent dynamic inputs as native vertex slots whenever static streams can absorb the excess.
+        candidates.sort((a, b) => a.buffer.bufferUsage - b.buffer.bufferUsage);
+        const count = Math.min(needed + reserve, candidates.length);
+        selected.push(...candidates.slice(0, count));
+        needed -= count - reserve;
+      }
+      const layouts = buffers.slice();
+      const direct = streams.filter((s) => !selected.includes(s));
+      streams.length = buffers.length = 0;
+      for (const stream of direct) {
+        const layout = layouts[stream.slot];
+        stream.slot = buffers.length;
+        streams.push(stream);
+        buffers.push(layout);
+      }
+      packedStreams = [];
+      for (const instance of [false, true]) {
+        const sources = selected
+          .filter((s) => Boolean(s.rate) === instance)
+          .map((s) => ({
+            buffer: s.buffer,
+            stride: layouts[s.slot].arrayStride,
+            rate: s.rate,
+            attributes: layouts[s.slot].attributes as GPUVertexAttribute[]
+          }));
+        if (!sources.length) continue;
+        const packed = new WebGPUPackedVertexStream(this._device, sources, buffers.length);
+        packedStreams.push(packed);
+        buffers.push(packed.layout);
+      }
+    }
     let defaultBufferSlot: number | undefined;
     if (missingInputs.length > 0) {
-      defaultBufferSlot = buffers.findIndex((buffer) => buffer === null);
-      if (defaultBufferSlot < 0) {
-        defaultBufferSlot = buffers.length;
-        buffers.push(null);
-      }
-      if (defaultBufferSlot >= this._device.device.limits.maxVertexBuffers) {
-        throw new Error(
-          `WebGPU primitive needs a fallback vertex buffer at slot ${defaultBufferSlot}, exceeding maxVertexBuffers ${this._device.device.limits.maxVertexBuffers}.`
-        );
-      }
+      defaultBufferSlot = buffers.length;
       buffers[defaultBufferSlot] = {
         arrayStride: 0,
         stepMode: "vertex",
@@ -158,6 +218,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       buffers,
       defaultBufferSlot,
       streams,
+      packedStreams,
       expandedStreams: streams.filter((stream) => stream.rate > 1),
       key: this._device._getVertexLayoutId(buffers)
     };
@@ -193,6 +254,9 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       const stream = streams[i];
       const buffer = (stream.buffer._platformBuffer as WebGPUBuffer)._useForDraw();
       this._device._setVertexBuffer(pass, stream.slot, stream.expanded ?? buffer);
+    }
+    if (vertex.packedStreams) {
+      for (const stream of vertex.packedStreams) this._device._setVertexBuffer(pass, stream.slot, stream.buffer!);
     }
     if (defaultBufferSlot !== undefined) {
       this._device._setVertexBuffer(pass, defaultBufferSlot, this._device._getDefaultVertexBuffer());
@@ -244,7 +308,8 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
     }
   }
 
-  private static _vertexFormat(format: VertexElementFormat): GPUVertexFormat {
+  /** @internal */
+  static _vertexFormat(format: VertexElementFormat): GPUVertexFormat {
     switch (format) {
       case VertexElementFormat.Float:
         return "float32";
