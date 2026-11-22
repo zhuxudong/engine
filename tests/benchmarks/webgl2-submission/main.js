@@ -108,12 +108,11 @@ const frame = () => new Promise(requestAnimationFrame);
 async function measure() {
   const scenario = new URLSearchParams(location.search).get("scene") ?? "S1";
   const canvas = document.querySelector("canvas");
-  if (scenario !== "S1") {
-    canvas.width = 640;
-    canvas.height = 360;
-  }
+  const width = scenario === "S1" ? 256 : 640;
+  const height = scenario === "S1" ? 256 : 360;
   const engine = await WebGLEngine.create({ canvas, graphicDeviceOptions: { antialias: false } });
   try {
+    engine.canvas.setResolution(width, height);
     const root = engine.sceneManager.activeScene.createRootEntity();
     const camera = root.createChild().addComponent(Camera);
     const setup =
@@ -140,6 +139,9 @@ async function measure() {
       cpu.push(performance.now() - start);
     }
     const gl = canvas.getContext("webgl2");
+    if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
+      throw new Error(`Unexpected benchmark resolution ${gl.drawingBufferWidth} × ${gl.drawingBufferHeight}`);
+    }
     await frame();
     const counts = countCalls(gl, () => {
       setup.beforeFrame?.(300);
