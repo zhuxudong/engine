@@ -167,9 +167,17 @@ export class GlobalUniformBlock {
     }
 
     let next = last < 0 ? 0 : last + this._stride;
-    const discard = next >= buffer.byteLength;
-    if (discard) next = 0;
-    if ((discard || contentLost) && ranges) {
+    const wrap = next >= buffer.byteLength;
+    let discard = wrap;
+    if (wrap) {
+      next = 0;
+      const platform = buffer._platformBuffer;
+      if (platform.restartUniformArena) {
+        platform.restartUniformArena();
+        discard = false;
+      }
+    }
+    if ((wrap || contentLost) && ranges) {
       // All offsets refer to the old store, even when its contents match the current values.
       for (let i = 0; i < ranges.length; ++i) ranges[i].offset = -1;
       this._nextMaterialRange = 0;

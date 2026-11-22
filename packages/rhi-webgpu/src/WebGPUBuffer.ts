@@ -45,6 +45,15 @@ export class WebGPUBuffer implements IPlatformBuffer {
 
   bind(): void {}
 
+  restartUniformArena(): void {
+    // Previous draws in this encoder retain their physical buffer. Untouched
+    // bytes in the new cycle cannot be observed and do not need a GPU clear.
+    if (this._serial === this._device.submissionSerial) {
+      this._rotateBacking();
+      this._serial = -1;
+    }
+  }
+
   writeInstanceData(data: Float32Array, activeWords: number, bindingSize: number): number {
     const serial = this._device.submissionSerial;
     const activeBytes = activeWords * Float32Array.BYTES_PER_ELEMENT;
