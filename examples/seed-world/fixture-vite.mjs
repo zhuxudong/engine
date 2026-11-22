@@ -1,22 +1,51 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { adaptSeedCapabilities } from "./fixture-capabilities.mjs";
-import { exposeSeedBenchmarkContext } from "./demo.mjs";
 
-const benchmark = path.dirname(fileURLToPath(import.meta.url));
 const demo = "/world/demos/seed-world/";
 
-function instrumentation(backend) {
-  return {
-    name: "seed-benchmark",
-    enforce: "pre",
-    resolveId(id) {
-      if (id === "virtual:seed-benchmark-metrics") return path.join(benchmark, "metrics.mjs");
+function installFpsHud(engine, lifetime) {
+  const hud = document.createElement("span");
+  hud.dataset.seedFps = "";
+  hud.style.cssText =
+    "position:fixed;top:calc(env(safe-area-inset-top,0px) + 8px);left:calc(env(safe-area-inset-left,0px) + 8px);" +
+    "z-index:100001;pointer-events:none;background:#111d;color:white;padding:4px 8px;border-radius:4px;" +
+    "font:600 14px/1.3 ui-monospace,monospace;font-variant-numeric:tabular-nums";
+  document.body.append(hud);
+  let since, frames;
+  function reset() {
+    since = performance.now();
+    frames = engine.time.frameCount;
+    hud.textContent = "FPS …";
+  }
+  reset();
+  const timer = setInterval(() => {
+    if (document.hidden) return;
+    const now = performance.now();
+    const current = engine.time.frameCount;
+    hud.textContent = "FPS " + (((current - frames) * 1000) / (now - since)).toFixed(1);
+    since = now;
+    frames = current;
+  }, 500);
+  document.addEventListener("visibilitychange", reset, { signal: lifetime });
+  lifetime.addEventListener(
+    "abort",
+    () => {
+      clearInterval(timer);
+      hud.remove();
     },
+    { once: true }
+  );
+}
+
+function adaptSeedDemo(backend) {
+  return {
+    name: "seed-engine-adapter",
+    enforce: "pre",
     transform(source, id) {
-      if (backend !== "reference" && id.endsWith("/runtime-inspection/runtime-pick-occlusion.ts")) {
+      if (id.endsWith("/runtime-inspection/runtime-pick-occlusion.ts")) {
         // The depth-only pick pass retains both source stages. Their compiler metadata follows the pair.
         return source.replace(
           "src._fragmentShaderInstructions,\n    ShaderLanguage.GLSLES300",
@@ -29,7 +58,7 @@ function instrumentation(backend) {
     src._wgsl`
         );
       }
-      if (backend !== "reference" && id.endsWith("/building/runtime/ConstructionSceneLighting.ts")) {
+      if (id.endsWith("/building/runtime/ConstructionSceneLighting.ts")) {
         // The candidate emits its fragment entry wrapper in adjacent literal VM instructions.
         // Join only that known wrapper, leaving all macro jumps and other instructions in place.
         return source.replace(
@@ -47,11 +76,17 @@ function instrumentation(backend) {
         const adapted = adaptSeedCapabilities(source, id);
         if (adapted !== undefined) return adapted;
       }
-      if (id.endsWith(demo + "main.ts")) {
-        return 'import { installSeedMetrics } from "virtual:seed-benchmark-metrics"; installSeedMetrics();\n' + source;
-      }
       if (!id.endsWith(demo + "SeedWorldDemo.ts")) return;
-      let result = exposeSeedBenchmarkContext(source);
+      const start = "engine!.run();";
+      if (!source.includes(start)) throw Error("Cannot locate the Seed World frame loop.");
+      let result = source.replace(
+        start,
+        () =>
+          start +
+          '\nif (pageUrl.searchParams.get("fps") !== "0") (' +
+          installFpsHud.toString() +
+          ")(engine, editorLifetime.signal);"
+      );
       if (backend === "webgpu") {
         const marker = "WebGLEngine.create({";
         if (result.split(marker).length !== 2) throw Error("Cannot locate the Seed World engine creation site.");
@@ -113,26 +148,31 @@ function candidateSources({ root, engine, merged, shaders }) {
   };
 }
 
-export async function createSeedServer({ root, engine, backend, merged, shaders, port }) {
+export async function buildSeed({ root, engine, merged, shaders, backend, outDir }) {
   root = fs.realpathSync(root);
-  if (!["reference", "webgl2", "webgpu"].includes(backend)) throw Error("Unknown Seed backend " + backend);
-  if (backend !== "reference" && (!merged || !shaders))
-    throw Error("Candidate backends require --merged and --shaders.");
   process.env.WORLD_DEMO = "seed-world";
   const world = path.join(root, "world");
-  const { default: base } = await import(pathToFileURL(path.join(world, "vite.config.mjs")).href);
-  const { createServer } = createRequire(path.join(world, "package.json"))("vite");
-  const plugins = [instrumentation(backend)];
-  const allow = [root, benchmark];
-  if (backend !== "reference") {
-    plugins.push(candidateSources({ root, engine, merged, shaders }));
-    allow.push(fs.realpathSync(merged), fs.realpathSync(shaders), engine);
-  }
-  return createServer({
+  // Each production build owns the Seed plugins that collect and publish its assets.
+  const config = pathToFileURL(path.join(world, "vite.config.mjs"));
+  config.searchParams.set("backend", backend);
+  const { default: base } = await import(config.href);
+  const { build } = createRequire(path.join(world, "package.json"))("vite");
+  const plugins = () => [adaptSeedDemo(backend), candidateSources({ root, engine, merged, shaders })];
+  await build({
     ...base,
     configFile: false,
-    cacheDir: path.join(root, "node_modules", ".vite-seed-" + backend + "-" + port),
-    plugins: [...plugins, ...base.plugins],
-    server: { ...base.server, open: false, hmr: false, host: "127.0.0.1", port, strictPort: true, fs: { allow } }
+    plugins: [...plugins(), ...base.plugins],
+    worker: { ...base.worker, plugins: [...plugins(), ...base.worker.plugins] },
+    build: { ...base.build, outDir, sourcemap: false, reportCompressedSize: false }
+  });
+}
+
+export async function previewSeed(root, outDir, port) {
+  const { preview } = createRequire(path.join(root, "world/package.json"))("vite");
+  return preview({
+    root,
+    configFile: false,
+    build: { outDir },
+    preview: { host: "127.0.0.1", port, strictPort: true }
   });
 }

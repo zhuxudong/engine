@@ -55,14 +55,7 @@ WebGLEngine.create({ canvas: "canvas" }).then((engine) => {
   /** ---------------------------- Capture ---------------------------- */
   let screenshotCanvas: HTMLCanvasElement = null;
   let flipYCanvas: HTMLCanvasElement = null;
-  async function screenshot(
-    camera: Camera,
-    width: number,
-    height: number,
-    flipY = false,
-    isPNG = true,
-    jpgQuality = 1
-  ) {
+  function screenshot(camera: Camera, width: number, height: number, flipY = false, isPNG = true, jpgQuality = 1) {
     if (!screenshotCanvas) {
       screenshotCanvas = document.createElement("canvas");
     }
@@ -81,19 +74,11 @@ WebGLEngine.create({ canvas: "canvas" }).then((engine) => {
     const renderTarget = new RenderTarget(engine, width, height, renderColorTexture, undefined, 8);
 
     // render to off-screen
-    try {
-      camera.renderTarget = renderTarget;
-      camera.aspectRatio = width / height;
-      camera.render();
+    camera.renderTarget = renderTarget;
+    camera.aspectRatio = width / height;
+    camera.render();
 
-      await renderColorTexture.getPixelBufferAsync(0, 0, width, height, 0, renderTargetData);
-    } finally {
-      camera.renderTarget = originalTarget;
-      camera.resetAspectRatio();
-      renderTarget.destroy();
-      renderColorTexture.destroy();
-      if (!isPaused) engine.resume();
-    }
+    renderColorTexture.getPixelBuffer(0, 0, width, height, 0, renderTargetData);
 
     const imageData = context.createImageData(width, height);
     imageData.data.set(renderTargetData);
@@ -133,6 +118,11 @@ WebGLEngine.create({ canvas: "canvas" }).then((engine) => {
           window.URL.revokeObjectURL(url);
           console.warn("Unable to open screenshot in new window. Please allow popups for this site.");
         }
+
+        // revert
+        camera.renderTarget = originalTarget;
+        camera.resetAspectRatio();
+        !isPaused && engine.resume();
       },
       isPNG ? "image/png" : "image/jpeg",
       !isPNG && jpgQuality

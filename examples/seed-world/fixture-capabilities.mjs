@@ -35,9 +35,13 @@ function orientSeedScreenSpaceInstructions(data) {
 export function adaptSeedCapabilities(source, id) {
   if (id.endsWith("/farming/PlanningFarmGrassOverlay.ts")) {
     // The same atlas layout and uploads apply on both backends. Query the active device's 2D limit.
-    const query = /    const canvas = [^\n]+\n    const context = canvas\.getContext\("webgl2"\)[^\n]+\n    if \(!context\) throw new Error\("Farm ground appearance requires WebGL2"\);\n    this\.maximumTextureSize = Number\(context\.getParameter\(context\.MAX_TEXTURE_SIZE\)\);/;
+    const query =
+      /    const canvas = [^\n]+\n    const context = canvas\.getContext\("webgl2"\)[^\n]+\n    if \(!context\) throw new Error\("Farm ground appearance requires WebGL2"\);\n    this\.maximumTextureSize = Number\(context\.getParameter\(context\.MAX_TEXTURE_SIZE\)\);/;
     if (!query.test(source)) throw Error("Cannot locate the Seed farm atlas texture limit.");
-    return source.replace(query, "    this.maximumTextureSize = scene.engine._hardwareRenderer.capability.maxTextureSize;");
+    return source.replace(
+      query,
+      "    this.maximumTextureSize = scene.engine._hardwareRenderer.capability.maxTextureSize;"
+    );
   }
   if (id.endsWith("/core/src/shader/Shader.ts")) {
     const marker = "const subShaderList = data.subShaders.map";

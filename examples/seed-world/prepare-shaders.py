@@ -84,7 +84,7 @@ vec3 reconstructSSRViewPosition("""
         file.write_text(source.replace("texture2DLodEXT(", "textureLod("))
 
 
-def prepare(fixture, candidate, merged, output):
+def prepare(fixture, candidate, merged, output, revision):
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError("Choose an empty output directory")
@@ -95,17 +95,20 @@ def prepare(fixture, candidate, merged, output):
         for entry in json.loads((fixture / "packages/modify/native-overrides.json").read_text())
     }
     paths = set(overrides)
-    for tree in (fixture, candidate):
-        paths.update(file.relative_to(tree) for file in (tree / LIBRARY).rglob("*") if file.is_file())
+    paths.update(file.relative_to(fixture) for file in (fixture / LIBRARY).rglob("*") if file.is_file())
+    checked_in = subprocess.check_output(["git", "-C", candidate, "ls-tree", "-r", "--name-only", revision, "--", LIBRARY])
+    checked_in = {Path(name) for name in checked_in.decode().splitlines()}
+    paths.update(checked_in)
     src = output / "shader-src"
     with tempfile.TemporaryDirectory(dir=output) as temp:
         for name in sorted(paths):
             if not name.is_relative_to(LIBRARY) or name.suffix not in (".shader", ".glsl"):
                 continue
-            current, incoming = candidate / name, overrides.get(name, fixture / name)
+            incoming = overrides.get(name, fixture / name)
+            current = subprocess.check_output(["git", "-C", candidate, "show", revision + ":" + name.as_posix()]) if name in checked_in else b""
             ancestor = subprocess.run(["git", "-C", candidate, "show", BASE + ":" + name.as_posix()],
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            data = merge_shader(name, current.read_bytes() if current.is_file() else b"",
+            data = merge_shader(name, current,
                                 ancestor.stdout, incoming.read_bytes() if incoming.is_file() else b"", Path(temp))
             if data:
                 target = src / name.relative_to(LIBRARY)
@@ -133,5 +136,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("fixture", "candidate", "merged", "output"):
         parser.add_argument(name, type=lambda value: Path(value).resolve())
+    parser.add_argument("revision")
     args = parser.parse_args()
-    prepare(args.fixture, args.candidate, args.merged, args.output)
+    prepare(args.fixture, args.candidate, args.merged, args.output, args.revision)

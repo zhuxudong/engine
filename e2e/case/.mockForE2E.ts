@@ -11,13 +11,13 @@ export const updateForE2E = (engine, deltaTime = 100, loopTime = 10) => {
   for (let i = 0; i < loopTime; ++i) {
     engine.update();
   }
-  engine._hardwareRenderer.flush();
+  engine._hardwareRenderer._gl.finish();
 };
 
 let screenshotCanvas: HTMLCanvasElement = null;
 let flipYCanvas: HTMLCanvasElement = null;
 
-export async function initScreenshot(
+export function initScreenshot(
   engine: Engine,
   camera: Camera | Camera[],
   width: number = 1200,
@@ -44,27 +44,21 @@ export async function initScreenshot(
   const renderTargetData = new Uint8Array(width * height * 4);
   const renderTarget = new RenderTarget(engine, width, height, renderColorTexture, TextureFormat.Depth24Stencil8, 1);
 
-  try {
-    cameras.forEach((camera) => {
-      const originalTarget = camera.renderTarget;
+  cameras.forEach((camera) => {
+    const originalTarget = camera.renderTarget;
 
-      // render to off-screen
-      camera.renderTarget = renderTarget;
-      camera.aspectRatio = width / height;
-      callbacks.push(() => {
-        camera.renderTarget = originalTarget;
-        camera.resetAspectRatio();
-      });
-      camera.render();
+    // render to off-screen
+    camera.renderTarget = renderTarget;
+    camera.aspectRatio = width / height;
+    camera.render();
+
+    callbacks.push(() => {
+      camera.renderTarget = originalTarget;
+      camera.resetAspectRatio();
     });
+  });
 
-    await renderColorTexture.getPixelBufferAsync(0, 0, width, height, 0, renderTargetData);
-  } finally {
-    for (const restore of callbacks) restore();
-    renderTarget.destroy();
-    renderColorTexture.destroy();
-    if (!isPaused) engine.resume();
-  }
+  renderColorTexture.getPixelBuffer(0, 0, width, height, 0, renderTargetData);
 
   const imageData = context.createImageData(width, height);
   imageData.data.set(renderTargetData);
@@ -116,6 +110,10 @@ export async function initScreenshot(
         cursor: pointer;
       `;
       document.body.appendChild(a);
+
+      // revert
+      callbacks.forEach((cb) => cb());
+      !isPaused && engine.resume();
     },
     isPNG ? "image/png" : "image/jpeg",
     !isPNG && jpgQuality
