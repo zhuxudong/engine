@@ -1,0 +1,3 @@
+# Shaderc integrity covers the compiler's exact WGSL text, including whitespace.
+modules/**/*.wgsl text eol=lf whitespace=-trailing-space linguist-generated=true
+catalog.json text eol=lf linguist-generated=true

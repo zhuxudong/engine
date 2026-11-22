@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
@@ -14,8 +15,8 @@ const { positionals, values } = parseArgs({
   options: { backend: { type: "string", default: "webgpu" }, port: { type: "string" } }
 });
 const [action, destination] = positionals;
-if (positionals.length !== 2 || !["prepare", "serve"].includes(action)) {
-  throw Error("Usage: pnpm seed prepare DIRECTORY | pnpm seed serve DIRECTORY [--backend webgpu|webgl2] [--port PORT]");
+if (positionals.length !== 2 || !["prepare", "warmup", "serve"].includes(action)) {
+  throw Error("Usage: pnpm seed prepare DIRECTORY | pnpm seed warmup DIRECTORY | pnpm seed serve DIRECTORY [--backend webgpu|webgl2|webgpu-warmup] [--port PORT]");
 }
 const work = path.resolve(destination);
 const fixture = path.join(work, "fixture");
@@ -101,16 +102,46 @@ if (action === "prepare") {
     throw error;
   }
   console.log("Prepared WebGL2 and WebGPU previews for engine " + revision + " in " + work);
+} else if (action === "warmup") {
+  const snapshot = JSON.parse(await readFile(manifest, "utf8"));
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: engine, encoding: "utf8" }).trim();
+  if (snapshot.seed !== seed || snapshot.engine !== revision) {
+    throw Error("Run pnpm seed prepare for this checkout before building the warmup preview.");
+  }
+  const build = path.join(work, snapshot.build);
+  const experiment = await mkdtemp(path.join(build, "warmup-"));
+  const sources = path.join(experiment, "fixture");
+  try {
+    await cp(fixture, sources, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
+    await run("python3", [path.join(directory, "warmup/assets/stage.py"), sources], work);
+    await buildSeed({
+      root: sources, engine, merged: path.join(build, "engine"), shaders: path.join(build, "shaders"),
+      backend: "webgpu", warmup: true, outDir: path.join(experiment, "webgpu")
+    });
+    await rm(sources, { recursive: true, force: true });
+    // Existing previews keep serving their snapshot until the complete build is published.
+    const next = path.join(experiment, "preview.json");
+    await writeFile(next, JSON.stringify({ directory: path.basename(experiment) }) + "\n");
+    await rename(next, path.join(build, "warmup.json"));
+  } catch (error) {
+    await rm(experiment, { recursive: true, force: true });
+    throw error;
+  }
+  console.log("Prepared the Titan Wasteland WebGPU warmup preview in " + experiment);
 } else {
   const { backend } = values;
-  if (!["webgl2", "webgpu"].includes(backend)) throw Error("Unknown Seed backend " + backend);
-  const port = Number(values.port ?? (backend === "webgpu" ? 15482 : 15483));
+  if (!["webgl2", "webgpu", "webgpu-warmup"].includes(backend)) throw Error("Unknown Seed backend " + backend);
+  const port = Number(values.port ?? ({ webgpu: 15482, webgl2: 15483, "webgpu-warmup": 15484 }[backend]));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error("Invalid port " + values.port);
   const snapshot = JSON.parse(await readFile(manifest, "utf8"));
-  const outDir = path.join(work, snapshot.build, backend);
+  const build = path.join(work, snapshot.build);
+  const outDir = backend === "webgpu-warmup"
+    ? path.join(build, JSON.parse(await readFile(path.join(build, "warmup.json"), "utf8")).directory, "webgpu")
+    : path.join(build, backend);
   await previewSeed(fixture, outDir, port);
   console.log(backend + " · engine " + snapshot.engine + " · Seed " + snapshot.seed);
-  for (const template of ["sakura-pearl", "titan-wasteland"]) {
+  const templates = backend === "webgpu-warmup" ? ["titan-wasteland"] : ["sakura-pearl", "titan-wasteland"];
+  for (const template of templates) {
     console.log(
       "http://127.0.0.1:" + port + "/world/demos/seed-world/index.html?template=" + template + "&seed=20261122&view=3d"
     );

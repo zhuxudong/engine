@@ -148,7 +148,7 @@ function candidateSources({ root, engine, merged, shaders }) {
   };
 }
 
-export async function buildSeed({ root, engine, merged, shaders, backend, outDir }) {
+export async function buildSeed({ root, engine, merged, shaders, backend, outDir, warmup = false }) {
   root = fs.realpathSync(root);
   process.env.WORLD_DEMO = "seed-world";
   const world = path.join(root, "world");
@@ -157,7 +157,17 @@ export async function buildSeed({ root, engine, merged, shaders, backend, outDir
   config.searchParams.set("backend", backend);
   const { default: base } = await import(config.href);
   const { build } = createRequire(path.join(world, "package.json"))("vite");
-  const plugins = () => [adaptSeedDemo(backend), candidateSources({ root, engine, merged, shaders })];
+  const warmupPlugins = [];
+  if (warmup) {
+    const { default: recordedVariants } = await import("./warmup/residual/plugin.mjs");
+    const { default: loadingWarmup } = await import("./warmup/loading/plugin.mjs");
+    warmupPlugins.push(recordedVariants, loadingWarmup);
+  }
+  const plugins = () => [
+    ...warmupPlugins.map((plugin) => plugin()),
+    adaptSeedDemo(backend),
+    candidateSources({ root, engine, merged, shaders })
+  ];
   await build({
     ...base,
     configFile: false,
