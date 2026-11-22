@@ -12,6 +12,13 @@ const frames = Number(process.env.FRAMES || 180),
   warmup = Number(process.env.WARMUP || 30);
 const width = Number(process.env.WIDTH || 960),
   height = Number(process.env.HEIGHT || 540);
+const profileCpu = process.env.PROFILE_CPU === "1",
+  uploadSources = process.env.UPLOAD_SOURCES === "1";
+if ((profileCpu || uploadSources) && modes.some((mode) => mode !== "cpu")) {
+  throw Error("Run CPU diagnostics separately with MODES=cpu.");
+}
+if (profileCpu && frames < 4) throw Error("CPU profiling needs at least one frame outside the three inspections.");
+const diagnostics = profileCpu || uploadSources ? await import("./diagnostics.mjs") : null;
 const metrics = (await readFile(new URL("./metrics.mjs", import.meta.url), "utf8")).replace(/^export /gm, "");
 function observeValidationErrors() {
   const errors = (globalThis.seedGPUValidation = { count: 0, messages: [] });
@@ -32,7 +39,9 @@ const setup =
   metrics +
   "\ninstallSeedMetrics(); (" +
   observeValidationErrors.toString() +
-  ")(); globalThis.measureSeedTemplate = measureSeedTemplate; })();";
+  ")(); globalThis.measureSeedTemplate = measureSeedTemplate; " +
+  (uploadSources ? "globalThis.__seedCaptureTransfers = " + diagnostics.captureTransfers.toString() + ";" : "") +
+  "})();";
 const urls = {
   webgl2: process.env.GL_URL ?? "http://127.0.0.1:15483",
   webgpu: process.env.GPU_URL ?? "http://127.0.0.1:15482"
@@ -55,6 +64,7 @@ try {
         for (const mode of modes) {
           const id = [template, variant, backend, mode].join("-");
           const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+          let profiler;
           const errors = [];
           page.on("pageerror", (error) => errors.push(String(error)));
           page.on("console", (message) => {
@@ -62,6 +72,7 @@ try {
               errors.push(message.text().slice(0, 1200));
           });
           try {
+            if (profileCpu) profiler = await diagnostics.attachCpuProfiler(page, out, id);
             await page.addInitScript({ content: setup });
             const url = new URL("/world/demos/seed-world/index.html", urls[backend]);
             url.search = new URLSearchParams({ template, seed: String(seed), view: "3d" });
@@ -87,6 +98,8 @@ try {
               width,
               height,
               gpuPassTimings: process.env.PASS_TIMINGS === "1",
+              ...(profileCpu && { profileCpu }),
+              ...(uploadSources && { uploadSources }),
               path: cameraPath,
               image: mode === "cpu"
             };
@@ -116,6 +129,7 @@ try {
               return { description: gl.getParameter(info?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER) };
             });
             Object.assign(result, { browser: browser.version(), adapter, url: url.href, errors, validation });
+            if (profiler) result.cpuProfile = profiler.describe();
             await writeFile(path.join(out, id + ".json"), JSON.stringify(result, null, 2));
             await rm(path.join(out, id + "-error.json"), { force: true });
             console.log(
@@ -143,6 +157,7 @@ try {
               JSON.stringify({ error: String(error), errors }, null, 2)
             );
           } finally {
+            if (profiler) await profiler.close();
             await page.close();
           }
         }

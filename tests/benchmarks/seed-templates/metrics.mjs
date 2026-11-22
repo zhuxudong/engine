@@ -736,6 +736,9 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
     const effects = status(context, world);
     let captured;
     for (let i = 0; i < frames; ++i) {
+      if (options.profileCpu && i > 0 && checkpoints.has(i) && !checkpoints.has(i - 1)) {
+        await globalThis.__seedProfileCpu("stop", i - 1);
+      }
       const time = await frame();
       if (boundaries) boundaries.push(performance.timeOrigin + time);
       if (mode === "cpu" && previous !== undefined && !skipNextInterval) intervals.push(time - previous);
@@ -746,10 +749,15 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
       skipNextInterval = inspect;
       const position = inspect ? triple(transform.worldPosition) : null;
       const direction = inspect ? triple(transform.worldForward) : null;
-      let draws;
+      let draws, transfers;
       const draw = inspect
         ? () => {
-            draws = oneFrameDraws(gl, state, engine, update);
+            const inspectedUpdate = options.uploadSources
+              ? () => {
+                  transfers = globalThis.__seedCaptureTransfers(gl, update);
+                }
+              : update;
+            draws = oneFrameDraws(gl, state, engine, inspectedUpdate);
           }
         : update;
       if (timed) {
@@ -769,7 +777,10 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
           throw Error("Template overwrote the benchmark camera path.");
         }
         usedPath.push({ frame: i, position: actual, rotation: triple(transform.worldRotation) });
-        inspections.push({ frame: i, ...draws, ...snapshot(context, world) });
+        inspections.push({ frame: i, ...draws, ...snapshot(context, world), ...(transfers && { transfers }) });
+        if (options.profileCpu && i + 1 < frames && !checkpoints.has(i + 1)) {
+          await globalThis.__seedProfileCpu("start", i + 1);
+        }
       }
       if (i === frames - 1) {
         // A canvas can be discarded at the next animation frame. Capture immediately after the final draw.
