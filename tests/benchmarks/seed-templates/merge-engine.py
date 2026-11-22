@@ -8,7 +8,7 @@ import tempfile
 
 BASE = "e5c0df036e7c6c292ea2c411d8156f7d57601cb2"
 SEED = "92ea60eaee49b2f1188b373c178c34ca511c9f87"
-CANDIDATE = "547c9e892ea6400ecd392af558780e0e151b9bd2"
+CANDIDATE = "35b6c4547879abc5ebc8dd267202eec1b962ceaf"
 PACKAGES = [
     "core", "design", "loader", "math", "rhi-webgl", "rhi-webgpu", "rhi-null",
     "galacean", "galacean-webgpu", "physics-physx", "ui", "shader-parser", "shader-compiler",
