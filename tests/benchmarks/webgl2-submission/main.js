@@ -1,4 +1,16 @@
-import { AssetType, Camera, DirectLight, MeshRenderer, PrimitiveMesh, UnlitMaterial } from "@galacean/engine-core";
+import {
+  AmbientOcclusionQuality,
+  AssetType,
+  Camera,
+  DirectLight,
+  MeshRenderer,
+  MSAASamples,
+  PrimitiveMesh,
+  ShadowCascadesMode,
+  ShadowResolution,
+  ShadowType,
+  UnlitMaterial
+} from "@galacean/engine-core";
 import { Vector3 } from "@galacean/engine-math";
 import { inspectWebGPUFrame, captureRGBA, trackBundleEncoding } from "./webgpu";
 import { prepareScene } from "./scenes";
@@ -7,7 +19,9 @@ function submissionScene(engine, root, camera) {
   camera.entity.transform.setPosition(0, 0, 10);
   camera.isOrthographic = true;
   camera.orthographicSize = 1;
-  const mesh = PrimitiveMesh.createCuboid(engine, 0.022, 0.022, 0.02);
+  const shareGeometry = new URLSearchParams(location.search).has("sharedMesh");
+  const createMesh = () => PrimitiveMesh.createCuboid(engine, 0.022, 0.022, 0.02);
+  const sharedMesh = shareGeometry ? createMesh() : undefined;
   const materials = Array.from({ length: 8 }, (_, i) => {
     const material = new UnlitMaterial(engine);
     material.baseColor.set(i / 8, 0.5, 1 - i / 8, 1);
@@ -18,11 +32,11 @@ function submissionScene(engine, root, camera) {
     const entity = root.createChild();
     entity.transform.setPosition(((i % 64) - 31.5) / 33, (Math.floor(i / 64) - 15.5) / 17, 0);
     const renderer = entity.addComponent(MeshRenderer);
-    renderer.mesh = mesh;
+    renderer.mesh = sharedMesh ?? createMesh();
     renderer.setMaterial(materials[i % materials.length]);
     renderer.priority = i;
   }
-  return { details: { meshCount } };
+  return { details: { meshCount, uniqueMeshCount: shareGeometry ? 1 : meshCount } };
 }
 
 async function sponzaScene(engine, root, camera) {
@@ -32,7 +46,23 @@ async function sponzaScene(engine, root, camera) {
   root.addChild(resource.instantiateSceneRoot());
   const light = root.createChild().addComponent(DirectLight);
   light.entity.transform.setRotation(-55, -30, 0);
-  engine.sceneManager.activeScene.ambientLight.diffuseSolidColor.set(0.6, 0.6, 0.6, 1);
+  const scene = engine.sceneManager.activeScene;
+  scene.ambientLight.diffuseSolidColor.set(0.6, 0.6, 0.6, 1);
+  const effects = new URLSearchParams(location.search).get("effects");
+  if (effects) {
+    if (!["all", "no-sao", "no-shadows", "no-msaa"].includes(effects))
+      throw new Error("Unknown S5 effects: " + effects);
+    camera.enableHDR = true;
+    camera.enablePostProcess = true;
+    camera.msaaSamples = effects === "no-msaa" ? MSAASamples.None : MSAASamples.FourX;
+    scene.ambientOcclusion.enabled = effects !== "no-sao";
+    scene.ambientOcclusion.quality = AmbientOcclusionQuality.High;
+    scene.shadowDistance = 32;
+    scene.shadowResolution = ShadowResolution.Medium;
+    scene.shadowCascades = ShadowCascadesMode.FourCascades;
+    scene.shadowFourCascadeSplits.set(0.2, 0.44, 0.68);
+    light.shadowType = effects === "no-shadows" ? ShadowType.None : ShadowType.SoftHigh;
+  }
   const target = new Vector3();
   const move = (frame) => {
     // Fixed, closed walk along the central nave. The glTF root carries its own 0.008 scale.
@@ -44,7 +74,10 @@ async function sponzaScene(engine, root, camera) {
     camera.entity.transform.lookAt(target);
   };
   move(0);
-  return { beforeFrame: move, details: { asset: url, primitives: 103, triangles: 262267 } };
+  return {
+    beforeFrame: move,
+    details: { asset: url, primitives: 103, triangles: 262267, effects: effects ?? undefined }
+  };
 }
 
 function countCalls(gl, render) {
@@ -104,13 +137,31 @@ async function measure() {
   const canvas = document.querySelector("canvas");
   const width = scenario === "S1" ? 256 : 640;
   const height = scenario === "S1" ? 256 : 360;
-  const gpu = new URLSearchParams(location.search).get("backend") === "webgpu";
+  const options = new URLSearchParams(location.search);
+  const gpu = options.get("backend") === "webgpu";
+  const timing = options.has("timing");
+  const loadStart = performance.now();
   const Engine = gpu
     ? (await import("@galacean/engine-webgpu")).WebGPUEngine
     : (await import("@galacean/engine")).WebGLEngine;
   const start = performance.now();
-  const engine = await Engine.create({ canvas, graphicDeviceOptions: gpu ? {} : { antialias: false } });
+  const engine = await Engine.create({
+    canvas,
+    graphicDeviceOptions: gpu ? { enableGPUTiming: timing } : { antialias: false }
+  });
   const initializationMs = performance.now() - start;
+  if (scenario === "Recovery") {
+    try {
+      const { verifyRecovery } = await import("./recovery");
+      return {
+        scene: scenario,
+        backend: gpu ? "webgpu" : "webgl2",
+        ...(await verifyRecovery(engine, options.has("background")))
+      };
+    } finally {
+      engine.destroy();
+    }
+  }
   const device = gpu && engine._hardwareRenderer.device;
   if (device) device.pushErrorScope("validation");
   try {
@@ -131,12 +182,12 @@ async function measure() {
       engine.update();
       if (i === 0) {
         firstDrawMs = performance.now() - drawStart;
-        timeToFirstFrameMs = performance.now() - start;
+        timeToFirstFrameMs = performance.now() - loadStart;
       }
     }
     if (stopTracking) stopTracking();
     let preparationMs;
-    if (setup.preparePipelines && new URLSearchParams(location.search).has("prewarm")) {
+    if (setup.preparePipelines && options.has("prewarm")) {
       const before = performance.now();
       await setup.preparePipelines();
       preparationMs = performance.now() - before;
@@ -144,16 +195,50 @@ async function measure() {
     // Keep timing free of driver instrumentation, GL queries and GPU synchronization.
     const cpu = [],
       intervals = [];
+    const gpuTimes = [];
+    let lastSubmission = 0;
+    const gl = !gpu && canvas.getContext("webgl2");
+    const extension = timing && gl && gl.getExtension("EXT_disjoint_timer_query_webgl2");
+    const pendingQueries = [];
+    const statistics = engine.renderingStatistics;
+    let resourceBytesPeak = statistics.totalMemory;
     let previous = await frame();
     for (let i = 0; i < 300; ++i) {
       const time = await frame();
       intervals.push(time - previous);
       previous = time;
+      let query;
+      if (timing && gpu) engine._hardwareRenderer.gpuTiming.requestSample();
+      if (extension) {
+        while (pendingQueries.length && gl.getQueryParameter(pendingQueries[0], gl.QUERY_RESULT_AVAILABLE)) {
+          const ready = pendingQueries.shift();
+          if (!gl.getParameter(extension.GPU_DISJOINT_EXT))
+            gpuTimes.push(gl.getQueryParameter(ready, gl.QUERY_RESULT) / 1e6);
+          gl.deleteQuery(ready);
+        }
+        if (pendingQueries.length < 4) {
+          query = gl.createQuery();
+          gl.beginQuery(extension.TIME_ELAPSED_EXT, query);
+        }
+      }
       const start = performance.now();
       setup.beforeFrame?.(i);
       engine.update();
       cpu.push(performance.now() - start);
+      if (query) {
+        gl.endQuery(extension.TIME_ELAPSED_EXT);
+        pendingQueries.push(query);
+      }
+      if (timing && gpu) {
+        const sample = engine._hardwareRenderer.gpuTiming.latestSample;
+        if (sample && sample.submissionId !== lastSubmission) {
+          gpuTimes.push(sample.durationMs);
+          lastSubmission = sample.submissionId;
+        }
+      }
+      resourceBytesPeak = Math.max(resourceBytesPeak, statistics.totalMemory);
     }
+    for (const query of pendingQueries) gl.deleteQuery(query);
     if (canvas.width !== width || canvas.height !== height) throw new Error("Unexpected benchmark resolution");
     await frame();
     const render = () => {
@@ -196,6 +281,15 @@ async function measure() {
       scene: scenario,
       backend: gpu ? "webgpu" : "webgl2",
       initializationMs,
+      moduleLoadMs: start - loadStart,
+      engineResourceBytes: { peak: resourceBytesPeak, final: statistics.totalMemory },
+      ...(timing && {
+        gpuTimer: {
+          scope: gpu ? "submission" : "frame",
+          sampleCount: gpuTimes.length,
+          milliseconds: gpuTimes.length ? stats(gpuTimes) : null
+        }
+      }),
       firstDrawMs,
       timeToFirstFrameMs,
       preparationMs,

@@ -5,15 +5,23 @@ interface View {
   binding: number;
   layer?: Layer;
 }
-interface Layer { index:number; offset?:number; levels?:number }
+interface Layer {
+  index: number;
+  offset?: number;
+  levels?: number;
+}
 
-const propertyName = (t:IWebGPUShaderTexture):string => t.arrayIndex === undefined ? t.name : t.name+"["+t.arrayIndex+"]";
+const propertyName = (t: IWebGPUShaderTexture): string =>
+  t.arrayIndex === undefined ? t.name : t.name + "[" + t.arrayIndex + "]";
 
-export function describeTextureBindings(textures:IWebGPUShaderTexture[],options:IWebGPUShaderOptions):string {
-  return textures.map(t=>{
-    const name=propertyName(t), e=options.textureExtents?.[name];
-    return e ? `${name} (${e.width}x${e.height}, ${e.format}, ${e.mipCount} mips)` : name;
-  }).join(", ");
+export function describeTextureBindings(textures: IWebGPUShaderTexture[], options: IWebGPUShaderOptions): string {
+  return textures
+    .map((t) => {
+      const name = propertyName(t),
+        e = options.textureExtents?.[name];
+      return e ? `${name} (${e.width}x${e.height}, ${e.format}, ${e.mipCount} mips)` : name;
+    })
+    .join(", ");
 }
 
 /** Count texture views independently of samplers. First alias identical texture
@@ -34,7 +42,7 @@ export function fitTextureBindings(
   const compatible = new Map<string, IWebGPUShaderTexture[]>();
   const original = new Map<IWebGPUShaderTexture, number>();
   // textureGather always reads physical level zero and has no explicit mip operand.
-  const gather = modules.some(module => /\btextureGather(?:Compare)?\(/.test(module));
+  const gather = modules.some((module) => /\btextureGather(?:Compare)?\(/.test(module));
   for (const t of textures) {
     original.set(t, t.textureBinding);
     const property = t.arrayIndex === undefined ? t.name : t.name + "[" + t.arrayIndex + "]";
@@ -52,7 +60,7 @@ export function fitTextureBindings(
       continue;
     const stack = options.textureArrayKeys?.[property] ?? (options.textureKeys === undefined ? "offline" : undefined);
     if (stack === undefined) continue;
-    const extent=options.textureExtents?.[property];
+    const extent = options.textureExtents?.[property];
     const id = JSON.stringify([t.group, t.sampleType, stack, gather ? extent?.width : undefined]);
     const group = compatible.get(id) ?? [];
     group.push(t);
@@ -64,21 +72,24 @@ export function fitTextureBindings(
     for (const t of candidates) if (!slots.has(t.textureBinding)) slots.set(t.textureBinding, slots.size);
     if (slots.size < 2) continue;
     const binding = candidates[0].textureBinding;
-    let width=0, physicalLevels=0;
-    for(const t of candidates) width=Math.max(width,options.textureExtents?.[propertyName(t)]?.width ?? 0);
-    if(width) for(const t of candidates) {
-      const e=options.textureExtents![propertyName(t)];
-      physicalLevels=Math.max(physicalLevels,Math.log2(width/e.width)+e.mipCount);
-    }
+    let width = 0,
+      physicalLevels = 0;
+    for (const t of candidates) width = Math.max(width, options.textureExtents?.[propertyName(t)]?.width ?? 0);
+    if (width)
+      for (const t of candidates) {
+        const e = options.textureExtents![propertyName(t)];
+        physicalLevels = Math.max(physicalLevels, Math.log2(width / e.width) + e.mipCount);
+      }
     for (const t of candidates) {
       t.arrayLayer = slots.get(t.textureBinding)!;
       t.textureBinding = binding;
       t.viewDimension = "2d-array";
-      const e=options.textureExtents?.[propertyName(t)];
-      if (e && (e.width!==width || e.mipCount!==physicalLevels)) {
-        t.arrayMipOffset=Math.log2(width/e.width);
-        if (!Number.isInteger(t.arrayMipOffset)) throw new Error("Texture array widths must be related by a power of two.");
-        t.arrayMipCount=e.mipCount;
+      const e = options.textureExtents?.[propertyName(t)];
+      if (e && (e.width !== width || e.mipCount !== physicalLevels)) {
+        t.arrayMipOffset = Math.log2(width / e.width);
+        if (!Number.isInteger(t.arrayMipOffset))
+          throw new Error("Texture array widths must be related by a power of two.");
+        t.arrayMipCount = e.mipCount;
       }
     }
   }
@@ -86,11 +97,21 @@ export function fitTextureBindings(
     const n = count(bit);
     if (n > limit)
       throw new Error(
-        `WebGPU ${bit === 1 ? "vertex" : "fragment"} stage needs ${n} sampled textures after view sharing; device limit is ${limit}. Resources: ${describeTextureBindings(textures.filter(t=>t.visibility&bit),options)}.`
+        `WebGPU ${bit === 1 ? "vertex" : "fragment"} stage needs ${n} sampled textures after view sharing; device limit is ${limit}. Resources: ${describeTextureBindings(
+          textures.filter((t) => t.visibility & bit),
+          options
+        )}.`
       );
   }
   for (const t of textures)
-    views.set(t.group + ":" + original.get(t), { group: t.group, binding: t.textureBinding, layer:t.arrayLayer===undefined ? undefined : {index:t.arrayLayer,offset:t.arrayMipOffset,levels:t.arrayMipCount} });
+    views.set(t.group + ":" + original.get(t), {
+      group: t.group,
+      binding: t.textureBinding,
+      layer:
+        t.arrayLayer === undefined
+          ? undefined
+          : { index: t.arrayLayer, offset: t.arrayMipOffset, levels: t.arrayMipCount }
+    });
   return modules.map((source) => rewriteViews(source, views));
 }
 
@@ -190,18 +211,20 @@ function rewriteViews(source: string, views: Map<string, View>): string {
       const promoted = args.map((a) => visible.get(a));
       let target = name;
       const rewritten = args.map((a) => transform(a, visible));
-      let literal:string|undefined;
+      let literal: string | undefined;
       if (functions.has(name) && promoted.some((layer) => layer !== undefined)) {
         target = specialize(functions.get(name)!, promoted);
       } else if (name.startsWith("texture")) {
         const position = promoted.findIndex((layer) => layer !== undefined);
-        if(position>=0) {
-          const layer=promoted[position]!, offset=layer.offset ?? 0;
-          if(name==="textureNumLevels" && layer.levels!==undefined) literal=layer.levels+"u";
-          if(name==="textureDimensions" && offset) rewritten[1]=rewritten[1] ? "("+rewritten[1]+" + "+offset+")" : String(offset);
-          if(name==="textureLoad" && offset) rewritten[2]="("+rewritten[2]+" + "+offset+")";
-          if(name==="textureSampleLevel" && layer.levels!==undefined)
-            rewritten[3]="(clamp("+rewritten[3]+",0.0,"+(layer.levels-1)+".0) + "+offset+".0)";
+        if (position >= 0) {
+          const layer = promoted[position]!,
+            offset = layer.offset ?? 0;
+          if (name === "textureNumLevels" && layer.levels !== undefined) literal = layer.levels + "u";
+          if (name === "textureDimensions" && offset)
+            rewritten[1] = rewritten[1] ? "(" + rewritten[1] + " + " + offset + ")" : String(offset);
+          if (name === "textureLoad" && offset) rewritten[2] = "(" + rewritten[2] + " + " + offset + ")";
+          if (name === "textureSampleLevel" && layer.levels !== undefined)
+            rewritten[3] = "(clamp(" + rewritten[3] + ",0.0," + (layer.levels - 1) + ".0) + " + offset + ".0)";
           if (/^(?:textureSample|textureGather|textureLoad)/.test(name))
             rewritten.splice(position + (name === "textureLoad" ? 2 : 3), 0, layer.index + "i");
         }
@@ -213,7 +236,10 @@ function rewriteViews(source: string, views: Map<string, View>): string {
   }
   function specialize(f: FunctionBody, signature: (Layer | undefined)[]): string {
     const name = signature.length
-      ? prefix + f.name + "_" + signature.map((n) => n ? n.index+"m"+(n.offset ?? 0)+"n"+(n.levels ?? 0) : "x").join("_")
+      ? prefix +
+        f.name +
+        "_" +
+        signature.map((n) => (n ? n.index + "m" + (n.offset ?? 0) + "n" + (n.levels ?? 0) : "x")).join("_")
       : f.name;
     if (compiled.has(name)) return name;
     const visible = new Map(layers);

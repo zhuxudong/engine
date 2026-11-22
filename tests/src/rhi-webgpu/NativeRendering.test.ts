@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createWebGPUShaderCompiler } from "@galacean/engine-shader-compiler/webgpu";
 import {
   Buffer,
   BufferBindFlag,
@@ -16,12 +17,16 @@ import {
   PrimitiveMesh,
   RenderState,
   RenderTarget,
+  RenderBufferLoadAction,
+  RenderBufferStoreAction,
   SetDataOptions,
   Texture2D,
   Texture2DArray,
   TextureCube,
   TextureCubeFace,
+  TextureFilterMode,
   TextureFormat,
+  TextureWrapMode,
   UnlitMaterial,
   Vector4,
   WebGPUEngine,
@@ -153,6 +158,69 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     program.destroy();
   });
 
+  it("stores an interrupted multisample pass and resolves and discards on the native pass containing the final draw", async () => {
+    const color = new Texture2D(engine, 4, 2, TextureFormat.R8G8B8A8_UNorm, false, false);
+    const target = new RenderTarget(engine, 4, 2, color, TextureFormat.Depth24Stencil8, 4);
+    const mesh = new ModelMesh(engine),
+      sub = mesh.addSubMesh(0, 3, MeshTopology.Triangles);
+    const program = rhi.createPlatformShaderProgram(engine, {
+      vertexSource:
+        "@vertex fn main(@builtin(vertex_index) i:u32)->@builtin(position) vec4f {return vec4f(vec2f(f32((i<<1u)&2u),f32(i&2u))*2.-1.,0.,1.);}",
+      fragmentSource:
+        "@fragment fn main(@builtin(position) p:vec4f)->@location(0) vec4f {return select(vec4f(0,1,0,1),vec4f(1,0,0,1),p.x<2.);}",
+      reflection: { textures: [], uniformBlocks: [], vertexInputs: [], vertexOutputs: [], fragmentOutputs: [0] }
+    });
+    const native = GPUCommandEncoder.prototype.beginRenderPass;
+    const stores: (GPUStoreOp | boolean | undefined)[][] = [];
+    const observe = vi.spyOn(GPUCommandEncoder.prototype, "beginRenderPass").mockImplementation(function (
+      this: GPUCommandEncoder,
+      descriptor
+    ) {
+      if (descriptor.label === "native store split") {
+        const color = Array.from(descriptor.colorAttachments)[0]!;
+        stores.push([color.storeOp, !!color.resolveTarget, descriptor.depthStencilAttachment?.depthStoreOp]);
+      }
+      return native.call(this, descriptor);
+    });
+    try {
+      const state = new RenderState();
+      state.rasterState.cullMode = CullMode.Off;
+      rhi.applyRenderState(state, state, false);
+      rhi.activeRenderTarget(
+        target,
+        new Vector4(0, 0, 1, 1),
+        false,
+        0,
+        undefined,
+        RenderBufferLoadAction.Load,
+        RenderBufferStoreAction.Resolve,
+        RenderBufferLoadAction.Load,
+        RenderBufferStoreAction.DontCare,
+        "native store split"
+      );
+      rhi.clearRenderTarget(engine, CameraClearFlags.All, new Color(0, 0, 1, 1));
+      rhi.viewport(0, 0, 2, 2);
+      rhi.drawPrimitive(mesh._primitive, sub, program);
+      const pixels = new Uint8Array(4 * 2 * 4);
+      await color.getPixelBufferAsync(pixels);
+      expect(Array.from(pixels.slice(0, 4))).toEqual([255, 0, 0, 255]);
+      expect(Array.from(pixels.slice(12, 16))).toEqual([0, 0, 255, 255]);
+      rhi.viewport(2, 0, 2, 2);
+      rhi.drawPrimitive(mesh._primitive, sub, program);
+      target._blitRenderTarget();
+      await color.getPixelBufferAsync(pixels);
+      expect(Array.from(pixels.slice(0, 4))).toEqual([255, 0, 0, 255]);
+      expect(Array.from(pixels.slice(12, 16))).toEqual([0, 255, 0, 255]);
+      expect(stores).toEqual([
+        ["store", true, "store"],
+        ["discard", true, "discard"]
+      ]);
+    } finally {
+      observe.mockRestore();
+      program.destroy();
+    }
+  });
+
   it("recycles submitted Discard backings while preserving earlier copies and clearing untouched bytes", async () => {
     const input = new Buffer(engine, BufferBindFlag.VertexBuffer, 8, BufferUsage.Dynamic);
     const snapshots = new Buffer(engine, BufferBindFlag.VertexBuffer, 16, BufferUsage.Dynamic);
@@ -174,6 +242,35 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     }
   });
 
+  it("preserves active instance records through a long submission and recycles the retained pages", async () => {
+    const alignment = rhi.uniformBufferOffsetAlignment;
+    const input = new Buffer(engine, BufferBindFlag.ConstantBuffer, 4 * alignment, BufferUsage.Dynamic);
+    const snapshots = new Buffer(engine, BufferBindFlag.VertexBuffer, 4 * 210, BufferUsage.Dynamic);
+    const source = new Float32Array(1);
+    const allocations = vi.spyOn(rhi.device, "createBuffer");
+    try {
+      // Three active prefixes fit per backing while the full two-alignment shader block remains bindable.
+      // The long submission grows past the 64 spare limit. Both following submissions fit in the retained pool.
+      for (const count of [210, 192, 192]) {
+        allocations.mockClear();
+        for (let i = 0; i < count; i++) {
+          source[0] = count + i;
+          const offset = input._platformBuffer.writeInstanceData!(source, 1, 2 * alignment);
+          expect(offset).toBe((i % 3) * alignment);
+          snapshots.copyFromBuffer(input, offset, i * 4, 4);
+        }
+        expect(allocations.mock.calls.length).toBe(count === 210 ? 69 : 0);
+        const actual = new Float32Array(count);
+        await snapshots.getDataAsync(actual);
+        expect(Array.from(actual)).toEqual(Array.from({ length: count }, (_, i) => count + i));
+      }
+    } finally {
+      allocations.mockRestore();
+      input.destroy();
+      snapshots.destroy();
+    }
+  });
+
   it("rebuilds live mesh, render target and shader resources after device loss", async () => {
     const scene = engine.sceneManager.activeScene;
     const root = scene.createRootEntity();
@@ -186,7 +283,13 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     const material = new UnlitMaterial(engine);
     material.baseColor.set(1, 0, 0, 1);
     renderer.setMaterial(material);
+    const second = root.createChild().addComponent(MeshRenderer);
+    second.mesh = renderer.mesh;
+    second.setMaterial(material);
+    second.entity.transform.setPosition(0.8, 0, 0);
     camera.render();
+    const instances = engine._batcherManager.instanceBuffer.buffer;
+    const firstInstanceBuffer = instances._platformBuffer;
     const pixels = new Uint8Array(16 * 16 * 4);
     await texture.getPixelBufferAsync(pixels);
     expect(Array.from(pixels.slice(544, 548))).toEqual([255, 0, 0, 255]);
@@ -202,6 +305,7 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     rhi.device.pushErrorScope("validation");
     material.baseColor.set(0, 1, 0, 1);
     camera.render();
+    expect(instances._platformBuffer).not.toBe(firstInstanceBuffer);
     await texture.getPixelBufferAsync(pixels);
     expect(Array.from(pixels.slice(544, 548))).toEqual([0, 255, 0, 255]);
   });
@@ -237,15 +341,36 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
 
   it("round trips packed colors, floats and compressed blocks across cubemap faces, array layers and mips", async () => {
     const formats = [
-      [TextureFormat.R8G8B8_UNorm, new Uint8Array([0, 1, 2, 5, 8, 13, 21, 34, 55, 89, 144, 233])],
+      [
+        TextureFormat.R8G8B8_UNorm,
+        new Uint8Array([0, 1, 2, 5, 8, 13, 21, 34, 55, 89, 144, 233]),
+        new Uint8Array([0, 1, 2, 255, 5, 8, 13, 255, 21, 34, 55, 255, 89, 144, 233, 255])
+      ],
       [TextureFormat.R5G6B5_UNorm, new Uint16Array([0xf81f, 0x07e0, 0x7813, 0x1234])],
       [TextureFormat.R5G5B5A1_UNorm, new Uint16Array([0xffff, 0x8001, 0x6ea4, 0x4120])],
       [TextureFormat.R4G4B4A4_UNorm, new Uint16Array([0x0fd1, 0x4a6e, 0x0246, 0xac1f])],
-      [TextureFormat.R16G16_SFloat, new Uint16Array([0x0000, 0x3400, 0x3800, 0x3c00, 0x4000, 0x4400, 0xbc00, 0xb800])],
-      [TextureFormat.R32_SFloat, new Float32Array([0, 0.125, 1, -1.5])],
-      [TextureFormat.R16_UNorm, new Uint16Array([0, 12345, 40960, 65535])]
+      [
+        TextureFormat.R16G16_SFloat,
+        new Uint16Array([0x0000, 0x3400, 0x3800, 0x3c00, 0x4000, 0x4400, 0xbc00, 0xb800]),
+        new Float32Array([0, 0.25, 0, 1, 0.5, 1, 0, 1, 2, 4, 0, 1, -1, -0.5, 0, 1])
+      ],
+      [
+        TextureFormat.R32_SFloat,
+        new Float32Array([0, 0.125, 1, -1.5]),
+        new Float32Array([0, 0, 0, 1, 0.125, 0, 0, 1, 1, 0, 0, 1, -1.5, 0, 0, 1])
+      ],
+      [
+        TextureFormat.R11G11B10_UFloat,
+        new Float32Array([1, 2, 4, 0.5, 0.25, 0.125, 0, 0.75, 1.5, 8, 16, 32]),
+        new Float32Array([1, 2, 4, 1, 0.5, 0.25, 0.125, 1, 0, 0.75, 1.5, 1, 8, 16, 32, 1])
+      ],
+      [
+        TextureFormat.R16_UNorm,
+        new Uint16Array([0, 12345, 40960, 65535]),
+        new Uint16Array([0, 0, 0, 65535, 12345, 0, 0, 65535, 40960, 0, 0, 65535, 65535, 0, 0, 65535])
+      ]
     ] as const;
-    for (const [format, data] of formats) {
+    for (const [format, data, expectedData = data] of formats) {
       if (format === TextureFormat.R16_UNorm && !rhi.device.features.has("texture-formats-tier1")) {
         expect(rhi.supportsTextureFormat(format)).toBe(false);
         continue;
@@ -254,13 +379,17 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
       const array = new Texture2DArray(engine, 4, 4, 3, format, true, false);
       cube.setPixelBuffer(TextureCubeFace.NegativeZ, data, 1);
       array.setPixelBuffer(2, data, 1, 0, 0, 2, 2, 1);
-      const out = new Uint8Array(data.byteLength);
-      const expected = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      const out = new Uint8Array(expectedData.byteLength);
+      const expected = new Uint8Array(expectedData.buffer, expectedData.byteOffset, expectedData.byteLength);
       await cube.getPixelBufferAsync(TextureCubeFace.NegativeZ, 1, out);
       expect(out).toEqual(expected);
       out.fill(0);
       await array.getPixelBufferAsync(2, 1, out);
       expect(out).toEqual(expected);
+      await cube.makePixelBufferReadable(1, TextureCubeFace.NegativeZ);
+      const lastPixel = new Uint8Array(out.byteLength / 4);
+      cube.getPixelBuffer(TextureCubeFace.NegativeZ, 1, 1, 1, 1, 1, lastPixel);
+      expect(lastPixel).toEqual(expected.slice(expected.length - lastPixel.length));
       cube.destroy();
       array.destroy();
     }
@@ -275,6 +404,68 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
       const out = new Uint8Array(bytes.length);
       await compressed.getPixelBufferAsync(2, out);
       expect(out).toEqual(bytes);
+    }
+  });
+
+  it("orders overlapping partial buffer writes without submitting the frame or retaining stale emission data", async () => {
+    const values = new Uint32Array([1, 2, 3, 4, 5]);
+    const source = new Buffer(engine, BufferBindFlag.VertexBuffer, values, BufferUsage.Dynamic);
+    const captures = new Buffer(engine, BufferBindFlag.VertexBuffer, 12);
+    source._rememberVertexSource(values);
+    expect(source._getVertexSource()).toEqual(new Uint8Array(values.buffer));
+    rhi.flush();
+    const submit = vi.spyOn(rhi.device.queue, "submit");
+    try {
+      captures.copyFromBuffer(source, 0, 0, 4);
+      source.setData(new Uint32Array([6, 7, 8]), 0);
+      expect(source._getVertexSource()).toBeNull();
+      source.setData(new Uint32Array([10, 11]), 8);
+      captures.copyFromBuffer(source, 8, 4, 8);
+      expect(submit).not.toHaveBeenCalled();
+      const out = new Uint32Array(3);
+      await captures.getDataAsync(out);
+      expect(Array.from(out)).toEqual([1, 10, 11]);
+      expect(submit).toHaveBeenCalledTimes(1);
+      source._rememberVertexSource(values);
+      source.copyFromBuffer(captures, 0, 0, 4);
+      expect(source._getVertexSource()).toBeNull();
+    } finally {
+      submit.mockRestore();
+    }
+  });
+
+  it("generates the rendered mip chain in order on the frame encoder", async () => {
+    const texture = new Texture2D(engine, 4, 4, TextureFormat.R8G8B8A8_UNorm, true, false);
+    const target = new RenderTarget(engine, 4, 4, texture, null);
+    target.autoGenerateMipmaps = false;
+    rhi.flush();
+    const submit = vi.spyOn(rhi.device.queue, "submit");
+    try {
+      rhi.activeRenderTarget(target, new Vector4(0, 0, 1, 1), false);
+      rhi.clearRenderTarget(engine, CameraClearFlags.Color, new Color(1, 0, 0, 1));
+      rhi.endRenderPass();
+      texture.generateMipmaps();
+      expect(submit).not.toHaveBeenCalled();
+      const texel = new Uint8Array(4);
+      await texture.getPixelBufferAsync(2, texel);
+      expect(Array.from(texel)).toEqual([255, 0, 0, 255]);
+      expect(submit).toHaveBeenCalledTimes(1);
+    } finally {
+      submit.mockRestore();
+    }
+  });
+
+  it("generates the advertised narrow float mip chain and reads RGBA float pixels", async () => {
+    for (const format of [TextureFormat.R16_SFloat, TextureFormat.R32_SFloat]) {
+      if (!rhi.supportsGenerateMipmaps(format, false)) continue;
+      const texture = new Texture2D(engine, 2, 2, format, true, false);
+      texture.setPixelBuffer(
+        format === TextureFormat.R16_SFloat ? new Uint16Array([0, 0, 0x3c00, 0x3c00]) : new Float32Array([0, 0, 1, 1])
+      );
+      texture.generateMipmaps();
+      const output = new Float32Array(4);
+      await texture.getPixelBufferAsync(1, output);
+      expect(Array.from(output)).toEqual([0.5, 0, 0, 1]);
     }
   });
 
@@ -401,6 +592,98 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
       expect(Array.from(pixels.slice(12, 16))).toEqual(step === 2 ? [255, 0, 255, 255] : [0, 255, 0, 255]);
     }
     program.destroy();
+  });
+
+  it("packs power-of-two scaled material textures without changing native filtering, mip lookup or dimensions", async () => {
+    const compiler = await createWebGPUShaderCompiler();
+    const properties = ["material_large", "material_small", "material_single"];
+    const textures = [16, 4, 8].map((w, i) => {
+      const formats = [TextureFormat.R8G8B8A8_UNorm, TextureFormat.R8G8_UNorm, TextureFormat.R8_UNorm];
+      const channels = [4, 2, 1][i];
+      const texture = new Texture2D(engine, w, w / 2, formats[i], i !== 2, false);
+      texture.filterMode = TextureFilterMode.Trilinear;
+      texture.wrapModeU = TextureWrapMode.Repeat;
+      texture.wrapModeV = TextureWrapMode.Mirror;
+      texture.anisoLevel = 1;
+      for (let m = 0; m < texture.mipmapCount; m++) {
+        const width = Math.max(1, w >> m),
+          height = Math.max(1, (w / 2) >> m);
+        const data = new Uint8Array(width * height * channels);
+        for (let y = 0; y < height; y++)
+          for (let x = 0; x < width; x++)
+            data.set(
+              [(m * 59 + x * 37) % 256, (i * 71 + y * 63) % 256, (x * 33 + y * 43) % 256, 255].slice(0, channels),
+              (y * width + x) * channels
+            );
+        texture.setPixelBuffer(data, m);
+      }
+      return texture;
+    });
+    const options = {
+      textureKeys: Object.fromEntries(properties.map((n) => [n, n])),
+      textureArrayKeys: Object.fromEntries(properties.map((n, i) => [n, rhi.getTextureArrayKey(textures[i])!])),
+      textureExtents: Object.fromEntries(
+        properties.map((name, i) => [
+          name,
+          {
+            width: textures[i].width,
+            height: textures[i].height,
+            mipCount: textures[i].mipmapCount,
+            format: "rgba8unorm"
+          }
+        ])
+      )
+    };
+    const vertex =
+      "void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
+    const fragment = `uniform sampler2D material_large; uniform sampler2D material_small; uniform sampler2D material_single;
+      out vec4 color;
+      vec4 fetch(sampler2D t,vec2 uv){
+        vec4 implicitSample=texture(t,uv);
+        vec4 grad=textureGrad(t,uv,vec2(0.04,0.11),vec2(0.21,0.01));
+        vec4 bias=texture(t,uv,0.75);
+        vec4 explicitSample=textureLod(t,uv,0.75);
+        return (implicitSample+grad+bias+explicitSample)*0.25;
+      }
+      void main(){vec2 uv=gl_FragCoord.xy*vec2(0.145,-0.115);
+        vec4 sampled=(fetch(material_large,uv)+fetch(material_small,uv)+fetch(material_single,uv))/3.;
+        vec4 loaded=texelFetch(material_small,ivec2(1,0),1);
+        color=vec4(sampled.rg,(loaded.r+float(textureSize(material_small,0).x)/8.)*0.5,1.);
+      }`;
+    const width = 16,
+      height = 16;
+    const output = new Texture2D(engine, width, height, TextureFormat.R8G8B8A8_UNorm, false, false);
+    const target = new RenderTarget(engine, width, height, output, null);
+    const mesh = new ModelMesh(engine),
+      sub = mesh.addSubMesh(0, 3, MeshTopology.Triangles);
+    const state = new RenderState();
+    // Devices can choose a different anisotropic footprint when the physical base size changes.
+    textures[1].anisoLevel = 4;
+    expect(rhi.getTextureArrayKey(textures[1])).not.toEqual(rhi.getTextureArrayKey(textures[0]));
+    textures[1].anisoLevel = 1;
+    state.rasterState.cullMode = CullMode.Off;
+    let reference: Uint8Array | undefined;
+    for (const limit of [16, 1]) {
+      const compiled = compiler.compileWebGPUVariant(vertex, fragment, { ...options, maxTexturesPerStage: limit });
+      if (limit === 1) expect(compiled.reflection.textures.map((t) => t.arrayMipOffset ?? 0)).toEqual([0, 2, 1]);
+      const program = rhi.createPlatformShaderProgram(engine, {
+        vertexSource: compiled.vertex,
+        fragmentSource: compiled.fragment,
+        reflection: compiled.reflection
+      });
+      for (const u of program.uniforms) u.apply(textures[properties.indexOf(u.name)]);
+      rhi.activeRenderTarget(target, new Vector4(0, 0, 1, 1), false);
+      rhi.applyRenderState(state, state, false);
+      rhi.drawPrimitive(mesh._primitive, sub, program);
+      const actual = new Uint8Array(width * height * 4);
+      await output.getPixelBufferAsync(actual);
+      if (reference) expect(actual).toEqual(reference);
+      else {
+        expect(new Set(actual).size).toBeGreaterThan(10);
+        reference = actual;
+      }
+      program.destroy();
+    }
   });
 
   it("uploads and reads packed depth and stencil in a cubemap subregion without changing neighboring stencil bits", async () => {

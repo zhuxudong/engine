@@ -89,7 +89,13 @@ export function poolSamplerBindings(
     if (texture.samplerBinding === undefined) continue;
     const { group, samplerType, arrayIndex, name } = texture;
     const property = arrayIndex === undefined ? name : name + "[" + arrayIndex + "]";
-    const key = JSON.stringify([group, samplerType, keys?.[property] ?? null, texture.arrayMipOffset, texture.arrayMipCount]);
+    const key = JSON.stringify([
+      group,
+      samplerType,
+      keys?.[property] ?? null,
+      texture.arrayMipOffset,
+      texture.arrayMipCount
+    ]);
     const original = texture.samplerBinding;
     const binding = pools.get(key) ?? original;
     pools.set(key, binding);

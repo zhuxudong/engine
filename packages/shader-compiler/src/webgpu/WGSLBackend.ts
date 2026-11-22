@@ -169,7 +169,10 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
         );
         if (unique.size > samplerLimit)
           throw new Error(
-            `WebGPU ${stage === 1 ? "vertex" : "fragment"} stage needs ${unique.size} distinct sampler bindings, exceeding the sampler limit of ${samplerLimit}. Resources: ${describeTextureBindings(reflection.textures.filter(t=>(t.samplerVisibility ?? 0)&stage), options)}.`
+            `WebGPU ${stage === 1 ? "vertex" : "fragment"} stage needs ${unique.size} distinct sampler bindings, exceeding the sampler limit of ${samplerLimit}. Resources: ${describeTextureBindings(
+              reflection.textures.filter((t) => (t.samplerVisibility ?? 0) & stage),
+              options
+            )}.`
           );
       }
     }

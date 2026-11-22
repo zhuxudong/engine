@@ -136,7 +136,7 @@ export class ShaderTextureLayout {
         slot.width = texture?.width ?? 0;
         slot.height = texture?.height ?? 0;
         slot.mipCount = texture?.mipmapCount ?? 0;
-        slot.format = key ?? (format === undefined ? "unbound" : TextureFormat[format]);
+        slot.format = format === undefined ? "unbound" : TextureFormat[format];
         map = map
           .specialize(slot.textureClass)
           .specialize(slot.arrayClass)

@@ -11,6 +11,8 @@ export class WebGPUMipmapGenerator {
   private readonly _fragmentModule: GPUShaderModule;
   private readonly _pipelines = new Map<GPUTextureFormat, GPURenderPipeline>();
 
+  private readonly _levels = new WeakMap<GPUTexture, { destination: GPUTextureView; source: GPUBindGroup }[]>();
+
   constructor(device: GPUDevice) {
     this._device = device;
     this._sampler = device.createSampler({
@@ -74,68 +76,46 @@ export class WebGPUMipmapGenerator {
     });
   }
 
-  generate(
-    texture: GPUTexture,
-    format: GPUTextureFormat,
-    width: number,
-    height: number,
-    mipLevelCount: number,
-    layerCount: number
-  ): void {
-    if (mipLevelCount <= 1) {
-      return;
-    }
-    if (!WebGPUMipmapGenerator._isSupportedFormat(format)) {
-      throw new Error(`WebGPU mipmap generation does not support ${format}.`);
-    }
-
-    const pipeline = this._getPipeline(format);
-    const encoder = this._device.createCommandEncoder({
-      label: "Galacean mipmap generation"
-    });
-    for (let layer = 0; layer < layerCount; layer++) {
-      for (let mipLevel = 1; mipLevel < mipLevelCount; mipLevel++) {
-        const sourceView = texture.createView({
-          dimension: "2d",
-          baseMipLevel: mipLevel - 1,
-          mipLevelCount: 1,
-          baseArrayLayer: layer,
-          arrayLayerCount: 1
-        });
-        const destinationView = texture.createView({
-          dimension: "2d",
-          baseMipLevel: mipLevel,
-          mipLevelCount: 1,
-          baseArrayLayer: layer,
-          arrayLayerCount: 1
-        });
-        const bindGroup = this._device.createBindGroup({
-          label: `Galacean mipmap layer ${layer} level ${mipLevel}`,
-          layout: this._bindGroupLayout,
-          entries: [
-            { binding: 0, resource: sourceView },
-            { binding: 1, resource: this._sampler }
-          ]
-        });
-        const pass = encoder.beginRenderPass({
-          label: `Galacean mipmap layer ${layer} level ${mipLevel}`,
-          colorAttachments: [
-            {
-              view: destinationView,
-              loadOp: "clear",
-              storeOp: "store",
-              clearValue: { r: 0, g: 0, b: 0, a: 0 }
-            }
-          ]
-        });
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bindGroup);
-        pass.setViewport(0, 0, Math.max(1, width >> mipLevel), Math.max(1, height >> mipLevel), 0, 1);
-        pass.draw(3);
-        pass.end();
+  generate(encoder: GPUCommandEncoder, texture: GPUTexture): void {
+    const pipeline = this._getPipeline(texture.format);
+    let levels = this._levels.get(texture);
+    if (!levels) {
+      levels = [];
+      for (let layer = 0; layer < texture.depthOrArrayLayers; layer++) {
+        let previous: GPUTextureView | undefined;
+        for (let mip = 0; mip < texture.mipLevelCount; mip++) {
+          const view = texture.createView({
+            dimension: "2d",
+            baseMipLevel: mip,
+            mipLevelCount: 1,
+            baseArrayLayer: layer,
+            arrayLayerCount: 1
+          });
+          if (previous) {
+            const source = this._device.createBindGroup({
+              layout: this._bindGroupLayout,
+              entries: [
+                { binding: 0, resource: previous },
+                { binding: 1, resource: this._sampler }
+              ]
+            });
+            levels.push({ destination: view, source });
+          }
+          previous = view;
+        }
       }
+      this._levels.set(texture, levels);
     }
-    this._device.queue.submit([encoder.finish()]);
+    for (const level of levels) {
+      const pass = encoder.beginRenderPass({
+        label: "Galacean mipmap generation",
+        colorAttachments: [{ view: level.destination, loadOp: "clear", storeOp: "store" }]
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, level.source);
+      pass.draw(3);
+      pass.end();
+    }
   }
 
   private _getPipeline(format: GPUTextureFormat): GPURenderPipeline {
@@ -158,16 +138,5 @@ export class WebGPUMipmapGenerator {
       this._pipelines.set(format, pipeline);
     }
     return pipeline;
-  }
-
-  private static _isSupportedFormat(format: GPUTextureFormat): boolean {
-    return (
-      format === "r8unorm" ||
-      format === "rg8unorm" ||
-      format === "rgba8unorm" ||
-      format === "rgba8unorm-srgb" ||
-      format === "rgba16float" ||
-      format === "rg11b10ufloat"
-    );
   }
 }

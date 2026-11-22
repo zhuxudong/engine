@@ -40,7 +40,7 @@ export class WebGPUDrawBundles implements RenderDrawCommands {
   private readonly _histories = new WeakMap<object, Map<string, History>>();
   private readonly _submit: GPURenderBundle[] = [];
   private _history?: History;
-  private _nativePass?: GPURenderPassEncoder;
+  private _nativePass?: { executeBundles(bundles: GPURenderBundle[]): void };
   private _descriptor?: GPURenderBundleEncoderDescriptor;
   private _encoder?: GPURenderBundleEncoder;
   private _chunk?: Chunk;
@@ -52,12 +52,13 @@ export class WebGPUDrawBundles implements RenderDrawCommands {
   constructor(private readonly _device: GPUDevice) {}
 
   begin(
-    pass: GPURenderPassEncoder,
+    pass: { executeBundles(bundles: GPURenderBundle[]): void },
     target: object,
     key: string,
     colors: readonly GPUTextureFormat[],
     depth: GPUTextureFormat | undefined,
-    samples: number
+    samples: number,
+    force = false
   ): void {
     let histories = this._histories.get(target);
     if (!histories) {
@@ -70,7 +71,7 @@ export class WebGPUDrawBundles implements RenderDrawCommands {
       histories.set(key, history);
     }
     this._history = history;
-    this._enabled = history.draws >= 32;
+    this._enabled = force || history.draws >= 32;
     this._nativePass = pass;
     this._descriptor = this._enabled
       ? { colorFormats: colors, depthStencilFormat: depth, sampleCount: samples }
@@ -124,10 +125,21 @@ export class WebGPUDrawBundles implements RenderDrawCommands {
     this._command(Op.Pipeline, pipeline);
   }
   setVertexBuffer(slot: number, buffer: GPUBuffer): void {
+    const recorded = this._chunk!.records[this._cursor];
+    if (!this._encoder && recorded?.op === Op.Vertex && recorded.resource === buffer && recorded.a === slot) {
+      this._cursor++;
+      return;
+    }
     this._command(Op.Vertex, buffer, slot);
   }
   setIndexBuffer(buffer: GPUBuffer, format: GPUIndexFormat): void {
-    this._command(Op.Index, buffer, format === "uint16" ? 0 : 1);
+    const encodedFormat = format === "uint16" ? 0 : 1;
+    const recorded = this._chunk!.records[this._cursor];
+    if (!this._encoder && recorded?.op === Op.Index && recorded.resource === buffer && recorded.a === encodedFormat) {
+      this._cursor++;
+      return;
+    }
+    this._command(Op.Index, buffer, encodedFormat);
   }
   setBindGroup(index: number, group: GPUBindGroup, offsets?: Uint32Array, start = 0, length = 0): void {
     this._command(
@@ -146,6 +158,19 @@ export class WebGPUDrawBundles implements RenderDrawCommands {
     this._command(Op.Draw, undefined, count, instances, start, firstInstance);
   }
   drawIndexed(count: number, instances = 1, start = 0, baseVertex = 0, firstInstance = 0): void {
+    const recorded = this._chunk!.records[this._cursor];
+    if (
+      !this._encoder &&
+      recorded?.op === Op.Indexed &&
+      recorded.a === count &&
+      recorded.b === instances &&
+      recorded.c === start &&
+      recorded.d === baseVertex &&
+      recorded.e === firstInstance
+    ) {
+      this._cursor++;
+      return;
+    }
     this._command(Op.Indexed, undefined, count, instances, start, baseVertex, firstInstance);
   }
 

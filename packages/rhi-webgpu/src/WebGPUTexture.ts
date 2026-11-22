@@ -7,7 +7,14 @@ import {
   TextureWrapMode
 } from "@galacean/engine-core";
 import { WebGPUDepthTransfer } from "./WebGPUDepthTransfer";
-import { pixelPacking, packRGBA8Row, unpackRGBA8 } from "./WebGPUPixelConversion";
+import {
+  pixelPacking,
+  packRGBA8Row,
+  unpackRGBA8,
+  packR11G11B10,
+  readPixelBytes,
+  expandReadRow
+} from "./WebGPUPixelConversion";
 import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
 
 /**
@@ -16,7 +23,17 @@ import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
  */
 export abstract class WebGPUTexture implements IPlatformTexture {
   readonly _gpuTexture: GPUTexture;
-  readonly arrayKey?: string;
+  private readonly _scaledArrayKey?: string;
+  private readonly _exactArrayKey?: string;
+  get arrayKey(): string | undefined {
+    // Native anisotropic footprints can depend on the original base extent even with LOD clamps.
+    return this._anisoLevel > 1 && this._filterMode !== TextureFilterMode.Point
+      ? this._exactArrayKey
+      : this._scaledArrayKey;
+  }
+  static arrayFormat(format: GPUTextureFormat): GPUTextureFormat {
+    return format === "r8unorm" || format === "rg8unorm" ? "rgba8unorm" : format;
+  }
   /** @internal */
   readonly _format: GPUTextureFormat;
   /** @internal */
@@ -34,7 +51,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
   private _anisoLevel = 1;
   private _depthCompareFunction = TextureDepthCompareFunction.LessEqual;
   private readonly _samplers: Partial<Record<GPUSamplerBindingType, GPUSampler>> = {};
-  private _mipSamplers?: Map<number,GPUSampler>;
+  private _mipSamplers?: Map<number, GPUSampler>;
   private _view: GPUTextureView;
   private _depthView?: GPUTextureView;
 
@@ -83,7 +100,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     this._invalidateSamplers();
   }
 
-  private _invalidateSamplers():void {
+  private _invalidateSamplers(): void {
     this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
     this._mipSamplers?.clear();
   }
@@ -106,9 +123,12 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     return this.view;
   }
 
-  getSampler(type: GPUSamplerBindingType, mipOffset?:number, mipCount?:number): GPUSampler {
-    const levelKey = mipCount===undefined ? undefined : ((type==="filtering" ? 1 : type==="comparison" ? 2 : 3)*32+(mipOffset ?? 0))*32 + mipCount;
-    let sampler = levelKey===undefined ? this._samplers[type] : this._mipSamplers?.get(levelKey);
+  getSampler(type: GPUSamplerBindingType, mipOffset?: number, mipCount?: number): GPUSampler {
+    const levelKey =
+      mipCount === undefined
+        ? undefined
+        : ((type === "filtering" ? 1 : type === "comparison" ? 2 : 3) * 32 + (mipOffset ?? 0)) * 32 + mipCount;
+    let sampler = levelKey === undefined ? this._samplers[type] : this._mipSamplers?.get(levelKey);
     if (!sampler) {
       const nearest = type === "non-filtering" || this._filterMode === TextureFilterMode.Point;
       const anisotropy = nearest ? 1 : Math.min(16, Math.max(1, Math.floor(this._anisoLevel)));
@@ -120,12 +140,12 @@ export abstract class WebGPUTexture implements IPlatformTexture {
         mipmapFilter:
           !nearest && (this._filterMode === TextureFilterMode.Trilinear || anisotropy > 1) ? "linear" : "nearest",
         maxAnisotropy: anisotropy,
-        lodMinClamp:mipOffset,
-        lodMaxClamp:mipCount===undefined ? undefined : (mipOffset ?? 0)+mipCount-1,
+        lodMinClamp: mipOffset,
+        lodMaxClamp: mipCount === undefined ? undefined : (mipOffset ?? 0) + mipCount - 1,
         compare: type === "comparison" ? WebGPUTexture._getCompareFunction(this.depthCompareFunction) : undefined
       });
-      if(levelKey===undefined) this._samplers[type] = sampler;
-      else (this._mipSamplers ??= new Map()).set(levelKey,sampler);
+      if (levelKey === undefined) this._samplers[type] = sampler;
+      else (this._mipSamplers ??= new Map()).set(levelKey, sampler);
     }
     return sampler;
   }
@@ -143,9 +163,15 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     this._viewDimension = viewDimension;
     this._format = WebGPUTexture._getFormat(texture.format, texture.isSRGBColorSpace);
     if (viewDimension === "2d" && !/^(depth|stencil)/.test(this._format)) {
-      let width=texture.width, height=texture.height;
-      while(width>1 && height>1 && !(width&1) && !(height&1)) {width/=2; height/=2;}
-      this.arrayKey=[this._format,width,height].join("/");
+      let width = texture.width,
+        height = texture.height;
+      while (width > 1 && height > 1 && !(width & 1) && !(height & 1)) {
+        width /= 2;
+        height /= 2;
+      }
+      const family = WebGPUTexture.arrayFormat(this._format);
+      this._scaledArrayKey = [family, width, height].join("/");
+      this._exactArrayKey = [family, "exact", texture.width, texture.height, texture.mipmapCount].join("/");
     }
     this._gpuTexture = device.device.createTexture({
       label: texture.name,
@@ -170,24 +196,14 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   destroy(): void {
     this._invalidatePixels();
-    this._device.flush();
-    this._gpuTexture.destroy();
+    this._device._retireTexture(this._gpuTexture);
   }
 
   generateMipmaps(): void {
+    if (!this._device.supportsGenerateMipmaps(this._texture.format, this._texture.isSRGBColorSpace)) return;
     this._invalidatePixels();
-    this._device._generateMipmaps(
-      this._gpuTexture,
-      this._format,
-      this._texture.width,
-      this._texture.height,
-      this._texture.mipmapCount,
-      this._layerCount
-    );
+    this._device._generateMipmaps(this._gpuTexture);
   }
-
-  // The shader binding selects comparison or ordinary sampling for each use of the texture.
-  setUseDepthCompareMode(): void {}
 
   protected _writeTexture(
     colorBuffer: ArrayBufferView,
@@ -224,6 +240,8 @@ export abstract class WebGPUTexture implements IPlatformTexture {
       );
       return;
     }
+    if (this._texture.format === TextureFormat.R11G11B10_UFloat)
+      colorBuffer = packR11G11B10(colorBuffer, width * height * depthOrArrayLayers);
     if (packing) colorBuffer = unpackRGBA8(colorBuffer, width * height * depthOrArrayLayers, packing);
     this._device.flush();
     this._device.device.queue.writeTexture(
@@ -286,7 +304,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     const width = Math.max(1, this._texture.width >> mipLevel);
     const height = Math.max(1, this._texture.height >> mipLevel);
     const { blockWidth, blockHeight, bytesPerBlock } = WebGPUTexture._getTexelLayout(this._format);
-    const bytes = pixelPacking(this._texture.format)?.bytes ?? bytesPerBlock;
+    const bytes = readPixelBytes(this._texture.format, bytesPerBlock);
     const pixels = new Uint8Array(Math.ceil(width / blockWidth) * Math.ceil(height / blockHeight) * bytes);
     const revision = this._contentRevision;
     const cache = (this._readablePixels ??= new Map());
@@ -310,7 +328,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
         "Use getPixelBufferAsync() or await makePixelBufferReadable() before synchronous texture readback."
       );
     const { blockWidth, blockHeight, bytesPerBlock } = WebGPUTexture._getTexelLayout(this._format);
-    const bytes = pixelPacking(this._texture.format)?.bytes ?? bytesPerBlock;
+    const bytes = readPixelBytes(this._texture.format, bytesPerBlock);
     const w = Math.max(1, this._texture.width >> mipLevel);
     const h = Math.max(1, this._texture.height >> mipLevel);
     const stride = Math.ceil(w / blockWidth) * bytes;
@@ -348,8 +366,8 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     const rows = Math.ceil(height / layout.blockHeight);
     const pitch = Math.ceil(bytes / 256) * 256;
     const packing = pixelPacking(this._texture.format);
-    if (out.byteLength < (packing ? width * packing.bytes : bytes) * rows)
-      throw new RangeError("Readback destination is too small.");
+    const dstPitch = Math.ceil(width / layout.blockWidth) * readPixelBytes(this._texture.format, layout.bytesPerBlock);
+    if (out.byteLength < dstPitch * rows) throw new RangeError("Readback destination is too small.");
     this._validateRegion(mipLevel, x, y, layer, width, height, 1, layout);
     if (!rows || !bytes) return;
     if (this._format.startsWith("depth") || this._format === "stencil8") {
@@ -382,9 +400,12 @@ export abstract class WebGPUTexture implements IPlatformTexture {
       await staging.mapAsync(GPUMapMode.READ);
       const mapped = new Uint8Array(staging.getMappedRange());
       const dst = new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
+      const srcView = new DataView(mapped.buffer),
+        dstView = new DataView(out.buffer, out.byteOffset, out.byteLength);
       for (let i = 0; i < rows; i++) {
-        if (packing) packRGBA8Row(mapped, i * pitch, dst, i * width * packing.bytes, width, packing);
-        else dst.set(mapped.subarray(i * pitch, i * pitch + bytes), i * bytes);
+        if (expandReadRow(this._texture.format, srcView, i * pitch, dstView, i * dstPitch, width)) continue;
+        if (packing?.bits) packRGBA8Row(mapped, i * pitch, dst, i * dstPitch, width, packing);
+        else dst.set(mapped.subarray(i * pitch, i * pitch + bytes), i * dstPitch);
       }
     } finally {
       staging.destroy();

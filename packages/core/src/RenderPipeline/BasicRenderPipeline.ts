@@ -466,14 +466,17 @@ export class BasicRenderPipeline {
     const shaderPasses = subShader.passes;
     const cullingResults = this._cullingResults;
     renderElement.subShader = subShader;
+    const data = renderElement.material.shaderData;
+    const singleQueue = subShader._getSharedMaterialQueue(data);
+    if (singleQueue !== undefined) {
+      cullingResults.queues[singleQueue].pushRenderElement(renderElement);
+      return;
+    }
     let pushedQueueFlags = RenderQueueFlags.None;
     for (let i = 0, n = shaderPasses.length; i < n; i++) {
       const shaderPass = shaderPasses[i];
       const renderState = shaderPass._renderState;
-      const renderQueueType = renderState._getRenderQueueByShaderData(
-        shaderPass._renderStateDataMap,
-        renderElement.material.shaderData
-      );
+      const renderQueueType = renderState._getRenderQueueByShaderData(shaderPass._renderStateDataMap, data);
 
       const flag = 1 << renderQueueType;
       if (pushedQueueFlags & flag) {

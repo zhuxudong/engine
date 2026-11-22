@@ -144,7 +144,9 @@ export class RenderState extends DataObject {
   ): RenderQueueType {
     const renderQueueTypeProp = renderStateDataMap[RenderStateElementKey.RenderQueueType];
     if (renderQueueTypeProp !== undefined) {
-      const renderQueueType = shaderData.getFloat(renderQueueTypeProp);
+      const renderQueueType = shaderData._propertyValueMap[renderQueueTypeProp._uniqueId] as
+        | RenderQueueType
+        | undefined;
       if (renderQueueType !== undefined) return renderQueueType;
     }
     return this.renderQueueType;

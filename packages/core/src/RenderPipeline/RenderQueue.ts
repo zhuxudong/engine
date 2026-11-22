@@ -57,12 +57,10 @@ export class RenderQueue {
       return;
     }
 
-    const { engine, instanceId: cameraId, shaderData: cameraData } = context.camera;
+    const { engine, shaderData: cameraData } = context.camera;
     const scene = context.camera.scene!;
-    const { instanceId: sceneId, shaderData: sceneData, _maskManager: maskManager } = scene;
-    const renderCount = engine._renderCount;
+    const { shaderData: sceneData, _maskManager: maskManager } = scene;
     const rhi = engine._hardwareRenderer;
-    const pipelineStageKey = RenderContext.pipelineStageKey;
     const renderQueueType = this.renderQueueType;
     const needMaskType = maskType !== RenderQueueMaskType.No;
 
@@ -93,20 +91,23 @@ export class RenderQueue {
           maskManager.drawMask(context, pipelineStageTagValue, component._maskLayer);
           customStates = BasicResources.getMaskInteractionRenderStates(maskInteraction);
         } else {
-          maskManager.isReadStencil(material) && maskManager.clearMask(context, pipelineStageTagValue);
+          if (maskManager.hasActiveMaskLayer && maskManager.isReadStencil(material)) {
+            maskManager.clearMask(context, pipelineStageTagValue);
+          }
         }
-        maskManager.isStencilWritten(material) && (maskManager.hasStencilWritten = true);
+        if (!maskManager.hasStencilWritten && maskManager.isStencilWritten(material))
+          maskManager.hasStencilWritten = true;
       }
 
       const { shaderData: renderElementShaderData } = curElement;
-      const shaderPasses = curElement.subShader.passes;
-      const { shaderData: rendererData, instanceId: rendererId } = component;
-      const { shaderData: materialData, instanceId: materialId } = material;
+      const shaderPasses = curElement.subShader._getPassesForStage(pipelineStageTagValue);
+      const { shaderData: rendererData } = component;
+      const { shaderData: materialData } = material;
 
       // Build compile macros
       const compileMacros = Shader._compileMacros;
       ShaderMacroCollection.unionCollection(component._globalShaderMacro, materialData._macroCollection, compileMacros);
-      ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
+      compileMacros.unionCollection(engine._macroCollection);
 
       if (isInstanced) {
         compileMacros.enable(InstanceBuffer.gpuInstanceMacro);
@@ -114,10 +115,6 @@ export class RenderQueue {
 
       for (let j = 0, m = shaderPasses.length; j < m; j++) {
         const shaderPass = shaderPasses[j];
-        if (shaderPass.getTagValue(pipelineStageKey) !== pipelineStageTagValue) {
-          continue;
-        }
-
         const renderState = shaderPass._renderState;
         if (!needMaskType) {
           const passQueueType = renderState._getRenderQueueByShaderData(shaderPass._renderStateDataMap, materialData);
@@ -139,68 +136,7 @@ export class RenderQueue {
           continue;
         }
 
-        const switchProgram = program.bind();
-        if (program._platformProgram.uniforms.length) {
-          const switchRenderCount = renderCount !== program._uploadRenderCount;
-
-          // Upload uniforms (cache-aware per block). Renderer block carries plain samplers/arrays
-          // even on the instanced path (GLSL forbids them in UBOs); `_canBatch` ensures the whole
-          // batch agrees on those, so the leader's values are correct for the draw call
-          if (switchRenderCount) {
-            program.regroupUniformBlocks();
-            program.uploadAll(program.sceneUniformBlock, sceneData);
-            program.uploadAll(program.cameraUniformBlock, cameraData);
-            program.uploadAll(program.rendererUniformBlock, rendererData);
-            program._uploadRendererId = isInstanced ? -1 : rendererId;
-            program.uploadAll(program.materialUniformBlock, materialData);
-            renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
-            // UnGroup textures should upload default value, texture uint maybe change by logic of texture bind
-            program.uploadUnGroupTextures();
-            program._uploadSceneId = sceneId;
-            program._uploadCameraId = cameraId;
-            program._uploadMaterialId = materialId;
-            program._uploadRenderCount = renderCount;
-          } else {
-            if (program._uploadSceneId !== sceneId) {
-              program.uploadAll(program.sceneUniformBlock, sceneData);
-              program._uploadSceneId = sceneId;
-            } else if (switchProgram) {
-              program.uploadTextures(program.sceneUniformBlock, sceneData);
-            }
-
-            if (program._uploadCameraId !== cameraId) {
-              program.uploadAll(program.cameraUniformBlock, cameraData);
-              program._uploadCameraId = cameraId;
-            } else if (switchProgram) {
-              program.uploadTextures(program.cameraUniformBlock, cameraData);
-            }
-
-            if (isInstanced) {
-              // Different batches may have different leaders, re-upload every time
-              program.uploadAll(program.rendererUniformBlock, rendererData);
-              program._uploadRendererId = -1;
-            } else if (program._uploadRendererId !== rendererId) {
-              program.uploadAll(program.rendererUniformBlock, rendererData);
-              program._uploadRendererId = rendererId;
-            } else if (switchProgram) {
-              program.uploadTextures(program.rendererUniformBlock, rendererData);
-            }
-
-            if (program._uploadMaterialId !== materialId) {
-              program.uploadAll(program.materialUniformBlock, materialData);
-              program._uploadMaterialId = materialId;
-            } else if (switchProgram) {
-              program.uploadTextures(program.materialUniformBlock, materialData);
-            }
-
-            renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
-
-            // We only consider switchProgram case, because UnGroup texture's value is always default
-            if (switchProgram) {
-              program.uploadUnGroupTextures();
-            }
-          }
-        }
+        program.bindForDraw(context.camera, component, material, renderElementShaderData, isInstanced);
         const layout = program._instanceLayout;
         if (!isInstanced || layout) {
           program.uploadSharedUniforms(sceneData, cameraData, rendererData, materialData, renderElementShaderData);

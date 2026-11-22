@@ -18,17 +18,23 @@ export class WebGPUTextureArrayCache {
 
   get(textures: readonly WebGPUTexture[]): GPUTextureView {
     if (!textures.length) throw new Error("A packed texture binding needs at least one source.");
-    const recent=this._recent;
-    if(recent && recent.sources.length===textures.length) {
-      let unchanged=true;
-      for(let i=0;i<textures.length;i++) if(recent.sources[i]!==textures[i]._gpuTexture || recent.revisions[i]!==textures[i]._contentRevision) {unchanged=false;break;}
-      if(unchanged) return recent.view;
+    const recent = this._recent;
+    if (recent && recent.sources.length === textures.length) {
+      let unchanged = true;
+      for (let i = 0; i < textures.length; i++)
+        if (recent.sources[i] !== textures[i]._gpuTexture || recent.revisions[i] !== textures[i]._contentRevision) {
+          unchanged = false;
+          break;
+        }
+      if (unchanged) return recent.view;
     }
     const first = textures[0]._gpuTexture;
     let base = first;
     for (let i = 1; i < textures.length; i++)
       if (textures[i]._gpuTexture.width > base.width) base = textures[i]._gpuTexture;
     let mipCount = 0;
+    let format = first.format;
+    const family = WebGPUTexture.arrayFormat(format);
     for (const source of textures) {
       const texture = source._gpuTexture,
         offset = Math.log2(base.width / texture.width);
@@ -36,7 +42,7 @@ export class WebGPUTextureArrayCache {
         !Number.isInteger(offset) ||
         base.height >> offset !== texture.height ||
         base.height / texture.height !== 2 ** offset ||
-        texture.format !== base.format ||
+        WebGPUTexture.arrayFormat(texture.format) !== family ||
         texture.sampleCount !== 1 ||
         texture.dimension !== "2d" ||
         texture.depthOrArrayLayers !== 1 ||
@@ -47,6 +53,7 @@ export class WebGPUTextureArrayCache {
         );
       }
       mipCount = Math.max(mipCount, offset + texture.mipLevelCount);
+      if (texture.format !== first.format) format = family;
     }
     let entry: ArrayEntry | undefined;
     let compatible: ArrayEntry | undefined;
@@ -56,7 +63,7 @@ export class WebGPUTextureArrayCache {
       if (
         allocation.width !== base.width ||
         allocation.height !== base.height ||
-        allocation.format !== base.format ||
+        allocation.format !== format ||
         allocation.mipLevelCount !== mipCount ||
         allocation.depthOrArrayLayers !== textures.length
       )
@@ -86,9 +93,12 @@ export class WebGPUTextureArrayCache {
         const texture = this._hardware.device.createTexture({
           label: "Material texture array",
           size: { width: base.width, height: base.height, depthOrArrayLayers: textures.length },
-          format: base.format,
+          format,
           mipLevelCount: mipCount,
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+          usage:
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_DST |
+            (format === "rgba8unorm" ? GPUTextureUsage.RENDER_ATTACHMENT : 0)
         });
         entry = { texture, view: texture.createView({ dimension: "2d-array" }), sources: [], revisions: [] };
         this._entries.push(entry);
@@ -104,6 +114,10 @@ export class WebGPUTextureArrayCache {
       encoder ??= this._hardware._getCommandEncoder();
       const { blockWidth, blockHeight } = WebGPUTexture._getTexelLayout(texture.format);
       for (let mip = 0; mip < texture.mipLevelCount; mip++) {
+        if (texture.format !== format) {
+          this._hardware._expandTextureChannels(texture, mip, entry.texture, mip + mipOffset, layer);
+          continue;
+        }
         const width = Math.ceil(Math.max(1, texture.width >> mip) / blockWidth) * blockWidth;
         const height = Math.ceil(Math.max(1, texture.height >> mip) / blockHeight) * blockHeight;
         encoder.copyTextureToTexture(

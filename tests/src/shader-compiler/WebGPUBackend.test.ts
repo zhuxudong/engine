@@ -64,6 +64,18 @@ it("elides samplers for a texture fetched through two helper functions", () => {
   expect(code).not.toMatch(/:\s*sampler\b/);
 });
 
+it("preserves each binding in comma-separated historical uniform declarations", () => {
+  const fragment = `uniform highp sampler2D material_a, material_images[2];
+    uniform vec4 leftTint, rightTint; out vec4 color;
+    void main(){ color=texture(material_a,vec2(0.))*leftTint+texture(material_images[1],vec2(0.))*rightTint; }`;
+  const { reflection } = compiler.compileWebGPUVariant(vs, fragment);
+  expect(reflection.textures.map((t) => [t.name, t.arrayIndex])).toEqual([
+    ["material_a", undefined],
+    ["material_images", 1]
+  ]);
+  expect(reflection.uniformBlocks.flatMap((b) => b.members).map((m) => m.name)).toEqual(["leftTint", "rightTint"]);
+});
+
 it("specializes integer vertex formats and float/depth sampling independently", () => {
   const vertex = "in vec4 JOINTS_0; void main() { gl_Position = JOINTS_0; }";
   const fragment = `uniform sampler2D colors; uniform sampler2DShadow shadow; out vec4 color;
@@ -147,9 +159,15 @@ describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
         "roughnessMetallicTexture",
         "occlusionTexture"
       ] as const;
+      function fill(texture: Texture2D, r: number, g: number, b: number): void {
+        const bytes = new Uint8Array(texture.width * texture.height * 4);
+        for (let n = 0; n < bytes.length; n += 4) bytes.set([r, g, b, 255], n);
+        texture.setPixelBuffer(bytes);
+      }
       for (const [i, name] of properties.entries()) {
-        const texture = new Texture2D(engine, 1, 1, TextureFormat.R8G8B8A8_UNorm, false, false);
-        texture.setPixelBuffer(Uint8Array.of(i + 8, 128, 255, 255));
+        const width = 4 << i % 3;
+        const texture = new Texture2D(engine, width, width, TextureFormat.R8G8B8A8_UNorm, false, false);
+        fill(texture, i + 8, 128, 255);
         material[name] = texture;
       }
       const emissive = material.emissiveTexture;
@@ -159,7 +177,7 @@ describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
         [255, 0, 0],
         [0, 255, 0]
       ]) {
-        emissive.setPixelBuffer(Uint8Array.of(red, green, blue, 255));
+        fill(emissive, red, green, blue);
         hardware.device.pushErrorScope("validation");
         engine.update();
         await target.getPixelBufferAsync(16, 16, 1, 1, pixels);
@@ -167,7 +185,7 @@ describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
         expect(Array.from(pixels).map((n) => (n > 200 ? 255 : n < 12 ? 0 : n))).toEqual([red, green, blue, 255]);
       }
       const replacement = material.baseTexture;
-      replacement.setPixelBuffer(Uint8Array.of(0, 0, 255, 255));
+      fill(replacement, 0, 0, 255);
       material.emissiveTexture = replacement;
       engine.update();
       await target.getPixelBufferAsync(16, 16, 1, 1, pixels);
@@ -179,7 +197,8 @@ describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
       const materialViews = selected[0].textures.filter((t) => t.arrayLayer !== undefined);
       expect(new Set(materialViews.map((t) => t.arrayLayer)).size).toBe(17);
       expect(new Set(materialViews.map((t) => t.textureBinding)).size).toBe(1);
-      expect(new Set(materialViews.map((t) => t.samplerBinding)).size).toBe(2);
+      expect(new Set(materialViews.map((t) => t.arrayMipOffset ?? 0))).toEqual(new Set([0, 1, 2]));
+      expect(new Set(materialViews.map((t) => t.samplerBinding)).size).toBe(4);
       expect(selected[2].textures.find((t) => t.name === "material_EmissiveTexture")!.arrayLayer).toBe(
         selected[2].textures.find((t) => t.name === "material_BaseTexture")!.arrayLayer
       );

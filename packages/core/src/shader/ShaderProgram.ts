@@ -1,6 +1,9 @@
 import type { IShaderUniformBlock } from "@galacean/engine-design";
 import type { IPlatformShaderProgram, IPlatformShaderSource, IPlatformUniform } from "../renderingHardwareInterface";
 import type { Engine } from "../Engine";
+import type { Camera } from "../Camera";
+import type { Material } from "../material/Material";
+import type { Renderer } from "../Renderer";
 import { Texture } from "../texture";
 import { ShaderTextureLayout } from "./ShaderTextureLayout";
 import { ShaderData, ShaderPropertyValueType } from "./ShaderData";
@@ -86,6 +89,82 @@ export class ShaderProgram {
     } catch (error) {
       this.destroy();
       throw error;
+    }
+  }
+
+  /** Bind the native program and update the loose uniform and texture inputs actually used by this draw. */
+  bindForDraw(
+    camera: Camera,
+    renderer: Renderer,
+    material: Material,
+    renderElementShaderData: ShaderData | undefined,
+    isInstanced: boolean
+  ): void {
+    const switchProgram = this.bind();
+    if (!this._platformProgram.uniforms.length) return;
+    const renderCount = this._engine._renderCount;
+    const { instanceId: cameraId, shaderData: cameraData } = camera;
+    const { instanceId: sceneId, shaderData: sceneData } = camera.scene!;
+    const { instanceId: rendererId, shaderData: rendererData } = renderer;
+    const { instanceId: materialId, shaderData: materialData } = material;
+    const switchRenderCount = renderCount !== this._uploadRenderCount;
+
+    // Upload uniforms (cache-aware per block). Renderer block carries plain samplers/arrays
+    // even on the instanced path (GLSL forbids them in UBOs); `_canBatch` ensures the whole
+    // batch agrees on those, so the leader's values are correct for the draw call
+    if (switchRenderCount) {
+      this.regroupUniformBlocks();
+      this.uploadAll(this.sceneUniformBlock, sceneData);
+      this.uploadAll(this.cameraUniformBlock, cameraData);
+      this.uploadAll(this.rendererUniformBlock, rendererData);
+      this._uploadRendererId = isInstanced ? -1 : rendererId;
+      this.uploadAll(this.materialUniformBlock, materialData);
+      renderElementShaderData && this.uploadAll(this.renderElementUniformBlock, renderElementShaderData);
+      // UnGroup textures should upload default value, texture uint maybe change by logic of texture bind
+      this.uploadUnGroupTextures();
+      this._uploadSceneId = sceneId;
+      this._uploadCameraId = cameraId;
+      this._uploadMaterialId = materialId;
+      this._uploadRenderCount = renderCount;
+    } else {
+      if (this._uploadSceneId !== sceneId) {
+        this.uploadAll(this.sceneUniformBlock, sceneData);
+        this._uploadSceneId = sceneId;
+      } else if (switchProgram) {
+        this.uploadTextures(this.sceneUniformBlock, sceneData);
+      }
+
+      if (this._uploadCameraId !== cameraId) {
+        this.uploadAll(this.cameraUniformBlock, cameraData);
+        this._uploadCameraId = cameraId;
+      } else if (switchProgram) {
+        this.uploadTextures(this.cameraUniformBlock, cameraData);
+      }
+
+      if (isInstanced) {
+        // Different batches may have different leaders, re-upload every time
+        this.uploadAll(this.rendererUniformBlock, rendererData);
+        this._uploadRendererId = -1;
+      } else if (this._uploadRendererId !== rendererId) {
+        this.uploadAll(this.rendererUniformBlock, rendererData);
+        this._uploadRendererId = rendererId;
+      } else if (switchProgram) {
+        this.uploadTextures(this.rendererUniformBlock, rendererData);
+      }
+
+      if (this._uploadMaterialId !== materialId) {
+        this.uploadAll(this.materialUniformBlock, materialData);
+        this._uploadMaterialId = materialId;
+      } else if (switchProgram) {
+        this.uploadTextures(this.materialUniformBlock, materialData);
+      }
+
+      renderElementShaderData && this.uploadAll(this.renderElementUniformBlock, renderElementShaderData);
+
+      // We only consider switchProgram case, because UnGroup texture's value is always default
+      if (switchProgram) {
+        this.uploadUnGroupTextures();
+      }
     }
   }
 

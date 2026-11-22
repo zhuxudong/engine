@@ -5,6 +5,7 @@ import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
 import { BufferUsage } from "../graphic/enums/BufferUsage";
 import { ShaderData } from "./ShaderData";
 import { RendererUniformCache } from "./RendererUniformCache";
+import { RendererUniformKey } from "./RendererUniformKey";
 import { Std140FieldWriter } from "./Std140FieldWriter";
 import { ShaderProperty } from "./ShaderProperty";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
@@ -37,6 +38,7 @@ export class GlobalUniformBlock {
   private readonly _previous: Uint32Array;
   private readonly _materialRanges?: { words: Uint32Array; offset: number }[];
   private readonly _cacheRendererValues: boolean;
+  private readonly _rendererKey?: RendererUniformKey;
   private _nextMaterialRange = 0;
   private _rendererRanges?: RendererUniformCache;
   private readonly _stride: number;
@@ -61,6 +63,7 @@ export class GlobalUniformBlock {
     this._previous = new Uint32Array(size / 4);
     // A compact per-draw block can contain both transform matrices and material values.
     this._cacheRendererValues = layout.name === "Auto" && size <= 256;
+    if (this._cacheRendererValues) this._rendererKey = RendererUniformKey.create(layout);
     // Retain at most 1 KiB of extra packed values for small automatically grouped blocks.
     if (layout.name === "Auto" && size <= 128) {
       this._materialRanges = Array.from({ length: 8 }, () => ({ words: new Uint32Array(size / 4), offset: -1 }));
@@ -96,6 +99,9 @@ export class GlobalUniformBlock {
     material?: ShaderData,
     element?: ShaderData
   ): void {
+    const owner = renderer?._rendererId;
+    const key = owner ? this._rendererKey?.read(renderer!, material) : undefined;
+    if (key && this._rendererRanges?.bindUnchanged(owner!, key)) return;
     const fields = this._fields;
     const values = (this._group === ShaderDataGroup.Scene ? scene : camera)?._propertyValueMap;
     let groups = ShaderDataGroup.None;
@@ -120,9 +126,14 @@ export class GlobalUniformBlock {
       field.writer.write(field.view, field.offset, value);
     }
 
-    if (this._cacheRendererValues && hasRendererValue && renderer?._rendererId) {
-      const ranges = (this._rendererRanges ??= new RendererUniformCache(this._engine, this._binding, this._stride));
-      if (ranges.bind(renderer._rendererId, this._staging)) return;
+    if (this._cacheRendererValues && hasRendererValue && owner) {
+      const ranges = (this._rendererRanges ??= new RendererUniformCache(
+        this._engine,
+        this._binding,
+        this._stride,
+        this._rendererKey?.values.length
+      ));
+      if (ranges.bind(owner, this._staging, key)) return;
     }
     this._bindRange(groups === ShaderDataGroup.Material);
   }

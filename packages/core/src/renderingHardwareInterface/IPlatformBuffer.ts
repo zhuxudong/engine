@@ -12,6 +12,9 @@ export interface IPlatformBuffer {
     options?: SetDataOptions
   ): void;
 
+  /** Append the active instance records and return an aligned offset for the shader's full declared block. */
+  writeInstanceData?(data: Float32Array, activeWords: number, bindingSize: number): number;
+
   readonly supportsSynchronousReadback?: boolean;
   /** Changes when a GPU shader writes the buffer without supplying CPU data. */
   readonly shaderWriteRevision?: number;

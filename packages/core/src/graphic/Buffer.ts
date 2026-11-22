@@ -22,6 +22,8 @@ export class Buffer extends GraphicsResource {
   private _readable: boolean;
   private _cpuDataValid = true;
   private _cpuShaderWriteRevision = 0;
+  private _vertexSource?: WeakRef<ArrayBufferView>;
+  private _vertexSourceRevision?: number;
   private _data: Uint8Array | null;
 
   /**
@@ -74,6 +76,23 @@ export class Buffer extends GraphicsResource {
       this._cpuShaderWriteRevision === (this._platformBuffer.shaderWriteRevision ?? 0)
       ? this._data
       : null;
+  }
+
+  /** @internal Remember immutable loader-owned vertex data while its original allocation is still alive. */
+  _rememberVertexSource(data: ArrayBufferView): void {
+    if (!this._readable && typeof WeakRef !== "undefined") {
+      this._vertexSource = new WeakRef(data);
+      this._vertexSourceRevision = this._platformBuffer.shaderWriteRevision;
+    }
+  }
+
+  /** @internal Synchronous emission data when the mesh or its loader still has the uploaded bytes. */
+  _getVertexSource(): Uint8Array | null {
+    const readable = this._readableData;
+    if (readable) return readable;
+    const source =
+      this._vertexSourceRevision === this._platformBuffer.shaderWriteRevision && this._vertexSource?.deref();
+    return source ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength) : null;
   }
 
   /**
@@ -212,6 +231,7 @@ export class Buffer extends GraphicsResource {
     dataLength?: number,
     discard = false
   ): void {
+    this._vertexSource = undefined;
     if (this._readable) {
       const view = ArrayBuffer.isView(data) ? data : undefined;
       const buffer = view ? view.buffer : (data as ArrayBuffer);
@@ -294,6 +314,7 @@ export class Buffer extends GraphicsResource {
    */
   copyFromBuffer(srcBuffer: Buffer, srcByteOffset: number, dstByteOffset: number, byteLength: number): void {
     this._platformBuffer.copyFromBuffer(srcBuffer._platformBuffer, srcByteOffset, dstByteOffset, byteLength);
+    this._vertexSource = undefined;
     if (this._readable) {
       if (srcBuffer._readableData) {
         this._data!.set(srcBuffer._data!.subarray(srcByteOffset, srcByteOffset + byteLength), dstByteOffset);
@@ -320,6 +341,7 @@ export class Buffer extends GraphicsResource {
    */
   override _rebuild(): void {
     const snapshot = this._readableData;
+    this._vertexSource = undefined;
     const platformBuffer = this._engine._hardwareRenderer.createPlatformBuffer(
       this._type,
       this._byteLength,

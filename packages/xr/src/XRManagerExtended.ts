@@ -163,6 +163,7 @@ export class XRManagerExtended extends XRManager {
    * @internal
    */
   _onSessionStop(): void {
+    this.cameraManager._onSessionExit();
     const { features } = this;
     for (let i = 0, n = features.length; i < n; i++) {
       const feature = features[i];

@@ -9,6 +9,7 @@ const scenarios = requested.length ? requested : ["S1", "S2", "S3", "S4", "S5"];
 const results = [];
 const captures = process.env.CAPTURE_DIRECTORY;
 const prewarm = process.env.PREWARM === "1";
+const timing = process.env.GPU_TIMING === "1";
 if (captures) await mkdir(captures, { recursive: true });
 const backend = process.env.BACKEND ?? "webgl2";
 for (const scenario of scenarios) {
@@ -28,9 +29,12 @@ for (const scenario of scenarios) {
             : "text/javascript"
       });
     });
-    await page.goto(
-      `http://localhost/?scene=${encodeURIComponent(scenario)}&backend=${encodeURIComponent(backend)}${captures ? "&capture" : ""}${prewarm ? "&prewarm" : ""}`
-    );
+    const params = new URLSearchParams({ scene: scenario, backend });
+    if (captures) params.set("capture", "1");
+    if (prewarm) params.set("prewarm", "1");
+    if (timing) params.set("timing", "1");
+    if (scenario === "S5" && process.env.S5_EFFECTS) params.set("effects", process.env.S5_EFFECTS);
+    await page.goto("http://localhost/?" + params);
     await page.waitForFunction(() => !!document.querySelector("#result").dataset.status, undefined, {
       timeout: 180000
     });

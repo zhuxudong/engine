@@ -45,6 +45,9 @@ export interface IXRSession {
   beginView?(eye: "left" | "right" | "none"): boolean;
   /** Release the eye attachment after a camera draw. */
   endView?(): void;
+  /** Clip planes of the projection supplied by the compositor, in world units. */
+  readonly depthNear?: number;
+  readonly depthFar?: number;
 
   /**
    * Set fixed foveation for camera.

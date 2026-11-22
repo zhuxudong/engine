@@ -17,6 +17,8 @@ export class WebGPUBuffer implements IPlatformBuffer {
   private _serial = -1;
   private _usedStart = 0;
   private _usedEnd = 0;
+  private _instanceSubmission = -1;
+  private _instanceOffset = 0;
   private _expandedIndices?: GPUBuffer;
   private _expandedVersion = -1;
   private _spares?: { buffer: GPUBuffer; submission: number }[];
@@ -42,6 +44,30 @@ export class WebGPUBuffer implements IPlatformBuffer {
   }
 
   bind(): void {}
+
+  writeInstanceData(data: Float32Array, activeWords: number, bindingSize: number): number {
+    const serial = this._device.submissionSerial;
+    const activeBytes = activeWords * Float32Array.BYTES_PER_ELEMENT;
+    if (activeBytes > bindingSize || bindingSize > this.byteLength) {
+      throw new RangeError("Instance records exceed the uniform binding size.");
+    }
+    if (this._instanceSubmission !== serial) {
+      this._instanceSubmission = serial;
+      this._instanceOffset = 0;
+    } else if (this._instanceOffset + bindingSize > this.byteLength) {
+      this._rotateBacking();
+      this._serial = -1;
+      this._instanceOffset = 0;
+    }
+    const offset = this._instanceOffset;
+    // The generated instance block is indexed only by the instance ID of this draw.
+    // Later writes can occupy its unused suffix while every active header and record stays intact.
+    this._device.device.queue.writeBuffer(this._gpuBuffer, offset, data, 0, activeWords);
+    const alignment = this._device.uniformBufferOffsetAlignment;
+    this._instanceOffset = offset + Math.ceil(activeBytes / alignment) * alignment;
+    this._contentVersion++;
+    return offset;
+  }
 
   _markUsed(offset = 0, size = this.byteLength): void {
     const serial = this._device.submissionSerial;
@@ -72,6 +98,7 @@ export class WebGPUBuffer implements IPlatformBuffer {
     const aligned = Math.floor(offset / 4) * 4;
     const length = Math.ceil(end / 4) * 4 - aligned;
     let initialized = true;
+    let orderedWrite = false;
     if (
       this._serial === this._device.submissionSerial &&
       (discard || (this._usedStart < aligned + length && aligned < this._usedEnd))
@@ -80,7 +107,7 @@ export class WebGPUBuffer implements IPlatformBuffer {
         initialized = this._rotateBacking();
         this._serial = -1;
       } else {
-        this._device.flush();
+        orderedWrite = true;
       }
     }
     if (discard && initialized && (aligned || aligned + length < this._allocationSize)) {
@@ -92,11 +119,17 @@ export class WebGPUBuffer implements IPlatformBuffer {
     }
     if (!length) return;
     if (aligned === offset && length === source.length) {
-      this._device.device.queue.writeBuffer(this._gpuBuffer, offset, source);
+      if (orderedWrite) {
+        this._device._writeBufferInOrder(this._gpuBuffer, offset, source);
+        this._markUsed(offset, source.length);
+      } else this._device.device.queue.writeBuffer(this._gpuBuffer, offset, source);
     } else if (discard || (aligned === offset && end === this.byteLength)) {
       const padded = new Uint8Array(length);
       padded.set(source, offset - aligned);
-      this._device.device.queue.writeBuffer(this._gpuBuffer, aligned, padded);
+      if (orderedWrite) {
+        this._device._writeBufferInOrder(this._gpuBuffer, aligned, padded);
+        this._markUsed(aligned, padded.length);
+      } else this._device.device.queue.writeBuffer(this._gpuBuffer, aligned, padded);
     } else {
       const staging = this._device.device.createBuffer({
         size: Math.ceil(source.length / 4) * 4,

@@ -119,23 +119,23 @@ export class InstanceBuffer {
 
     // Drivers validate the size of the entire declared array, even for a short final segment.
     const buffer = this.buffer;
-    let offset = this._nextOffset;
-    const wrap = offset + this._rangeBytes > buffer.byteLength;
-    if (wrap) offset = 0;
-    buffer.setData(
-      floatView,
-      offset,
-      0,
-      headerBytes / 4 + count * elementsPerInstance,
-      wrap ? SetDataOptions.Discard : SetDataOptions.None
-    );
+    const platform = buffer._platformBuffer;
+    const activeWords = headerBytes / 4 + count * elementsPerInstance;
+    let offset: number;
+    if (platform.writeInstanceData) {
+      offset = platform.writeInstanceData(floatView, activeWords, this._rangeBytes);
+    } else {
+      const wrap = this._nextOffset + this._rangeBytes > buffer.byteLength;
+      offset = wrap ? 0 : this._nextOffset;
+      buffer.setData(floatView, offset, 0, activeWords, wrap ? SetDataOptions.Discard : SetDataOptions.None);
+      this._nextOffset = offset + this._rangeStride;
+    }
     this._engine._hardwareRenderer.bindUniformBufferRange(
       ConstantBufferBindingPoint.RendererInstance,
-      buffer._platformBuffer,
+      platform,
       offset,
       this._rangeBytes
     );
-    this._nextOffset = offset + this._rangeStride;
   }
 
   destroy(): void {

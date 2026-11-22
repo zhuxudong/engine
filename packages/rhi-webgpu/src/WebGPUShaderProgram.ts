@@ -47,7 +47,7 @@ interface ViewBinding {
 }
 interface GroupBindings {
   views: ViewBinding[];
-  empty: boolean;
+  index: number;
   lastBuffer?: GPUBuffer;
   samplers: SamplerBinding[];
   blocks: BlockBinding[];
@@ -64,17 +64,19 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
   private static _counter = 0;
   readonly id = WebGPUShaderProgram._counter++;
   readonly attributeLocation: Record<string, number> = Object.create(null);
-  private _destroyed=false;
-  get isValid():boolean { return !this._destroyed; }
+  private _destroyed = false;
+  get isValid(): boolean {
+    return !this._destroyed;
+  }
   readonly uniforms: IPlatformUniform[] = [];
   readonly uniformBlockIds: number[] = [];
-  readonly _groupLayouts: GPUBindGroupLayout[] = [];
+  readonly _groupLayouts: (GPUBindGroupLayout | null)[] = [];
   readonly reflection: IWebGPUShaderReflection;
   private readonly _groups: GroupBindings[] = [];
   private readonly _packed: ViewBinding[] = [];
   private readonly _pipelines = new Map<string, GPURenderPipeline>();
   private readonly _states: {
-    vertex: string;
+    vertex: number;
     target: string;
     primitive: number;
     blend: number;
@@ -207,17 +209,21 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
           sampler.slots.push(slot);
         }
       }
+      if (!entries.length) {
+        this._groupLayouts.push(null);
+        continue;
+      }
       const singleDynamic = dynamicCount === 1 && blocks.length === 1 && !textures.length;
       this._groups.push({
         blocks,
         textures,
         views: Array.from(views.values()),
-        empty: entries.length === 0,
+        index: group,
         samplers: Array.from(samplers.values()),
         offsets: new Uint32Array(dynamicCount),
         entries: [],
         byBuffer: singleDynamic ? new WeakMap() : undefined,
-        recent: entries.length && !singleDynamic ? [] : undefined
+        recent: singleDynamic ? undefined : []
       });
       this._groupLayouts.push(device.createBindGroupLayout({ entries }));
     }
@@ -240,13 +246,13 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     return false;
   }
   destroy(): void {
-    this._destroyed=true;
-    if (this._graphicDevice._currentBindShaderProgram===this) this._graphicDevice._currentBindShaderProgram=null;
+    this._destroyed = true;
+    if (this._graphicDevice._currentBindShaderProgram === this) this._graphicDevice._currentBindShaderProgram = null;
     this._pipelines.clear();
     this._states.length = 0;
     this._groups.length = 0;
-    this._groupLayouts.length=0;
-    this.uniforms.length=0;
+    this._groupLayouts.length = 0;
+    this.uniforms.length = 0;
     this._pendingPipelines.clear();
     for (const binding of this._packed) binding.cache!.destroy();
     this._packed.length = 0;
@@ -286,12 +292,10 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
   }
 
   _bindGroups(pass: GPUComputePassEncoder | RenderDrawCommands, count = 4): void {
-    for (let index = 0; index < count; index++) {
-      const group = this._groups[index];
-      if (group.empty && group.cached) {
-        this._graphicDevice._setEmptyGroup(pass, index, group.cached);
-        continue;
-      }
+    for (let slot = 0; slot < this._groups.length; slot++) {
+      const group = this._groups[slot];
+      const index = group.index;
+      if (index >= count) break;
       if (group.byBuffer) {
         const { point, layout } = group.blocks[0];
         const range = this._graphicDevice.uniformRanges[point];
@@ -302,7 +306,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         let native = group.lastBuffer === buffer ? group.cached : group.byBuffer.get(buffer);
         if (!native) {
           native = this._graphicDevice.device.createBindGroup({
-            layout: this._groupLayouts[index],
+            layout: this._groupLayouts[index]!,
             entries: [{ binding: layout.binding, resource: { buffer, size: layout.byteLength } }]
           });
           group.byBuffer.set(buffer, native);
@@ -356,10 +360,14 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         const type = shared.type,
           slots = shared.slots;
         const first = slots[0].value?._platformTexture as WebGPUTexture | undefined;
-        const sampler = first?.getSampler(type,slots[0].layout.arrayMipOffset,slots[0].layout.arrayMipCount) ?? this._graphicDevice._fallbackSampler(type);
+        const sampler =
+          first?.getSampler(type, slots[0].layout.arrayMipOffset, slots[0].layout.arrayMipCount) ??
+          this._graphicDevice._fallbackSampler(type);
         for (let j = 1; j < slots.length; j++) {
           const texture = slots[j].value?._platformTexture as WebGPUTexture | undefined;
-          const candidate = texture?.getSampler(type,slots[j].layout.arrayMipOffset,slots[j].layout.arrayMipCount) ?? this._graphicDevice._fallbackSampler(type);
+          const candidate =
+            texture?.getSampler(type, slots[j].layout.arrayMipOffset, slots[j].layout.arrayMipCount) ??
+            this._graphicDevice._fallbackSampler(type);
           if (candidate !== sampler)
             throw new Error(
               "Shared WebGPU sampler binding " + shared.binding + " requires matching texture sampling state."
@@ -398,7 +406,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
       }
     }
     const native = this._graphicDevice.device.createBindGroup({
-      layout: this._groupLayouts[index],
+      layout: this._groupLayouts[index]!,
       entries: group.entries
     });
     if (recent) {
@@ -468,9 +476,8 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         ((c?.[RenderStateElementKey.StencilStateMask] ?? stencil.mask) & 255) |
         (((c?.[RenderStateElementKey.StencilStateWriteMask] ?? stencil.writeMask) & 255) << 8);
     }
-    const override = driver._getGlobalDepthBias();
-    const bias = override.enabled ? override.bias : raster.depthBias,
-      slope = override.enabled ? override.slopeBias : raster.slopeScaledDepthBias;
+    const bias = raster.depthBias,
+      slope = raster.slopeScaledDepthBias;
     const states = this._states;
     for (let i = states.length - 1; i >= 0; i--) {
       const s = states[i];
@@ -542,7 +549,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
   private _pipelineDescriptor(
     primitive: WebGPUPrimitive,
     subPrimitive: SubPrimitive,
-    vertexState: { buffers: Array<GPUVertexBufferLayout | null>; key: string },
+    vertexState: { buffers: Array<GPUVertexBufferLayout | null>; key: number },
     attachmentState = this._graphicDevice._getAttachmentState(),
     renderState = this._graphicDevice._getRenderState()
   ): { key: string; descriptor: GPURenderPipelineDescriptor } {
@@ -624,15 +631,12 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
     const stencilEnabled = renderState.customStates?.[RenderStateElementKey.StencilStateEnabled] ?? stencil.enabled;
     const hasStencil = format.includes("stencil");
 
-    const globalDepthBias = this._graphicDevice._getGlobalDepthBias();
     const descriptor: GPUDepthStencilState = {
       format,
       depthWriteEnabled: depthEnabled && depth.writeEnabled,
       depthCompare: depthEnabled ? WebGPUShaderProgram._compareFunction(depth.compareFunction) : "always",
-      depthBias: Math.trunc(globalDepthBias.enabled ? globalDepthBias.bias : renderState.state.rasterState.depthBias),
-      depthBiasSlopeScale: globalDepthBias.enabled
-        ? globalDepthBias.slopeBias
-        : renderState.state.rasterState.slopeScaledDepthBias
+      depthBias: Math.trunc(renderState.state.rasterState.depthBias),
+      depthBiasSlopeScale: renderState.state.rasterState.slopeScaledDepthBias
     };
     if (hasStencil) {
       descriptor.stencilReadMask = renderState.customStates?.[RenderStateElementKey.StencilStateMask] ?? stencil.mask;

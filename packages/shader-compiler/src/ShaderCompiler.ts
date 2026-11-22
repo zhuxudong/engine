@@ -28,7 +28,7 @@ export class ShaderCompiler {
   private readonly _chunkOutputCache: ChunkOutputCache = new Map();
   private readonly _sourceParserObjectPool = new ParserObjectPool();
   private readonly _parserObjectPool = new ParserObjectPool();
-  private readonly _runtimeParser = createRuntimeShaderTargetParser(this._parserObjectPool);
+  private _runtimeParser?: ReturnType<typeof createRuntimeShaderTargetParser>;
 
   /**
    * Replaces the `#include` lookup table and clears the derived chunk cache.
@@ -57,7 +57,7 @@ export class ShaderCompiler {
    * @param source - GLSL source contained by the pass.
    * @param vertexEntry - Vertex entry function name.
    * @param fragmentEntry - Fragment entry function name.
-   * @param backend - Target GLES language version.
+   * @param backend - Target shader language.
    * @param sourceFile - Optional logical source location used for relative includes and attribution.
    * @param sourceScopeStarts - Inherited ShaderLab content boundaries from source parsing.
    * @returns Generated stage program, or `undefined` after a blocking parser or backend error.
@@ -77,7 +77,7 @@ export class ShaderCompiler {
       this._chunkOutputCache,
       sourceFile,
       this._parserObjectPool,
-      this._runtimeParser,
+      (this._runtimeParser ??= createRuntimeShaderTargetParser(this._parserObjectPool)),
       sourceScopeStarts
     );
     return generateParsedShaderPassData(parsed, vertexEntry, fragmentEntry, backend, undefined, this.webgpu);
@@ -86,7 +86,7 @@ export class ShaderCompiler {
   /**
    * Generates backend source from a pass returned by `ShaderAnalyzer.analyze()` without parsing it again.
    * @param pass - Opaque parsed-pass handle from the analyzer result.
-   * @param backend - Target GLES language version.
+   * @param backend - Target shader language.
    * @returns Variant-selectable instructions and unselected text for inspection, or `undefined` on validation failure.
    * @throws TypeError when `pass` was not created by the compatible shader-parser package instance.
    */

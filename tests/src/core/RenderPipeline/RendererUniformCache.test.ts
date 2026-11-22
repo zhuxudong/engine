@@ -1,5 +1,6 @@
 import {
   Camera,
+  Color,
   Material,
   MeshRenderer,
   PrimitiveMesh,
@@ -127,6 +128,47 @@ it("reuses the built-in unlit layout with transforms and alternating materials",
   expect(draws).toHaveBeenCalledTimes(16);
   expect(uploads.mock.calls.filter(([target]) => target === gl.UNIFORM_BUFFER)).toHaveLength(0);
   expect(gl.getError()).toBe(gl.NO_ERROR);
+});
+
+it("revalidates calculated transforms and live material values across cameras and same-frame overrides", () => {
+  const root = engine.sceneManager.activeScene.createRootEntity();
+  const cameras = [0, 0.75].map((x) => {
+    const camera = root.createChild().addComponent(Camera);
+    camera.entity.transform.setPosition(x, 0, 5);
+    camera.isOrthographic = true;
+    camera.orthographicSize = 1;
+    const texture = new Texture2D(engine, 8, 8, TextureFormat.R8G8B8A8_UNorm, false, false);
+    camera.renderTarget = new RenderTarget(engine, 8, 8, texture);
+    return { camera, texture };
+  });
+  const renderer = root.createChild().addComponent(MeshRenderer);
+  renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1);
+  const material = new UnlitMaterial(engine);
+  material.baseColor.set(1, 0, 0, 1);
+  renderer.setMaterial(material);
+  const draw = (index: number, x = 4) => {
+    const { camera, texture } = cameras[index];
+    camera.render();
+    const pixel = new Uint8Array(4);
+    texture.getPixelBuffer(x, 4, 1, 1, pixel);
+    return Array.from(pixel);
+  };
+
+  cameras[1].camera.enabled = false;
+  engine.update();
+  engine.update();
+  engine.update();
+  expect(draw(0)).toEqual([255, 0, 0, 255]);
+  material.baseColor.set(0, 1, 0, 1);
+  expect(draw(0)).toEqual([0, 255, 0, 255]);
+  expect(draw(1)).not.toEqual([0, 255, 0, 255]);
+  expect(draw(1, 1)).toEqual([0, 255, 0, 255]);
+  expect(draw(0)).toEqual([0, 255, 0, 255]);
+  const mvp = renderer.shaderData.getMatrix("renderer_MVPMat");
+  mvp.elements.fill(0);
+  expect(draw(0)).toEqual([0, 255, 0, 255]);
+  renderer.shaderData.setColor("material_BaseColor", new Color(0, 0, 1, 1));
+  expect(draw(0)).toEqual([0, 0, 255, 255]);
 });
 
 it("bounds both candidates and resident pages and falls back for additional renderers", () => {

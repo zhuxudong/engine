@@ -11,6 +11,7 @@ interface Page {
 interface Entry {
   owner: number;
   words: Uint32Array;
+  key?: Float64Array;
   frame: number;
   generation: number;
   page: Page;
@@ -31,26 +32,47 @@ export class RendererUniformCache {
   constructor(
     private readonly _engine: Engine,
     private readonly _binding: number,
-    private readonly _stride: number
+    private readonly _stride: number,
+    private readonly _keyLength = 0
   ) {}
 
-  bind(owner: number, words: Uint32Array): boolean {
+  bindUnchanged(owner: number, key: Float64Array): boolean {
+    const entry = this._entries.get(owner);
+    const previous = entry?.key;
+    if (!previous || !entry.generation || previous[0] !== key[0]) return false;
+    for (let i = 1; i < key.length; i++) {
+      // NaN payloads and signed zero are observable through floatBitsToUint.
+      const value = key[i];
+      if (value !== value || !Object.is(value, previous[i])) return false;
+    }
+    const page = entry.page;
+    const buffer = page.buffer;
+    if (!buffer || buffer.isContentLost || page.generation !== entry.generation) return false;
+    entry.frame = this._engine.time.frameCount;
+    buffer._bindUniformRange(this._binding, entry.offset, entry.words.byteLength);
+    return true;
+  }
+
+  bind(owner: number, words: Uint32Array, key?: Float64Array): boolean {
     const frame = this._engine.time.frameCount;
     let entry = this._entries.get(owner);
+    const previousFrame = entry?.frame;
     if (!entry) {
       entry = this._claim(words.length, frame);
       if (!entry) return false;
       entry.owner = owner;
-      entry.words.set(words);
-      entry.frame = frame;
       entry.generation = 0;
       this._entries.set(owner, entry);
-      return false;
     }
 
-    const previousFrame = entry.frame;
     entry.frame = frame;
+    if (key) entry.key!.set(key);
+    else if (entry.key) entry.key[0] = 0;
     const previous = entry.words;
+    if (previousFrame === undefined) {
+      previous.set(words);
+      return false;
+    }
     for (let i = 0; i < words.length; i++) {
       if (words[i] !== previous[i]) {
         previous.set(words);
@@ -93,15 +115,17 @@ export class RendererUniformCache {
     const count = RendererUniformCache._pageSlots;
     // Reserve both the future GPU page and compact comparison records before admitting candidates.
     // The minimum charge also bounds the number of indexed entries under small device alignments.
-    const charge = count * Math.max(256, this._stride + 4 * wordCount + 64);
+    const charge = count * Math.max(256, this._stride + 4 * wordCount + 8 * this._keyLength + 64);
     const engine = this._engine;
     if (engine._rendererUniformCacheBytes + charge <= RendererUniformCache._budget) {
       const page: Page = { generation: 1 };
       const snapshots = new Uint32Array(wordCount * count);
+      const keys = this._keyLength ? new Float64Array(this._keyLength * count) : null;
       for (let i = 0; i < count; ++i) {
         slots.push({
           owner: 0,
           words: snapshots.subarray(i * wordCount, (i + 1) * wordCount),
+          key: keys?.subarray(i * this._keyLength, (i + 1) * this._keyLength),
           frame: -1,
           generation: 0,
           page,

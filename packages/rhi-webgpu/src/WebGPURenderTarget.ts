@@ -85,7 +85,7 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
   }
 
   blitRenderTarget(): void {
-    this._device._getCommandEncoder();
+    this._device._finishTarget(this);
     const depth = this._target.depthTexture;
     if (this._target.antiAliasing > 1 && depth) {
       this._device._resolveDepth(
@@ -122,10 +122,9 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
   }
 
   destroy(): void {
-    this._device.flush();
     for (const set of this._transients.values()) {
-      for (const texture of set.colors) texture.destroy();
-      set.depth?.destroy();
+      for (const texture of set.colors) this._device._retireTexture(texture);
+      if (set.depth) this._device._retireTexture(set.depth);
     }
     this._transients.clear();
   }

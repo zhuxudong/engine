@@ -17,7 +17,7 @@ interface VertexStream {
 interface VertexLayout {
   buffers: Array<GPUVertexBufferLayout | null>;
   defaultBufferSlot?: number;
-  key: string;
+  key: number;
   streams: VertexStream[];
   expandedStreams: VertexStream[];
 }
@@ -150,7 +150,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       defaultBufferSlot,
       streams,
       expandedStreams: streams.filter((stream) => stream.rate > 1),
-      key: JSON.stringify(buffers)
+      key: this._device._getVertexLayoutId(buffers)
     };
     this._layouts.set(inputs, result);
     return result;

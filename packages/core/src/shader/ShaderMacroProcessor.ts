@@ -34,6 +34,16 @@ interface OwnedChunk {
  * @internal
  */
 export class ShaderMacroProcessor {
+  /** @internal The feature-free environment shared by offline WGSL baking and runtime variant selection. */
+  static readonly _defaultWebGPUMacros: ReadonlyMap<string, string> = new Map([
+    ["GRAPHICS_API_WEBGPU", ""],
+    ["HAS_TEX_LOD", ""],
+    ["HAS_DERIVATIVES", ""],
+    ["GL_ES", "1"],
+    ["GL_FRAGMENT_PRECISION_HIGH", "1"],
+    ["__VERSION__", "300"]
+  ]);
+
   private static _valueMacros = new Map<string, string>();
   private static _funcMacros = new Map<string, FuncMacro>();
   private static _shaderChunks: string[] = [];
@@ -67,7 +77,7 @@ export class ShaderMacroProcessor {
    */
   static evaluate(
     instructions: ShaderInstruction[],
-    macros: Map<string, string>,
+    macros: ReadonlyMap<string, string>,
     sites?: readonly IShaderUniformSite[],
     selections?: IShaderUniformSelection[]
   ): string {

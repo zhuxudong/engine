@@ -1,8 +1,10 @@
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { compareImages } from "./compare.mjs";
 
 const examples = [
   "ui-batch-order",
@@ -17,12 +19,46 @@ const examples = [
   "camera-opaque-texture",
   "material-pbr-clearcoat",
   "particleRenderer-sub-emitter",
-  "particleRenderer-shape-mesh"
+  "particleRenderer-shape-mesh",
+  "gltf-meshopt",
+  "animator-play",
+  "material-pbr-specular",
+  "material-white-furnace",
+  "texture-hdr",
+  "texture-hdr-ktx2",
+  "texture-sRGB-KTX2",
+  "postProcess-HDR-bloom-ACES",
+  "postProcess-LDR-bloom-neutral",
+  "postProcess-customPass",
+  "trailRenderer-basic",
+  "text-character-spacing",
+  "text-typed",
+  "shadow-transparent",
+  "shader-mrt",
+  "multi-camera-no-clear",
+  "camera-fxaa"
 ];
 const root = fileURLToPath(new URL("../../../e2e/", import.meta.url));
 const directory = process.env.CAPTURE_DIRECTORY;
 const selected = process.argv.length > 2 ? process.argv.slice(2) : examples;
 if (directory) await mkdir(directory, { recursive: true });
+const goldenDirectory = path.join(root, "fixtures/originImage");
+const goldenFiles = process.env.GOLDENS === "1" ? await readdir(goldenDirectory) : null;
+
+async function readGolden(entry) {
+  const filename = goldenFiles.find((name) => name.endsWith("_" + entry + ".jpg"));
+  if (!filename) throw new Error("Missing gallery reference for " + entry);
+  const bytes = await readFile(path.join(goldenDirectory, filename));
+  const pointer = /^version https.*\noid sha256:([a-f0-9]{64})\n/.exec(bytes.subarray(0, 150).toString("ascii"));
+  if (!pointer) return bytes;
+  const oid = pointer[1];
+  const gitDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+    cwd: root,
+    encoding: "utf8"
+  }).trim();
+  return readFile(path.join(gitDir, "lfs/objects", oid.slice(0, 2), oid.slice(2, 4), oid));
+}
+
 const browser = await chromium.launch({ args: ["--ignore-gpu-blocklist", "--use-gl=angle"] });
 const captures = new Map();
 let failures = 0;
@@ -105,35 +141,22 @@ try {
           if (errors.length) throw new Error(errors[0]);
           if (directory)
             await writeFile(path.join(directory, backend + "-" + entry + ".png"), Buffer.from(actual.image, "base64"));
+          if (goldenFiles) {
+            const reference = await readGolden(entry);
+            const golden = await page.evaluate(compareImages, [reference.toString("base64"), actual.image]);
+            console.log(backend, entry, "gallery reference", JSON.stringify(golden));
+            if (golden.meanRGB > 3 || golden.changedFraction > 0.025) {
+              console.error(backend, entry, "Image differs from the existing gallery reference.");
+              failures++;
+            }
+          }
           if (backend === "webgl2") {
             captures.set(entry, actual.image);
             continue;
           }
-          const delta = await page.evaluate(
-            async ([a, b]) => {
-              async function decode(data) {
-                const bitmap = await createImageBitmap(await (await fetch("data:image/png;base64," + data)).blob());
-                const canvas = new OffscreenCanvas(bitmap.width, bitmap.height),
-                  ctx = canvas.getContext("2d");
-                ctx.drawImage(bitmap, 0, 0);
-                bitmap.close();
-                return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-              }
-              const x = await decode(a),
-                y = await decode(b);
-              let diff = 0,
-                changed = 0;
-              for (let i = 0; i < x.length; i += 4) {
-                const r = Math.abs(x[i] - y[i]),
-                  g = Math.abs(x[i + 1] - y[i + 1]),
-                  b = Math.abs(x[i + 2] - y[i + 2]);
-                diff += r + g + b;
-                if (Math.max(r, g, b) > 20) changed++;
-              }
-              return { meanRGB: diff / ((x.length / 4) * 3), changedFraction: changed / (x.length / 4) };
-            },
-            [captures.get(entry), actual.image]
-          );
+          const reference = captures.get(entry);
+          if (!reference) throw new Error("Missing WebGL2 capture for this scene.");
+          const delta = await page.evaluate(compareImages, [reference, actual.image]);
           console.log(entry, JSON.stringify(delta));
           if (delta.meanRGB > 3 || delta.changedFraction > 0.025)
             throw new Error("Image differs from the WebGL2 reference.");

@@ -45,7 +45,7 @@ export class ShaderPrecompiler {
   /**
    * Compiles complete ShaderLab source into a serializable `.shaderc` structure.
    * @param sourceCode - Complete ShaderLab source.
-   * @param platformTarget - Target GLES language.
+   * @param platformTarget - Target shader language.
    * @param sourceFile - Optional logical root location used for relative includes and attribution.
    * @returns Serializable precompiled shader.
    * @throws Error when structural parsing, pass validation, or backend generation fails.

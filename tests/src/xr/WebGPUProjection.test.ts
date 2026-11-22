@@ -29,7 +29,7 @@ it.skipIf(!navigator.gpu)(
     let frameCallback: XRFrameRequestCallback;
     const session = Object.assign(new EventTarget(), {
       inputSources: [],
-      renderState: {},
+      renderState: { depthNear: 0.25, depthFar: 64 },
       requestReferenceSpace: async () => ({}),
       updateRenderState: vi.fn(),
       requestAnimationFrame(callback: XRFrameRequestCallback) {
@@ -120,6 +120,10 @@ it.skipIf(!navigator.gpu)(
         material.baseColor.set(i === 0 ? 1 : 0, i === 0 ? 0 : 1, 0, 1);
         renderer.setMaterial(material);
       }
+      const originalFar = cameras[0].farClipPlane;
+      const originalProjection = cameras[1].projectionMatrix.clone();
+      originalProjection.elements[0] = 0.25;
+      cameras[1].projectionMatrix = originalProjection;
       await engine.xrManager.enterXR(XRSessionMode.VR);
       expect(xr.requestSession).toHaveBeenCalledWith(
         "immersive-vr",
@@ -141,6 +145,8 @@ it.skipIf(!navigator.gpu)(
       });
       frameCallback!(performance.now(), frame);
       expect(eyes).toEqual(["left", "right"]);
+      expect(cameras[0].nearClipPlane).toBe(0.25);
+      expect(cameras[0].farClipPlane).toBe(64);
       expect(cameras[0].projectionMatrix.elements[10]).toBe(-2);
       expect(cameras[0].projectionMatrix.elements[14]).toBe(-1);
       const { x, y, width, height } = cameras[1].pixelViewport;
@@ -198,7 +204,10 @@ it.skipIf(!navigator.gpu)(
       expect(await device.popErrorScope()).toBeNull();
       await engine.xrManager.exitXR();
       expect(engine.xrManager.sessionManager._platformSession).toBeNull();
-      expect(cameras[0].pixelViewport.width).toBeCloseTo(engine.canvas.width * cameras[0].viewport.z, 0);
+      expect(cameras[0].pixelViewport.width).toBe(engine.canvas.width);
+      expect(cameras[0].farClipPlane).toBe(originalFar);
+      expect(cameras[0]._isCustomProjectionMatrix).toBe(false);
+      expect(cameras[1].projectionMatrix.elements[0]).toBe(0.25);
       cameras[0].render();
       expect(eyes).toHaveLength(2);
       expect(rhi.hasExternalProjectionDepth).toBe(false);

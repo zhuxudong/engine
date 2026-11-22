@@ -17,14 +17,7 @@ export function compileWebGPUShaderPass(
   features: ReadonlyMap<string, string> = new Map(),
   options: IWebGPUShaderOptions = {}
 ): IWebGPUShaderProgram {
-  const macros = new Map([
-    ["GRAPHICS_API_WEBGPU", ""],
-    ["HAS_TEX_LOD", ""],
-    ["HAS_DERIVATIVES", ""],
-    ["GL_ES", "1"],
-    ["GL_FRAGMENT_PRECISION_HIGH", "1"],
-    ["__VERSION__", "300"]
-  ]);
+  const macros = new Map(ShaderMacroProcessor._defaultWebGPUMacros);
   features.forEach((value, name) => macros.set(name, value));
   const vs: IShaderUniformSelection[] = [],
     fs: IShaderUniformSelection[] = [];

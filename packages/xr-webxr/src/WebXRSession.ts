@@ -52,6 +52,14 @@ export class WebXRSession implements IXRSession {
       : this._platformLayer.framebufferHeight;
   }
 
+  get depthNear(): number | undefined {
+    return this._platformSession.renderState?.depthNear;
+  }
+
+  get depthFar(): number | undefined {
+    return this._platformSession.renderState?.depthFar;
+  }
+
   get frameRate(): number | undefined {
     return this._platformSession.frameRate;
   }

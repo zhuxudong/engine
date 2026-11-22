@@ -137,7 +137,8 @@ export class Camera extends Component {
 
   private _priority: number = 0;
   private _isCustomViewMatrix = false;
-  private _isCustomProjectionMatrix = false;
+  /** @internal Whether to restore an authored projection when an XR session releases the camera. */
+  _isCustomProjectionMatrix = false;
   private _fieldOfView: number = 45;
   private _orthographicSize: number = 10;
   private _isProjectionDirty = true;

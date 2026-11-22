@@ -34,7 +34,11 @@ export class MeshShape extends BaseShape implements ICloneHook<MeshShape> {
 
   /** Resolve once the shape can sample this mesh, including GPU-only vertex buffers. */
   async prepare(): Promise<void> {
-    await this._pending;
+    let pending: Promise<void> | undefined;
+    do {
+      pending = this._pending;
+      await pending;
+    } while (pending !== this._pending);
     if (this._readError) throw this._readError;
   }
 
@@ -124,11 +128,11 @@ export class MeshShape extends BaseShape implements ICloneHook<MeshShape> {
 
   private _setAttribute(mesh: ModelMesh, element: VertexElement, bytes: Uint8Array, info: Vector4): TypedArray {
     const format = element._formatMetaInfo;
-    const view = mesh._getVertexTypedArray(bytes.buffer, format.type);
+    const view = mesh._getVertexTypedArray(bytes.buffer, format.type, bytes.byteOffset, bytes.byteLength);
     if (!view) throw new Error("Unsupported mesh emission attribute format for " + element.attribute);
     const unit = view.BYTES_PER_ELEMENT;
     info.set(
-      (bytes.byteOffset + element.offset) / unit,
+      element.offset / unit,
       mesh.vertexBufferBindings[element.bindingIndex]!.stride / unit,
       format.normalized ? 1 : 0,
       format.normalizedScaleFactor
@@ -153,7 +157,8 @@ export class MeshShape extends BaseShape implements ICloneHook<MeshShape> {
     if (!posBuffer || !normalBuffer) throw new Error("Mesh emission attributes require bound vertex buffers.");
     const pending: Promise<void>[] = [];
     const read = (buffer: Buffer): Uint8Array => {
-      if (buffer._readableData) return buffer._readableData;
+      const source = buffer._getVertexSource();
+      if (source) return source;
       const bytes = new Uint8Array(buffer.byteLength);
       pending.push(buffer.getDataAsync(bytes));
       return bytes;

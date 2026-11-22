@@ -3,6 +3,7 @@ import {
   type IShaderUniformBlock,
   type IShaderUniformPlan,
   type IShaderUniformSelection,
+  type IShaderUniformSite,
   type IShaderUniformVariable,
   type IWebGPUShaderProgram,
   type ShaderInstruction
@@ -45,6 +46,29 @@ const precisionStr = `
     precision highp int;
     `;
 
+function evaluateDefaultStage(instructions: ShaderInstruction[], sites?: readonly IShaderUniformSite[]) {
+  const uniforms: IShaderUniformSelection[] = [];
+  return {
+    source: ShaderMacroProcessor.evaluate(instructions, ShaderMacroProcessor._defaultWebGPUMacros, sites, uniforms),
+    uniforms
+  };
+}
+
+function matchesDefaultStage(
+  stage: ReturnType<typeof evaluateDefaultStage>,
+  source: string,
+  uniforms?: IShaderUniformSelection[]
+): boolean {
+  return (
+    stage.source === source &&
+    stage.uniforms.length === (uniforms?.length ?? 0) &&
+    stage.uniforms.every(({ site, start, end }, i) => {
+      const selected = uniforms![i];
+      return selected.site === site && selected.start === start && selected.end === end;
+    })
+  );
+}
+
 /**
  * Shader pass containing vertex and fragment source.
  */
@@ -73,6 +97,7 @@ export class ShaderPass extends ShaderPart {
   private readonly _uniformBlocks?: readonly IShaderUniformBlock[];
   private readonly _uniformPlan?: IShaderUniformPlan;
   private readonly _wgsl?: IWebGPUShaderProgram;
+  private _defaultWebGPUStages?: ReturnType<typeof evaluateDefaultStage>[];
 
   /**
    * Create a shader pass from precompiled instructions.
@@ -259,29 +284,25 @@ export class ShaderPass extends ShaderPart {
     const device = engine._hardwareRenderer;
     const vertexInputTypes = device.backend === "webgpu" ? primitive?._getShaderInputs().types : undefined;
     const baked = this._wgsl;
-    if (
+    const canUseBaked =
       device.backend === "webgpu" &&
-      baked &&
+      !!baked &&
+      !isGPUInstance &&
       !feedbackVaryings?.length &&
       !textureOptions &&
-      !macroCollection._mask.slice(0, macroCollection._length).some(Boolean) &&
       baked.reflection.vertexInputs.every(
         (input) => !vertexInputTypes?.[input.name] || vertexInputTypes[input.name] === input.type
-      )
-    ) {
-      return new ShaderProgram(engine, {
-        vertexSource: baked.vertex,
-        fragmentSource: baked.fragment,
-        vertexEntryPoint: baked.vertexEntryPoint,
-        fragmentEntryPoint: baked.fragmentEntryPoint,
-        reflection: baked.reflection
-      });
+      );
+    if (canUseBaked && !macroCollection._mask.slice(0, macroCollection._length).some(Boolean)) {
+      return this._createBakedProgram(engine, baked!);
     }
     const variant = this._compileShaderSource(
       engine,
       macroCollection,
-      isGPUInstance && (device.backend !== "webgpu" || !!this._uniformPlan)
+      isGPUInstance && (device.backend !== "webgpu" || !!this._uniformPlan),
+      canUseBaked
     );
+    if (variant.matchesBaked) return this._createBakedProgram(engine, baked!);
     let source: IPlatformShaderSource = {
       vertexSource: variant.vertexSource,
       fragmentSource: variant.fragmentSource,
@@ -317,14 +338,26 @@ export class ShaderPass extends ShaderPart {
     return program;
   }
 
+  private _createBakedProgram(engine: Engine, baked: IWebGPUShaderProgram): ShaderProgram {
+    return new ShaderProgram(engine, {
+      vertexSource: baked.vertex,
+      fragmentSource: baked.fragment,
+      vertexEntryPoint: baked.vertexEntryPoint,
+      fragmentEntryPoint: baked.fragmentEntryPoint,
+      reflection: baked.reflection
+    });
+  }
+
   private _compileShaderSource(
     engine: Engine,
     macroCollection: ShaderMacroCollection,
-    isGPUInstance: boolean
+    isGPUInstance: boolean,
+    canUseBaked = false
   ): {
     vertexSource: string;
     fragmentSource: string;
     instanceLayout: InstanceBufferLayout | null;
+    matchesBaked?: boolean;
     uniformBlocks?: readonly IShaderUniformBlock[];
     instanceBindingName?: string;
     looseUniforms?: readonly IShaderUniformVariable[];
@@ -368,6 +401,17 @@ export class ShaderPass extends ShaderPart {
       plan?.fragment,
       fragmentSites
     );
+    if (canUseBaked) {
+      const [vertex, fragment] = (this._defaultWebGPUStages ??= [
+        evaluateDefaultStage(this._vertexShaderInstructions, plan?.vertex),
+        evaluateDefaultStage(this._fragmentShaderInstructions, plan?.fragment)
+      ]);
+      if (
+        matchesDefaultStage(vertex, vertexSource, vertexSites) &&
+        matchesDefaultStage(fragment, fragmentSource, fragmentSites)
+      )
+        return { vertexSource, fragmentSource, instanceLayout: null, matchesBaked: true };
+    }
     let uniformBlocks = this._uniformBlocks;
     let instanceBindingName: string | undefined;
     let looseUniforms: readonly IShaderUniformVariable[] | undefined;

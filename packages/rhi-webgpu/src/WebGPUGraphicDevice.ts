@@ -30,6 +30,7 @@ import { RenderBufferLoadAction, RenderBufferStoreAction } from "@galacean/engin
 import type { RenderStateElementMap, Texture } from "@galacean/engine-core";
 import { WebGPUTexture } from "./WebGPUTexture";
 import { WebGPUDrawBundles, type RenderDrawCommands } from "./WebGPUDrawBundles";
+import { WebGPUDeferredPass, type WebGPURenderCommands } from "./WebGPUDeferredPass";
 import { WebGPUAttachmentOps } from "./WebGPUAttachmentOps";
 import { WebGPUFeedbackKernel } from "./WebGPUFeedbackKernel";
 import type { IWebGPUShaderTexture } from "@galacean/engine-design";
@@ -229,6 +230,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   submissionSerial = 0;
   private readonly _ops: WebGPUAttachmentOps;
   private readonly _bundles: WebGPUDrawBundles;
+  private readonly _vertexLayoutIds = new Map<string, number>();
   private readonly _computePipelines = new Map<string, GPUComputePipeline>();
   private readonly _deviceOptions: WebGPUGraphicDeviceOptions;
   private _lost = false;
@@ -243,8 +245,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   _currentBindShaderProgram: IPlatformShaderProgram | null = null;
-  /** @internal */
-  _enableGlobalDepthBias = false;
 
   private readonly _canvas: HTMLCanvasElement | OffscreenCanvas;
   private _onDeviceLost: () => void;
@@ -252,12 +252,12 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private _viewport = new Vector4();
   private _scissor = new Vector4();
   private _commandEncoder?: GPUCommandEncoder;
-  private _renderPass?: GPURenderPassEncoder;
+  private _renderPass?: GPURenderPassEncoder | WebGPUDeferredPass;
+  private readonly _deferredPass: WebGPUDeferredPass;
   private _computePass?: GPUComputePassEncoder;
   private _pendingClearFlags = CameraClearFlags.None;
   private _colorStore = RenderBufferStoreAction.Store;
   private _depthStore = RenderBufferStoreAction.Store;
-  private _touchedTarget = false;
   private _pendingClearColor = new Color();
   private _mainDepthTexture?: GPUTexture;
   private _externalTarget?: WebGPUProjectionTarget;
@@ -266,6 +266,8 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   private readonly _gpuTimingProfiler: WebGPUTimingProfiler;
   private readonly _defaultVertexBuffer: GPUBuffer;
   readonly uniformRanges: { buffer: WebGPUBuffer; offset: number; size: number }[] = [];
+  private _uploadPage?: GPUBuffer;
+  private _uploadOffset = 0;
   private _retiredResources: (GPUBuffer | GPUTexture)[] = [];
   private _appliedRenderPipeline?: GPURenderPipeline;
   private readonly _appliedGroups: GPUBindGroup[] = [];
@@ -280,7 +282,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     sampleCount: number;
     key: string;
   };
-  readonly _globalBias = { enabled: false, bias: 0, slopeBias: 0 };
   private _viewportDirty = true;
   private _scissorDirty = true;
   private _appliedBlendConstant?: number[];
@@ -342,6 +343,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this.maxUniformBlockSize = device.limits.maxUniformBufferBindingSize;
     this._ops = new WebGPUAttachmentOps(this);
     this._bundles = new WebGPUDrawBundles(device);
+    this._deferredPass = new WebGPUDeferredPass(device);
     this._deviceOptions = options;
     this.renderer = adapter.info?.description || adapter.info?.device || "WebGPU";
     context.configure({
@@ -399,9 +401,10 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     if (options.enableGPUTiming && adapter.features.has("timestamp-query")) {
       requestedFeatures.add("timestamp-query");
     }
-    for (const key of ["maxSampledTexturesPerShaderStage","maxSamplersPerShaderStage"] as const) {
-      const required=options.requiredLimits?.[key];
-      if(required!==undefined && required>adapter.limits[key]) throw new Error(`Requested ${key}=${required}, adapter limit is ${adapter.limits[key]}.`);
+    for (const key of ["maxSampledTexturesPerShaderStage", "maxSamplersPerShaderStage"] as const) {
+      const required = options.requiredLimits?.[key];
+      if (required !== undefined && required > adapter.limits[key])
+        throw new Error(`Requested ${key}=${required}, adapter limit is ${adapter.limits[key]}.`);
     }
     const device = await adapter.requestDevice({
       requiredFeatures: Array.from(requestedFeatures),
@@ -439,6 +442,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
         if (info.reason !== "destroyed" || this._restoreRequested) this.forceRestoreDevice();
       }
     });
+  }
+
+  /** Equivalent vertex layouts share a numeric identity across all meshes on this device. */
+  _getVertexLayoutId(buffers: (GPUVertexBufferLayout | null)[]): number {
+    const key = JSON.stringify(buffers);
+    let id = this._vertexLayoutIds.get(key);
+    if (id === undefined) {
+      id = this._vertexLayoutIds.size;
+      this._vertexLayoutIds.set(key, id);
+    }
+    return id;
   }
 
   createPlatformPrimitive(primitive: Primitive): IPlatformPrimitive {
@@ -634,35 +648,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   beginFrame(): void {}
   endFrame(): void {
+    this.endRenderPass();
     this.flush();
   }
   endRenderPass(): void {
-    this._endCurrentPass();
-    const target = this._currentRenderTarget;
-    if (this._touchedTarget && target) {
-      const discardColor =
-        this._colorStore === RenderBufferStoreAction.DontCare ||
-        (this._colorStore === RenderBufferStoreAction.Resolve && target.sampleCount > 1);
-      const discardDepth = this._depthStore === RenderBufferStoreAction.DontCare;
-      if (discardColor || discardDepth) {
-        // A copy, compute dispatch or overlapping upload can split a logical pass. Only its last segment may discard.
-        const descriptor = target.createDescriptor(CameraClearFlags.None);
-        for (const a of descriptor.colorAttachments) {
-          if (!a) continue;
-          a.resolveTarget = undefined;
-          if (discardColor) a.storeOp = "discard";
-        }
-        const depth = descriptor.depthStencilAttachment;
-        if (discardDepth && depth) {
-          if (depth.depthStoreOp) depth.depthStoreOp = "discard";
-          if (depth.stencilStoreOp) depth.stencilStoreOp = "discard";
-        }
-        descriptor.label = this._renderPassLabel + " store";
-        this._getCommandEncoder().beginRenderPass(descriptor).end();
-      }
-    }
-    this._touchedTarget = false;
+    this._endRenderPass(true);
+    this._endComputePass();
     this._pendingClearFlags = CameraClearFlags.None;
+  }
+  _finishTarget(target: WebGPURenderTarget): void {
+    if (this._currentRenderTarget === target) this.endRenderPass();
+    else this._endCurrentPass();
   }
   supportsTextureFormat(format: TextureFormat): boolean {
     let f: GPUTextureFormat;
@@ -698,11 +694,11 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     return !f.endsWith("uint") && (!f.includes("32float") || this.device.features.has("float32-filterable"));
   }
   getMainFrameBufferWidth(): number {
-    return this._canvas.width;
+    return this._mainWidth;
   }
 
   getMainFrameBufferHeight(): number {
-    return this._canvas.height;
+    return this._mainHeight;
   }
 
   activeRenderTarget(
@@ -795,21 +791,26 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       destinationLayer
     );
   }
+  /** Expand R8 or RG8 to RGBA8 using its native zero channels and alpha of one at every texel. */
+  _expandTextureChannels(
+    source: GPUTexture,
+    mip: number,
+    destination: GPUTexture,
+    destinationMip: number,
+    layer: number
+  ): void {
+    this._ops.copyColor(
+      source,
+      destination,
+      new Vector4(0, 0, 1, 1),
+      { baseMipLevel: mip },
+      { baseMipLevel: destinationMip, baseArrayLayer: layer }
+    );
+  }
   private _sourceColor(source: RenderTarget | null): GPUTexture {
     return source
       ? (source._platformRenderTarget as WebGPURenderTarget).colorTexture()
       : (this._externalTarget?.color ?? this.context.getCurrentTexture());
-  }
-  /**
-   * Override raster depth bias until the override is reset to zero.
-   * @param bias - Constant depth bias.
-   * @param slopeBias - Slope-scaled depth bias.
-   */
-  setGlobalDepthBias(bias: number, slopeBias: number): void {
-    this._enableGlobalDepthBias = bias !== 0 || slopeBias !== 0;
-    this._globalBias.enabled = this._enableGlobalDepthBias;
-    this._globalBias.bias = bias;
-    this._globalBias.slopeBias = slopeBias;
   }
 
   flush(): void {
@@ -824,14 +825,16 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._commandEncoder = undefined;
     }
     this.submissionSerial++;
+    this._uploadOffset = 0;
     if (this._retiredResources.length > 0) {
       const retired = this._retiredResources;
       this._retiredResources = [];
-      this.device.queue.onSubmittedWorkDone().then(() => {
+      const release = () => {
         for (const buffer of retired) {
           buffer.destroy();
         }
-      });
+      };
+      this.device.queue.onSubmittedWorkDone().then(release, release);
     }
   }
 
@@ -891,6 +894,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       this._gpuTimingProfiler.destroy();
       this._mainDepthTexture?.destroy();
       this._defaultVertexBuffer.destroy();
+      this._uploadPage?.destroy();
       for (const buffer of this._retiredResources) {
         buffer.destroy();
       }
@@ -934,15 +938,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
   }
 
   /** @internal */
-  _getGlobalDepthBias(): {
-    enabled: boolean;
-    bias: number;
-    slopeBias: number;
-  } {
-    return this._globalBias;
-  }
-
-  /** @internal */
   _getAttachmentState(target = this._currentRenderTarget): {
     colorFormats: readonly GPUTextureFormat[];
     depthStencilFormat?: GPUTextureFormat;
@@ -979,7 +974,7 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
    * @returns Current or newly encoded render pass.
    * @internal
    */
-  _getRenderPass(): GPURenderPassEncoder {
+  _getRenderPass(): WebGPURenderCommands {
     if (this._renderPass) {
       return this._renderPass;
     }
@@ -993,17 +988,28 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
       : this._createMainRenderPassDescriptor();
     descriptor.label = this._renderPassLabel;
     this._gpuTimingProfiler.addTimestampWrites(descriptor, "render");
-    this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     const target = this._getAttachmentState();
+    const deferred =
+      (this._colorStore === RenderBufferStoreAction.DontCare && target.colorFormats.length > 0) ||
+      (this._colorStore === RenderBufferStoreAction.Resolve && target.sampleCount > 1) ||
+      (this._depthStore === RenderBufferStoreAction.DontCare && !!target.depthStencilFormat);
+    if (deferred) {
+      this._deferredPass.begin(descriptor, {
+        colorFormats: target.colorFormats,
+        depthStencilFormat: target.depthStencilFormat,
+        sampleCount: target.sampleCount
+      });
+      this._renderPass = this._deferredPass;
+    } else this._renderPass = this._commandEncoder.beginRenderPass(descriptor);
     this._bundles.begin(
       this._renderPass,
       this._currentRenderTarget ?? this._canvas,
       this._renderPassLabel + "/" + target.key,
       target.colorFormats,
       target.depthStencilFormat,
-      target.sampleCount
+      target.sampleCount,
+      deferred
     );
-    this._touchedTarget = true;
     this._resetRenderPassState();
     this._pendingClearFlags = CameraClearFlags.None;
     return this._renderPass;
@@ -1146,14 +1152,14 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     this._endComputePass();
   }
 
-  _drawCommands(pass: GPURenderPassEncoder): RenderDrawCommands {
+  _drawCommands(pass: WebGPURenderCommands): RenderDrawCommands {
     if (this._bundles.beginDraw()) this._resetDrawBindings();
     return this._bundles.enabled ? this._bundles : pass;
   }
   private _flushBundles(): void {
     if (this._bundles.flush()) this._resetDrawBindings();
   }
-  _applyDynamicState(pass: GPURenderPassEncoder): void {
+  _applyDynamicState(pass: WebGPURenderCommands): void {
     if (this._viewportDirty) {
       const targetWidth = this._currentRenderTarget?.width ?? this._mainWidth;
       const targetHeight = this._currentRenderTarget?.height ?? this._mainHeight;
@@ -1208,16 +1214,6 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
    * @param pipeline - Pipeline required by the next draw.
    * @internal
    */
-  _setEmptyGroup(pass: RenderDrawCommands | GPUComputePassEncoder, index: number, group: GPUBindGroup): void {
-    if (pass !== this._renderPass && pass !== this._bundles) {
-      pass.setBindGroup(index, group);
-      return;
-    }
-    if (this._appliedGroups[index] !== group) {
-      this._appliedGroups[index] = group;
-      pass.setBindGroup(index, group);
-    }
-  }
   _setBindGroup(
     pass: RenderDrawCommands | GPUComputePassEncoder,
     index: number,
@@ -1269,24 +1265,47 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   _retireTexture(texture: GPUTexture): void {
-    this._retiredResources.push(texture);
+    if (this._destroyed || (!this._commandEncoder && this._pendingClearFlags === CameraClearFlags.None))
+      texture.destroy();
+    else this._retiredResources.push(texture);
+  }
+
+  /** Place an overlapping CPU update after the draws already recorded for this buffer. */
+  _writeBufferInOrder(destination: GPUBuffer, offset: number, source: Uint8Array): void {
+    const pageSize = 64 * 1024;
+    const size = source.byteLength;
+    const usage = GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+    if (size > pageSize) {
+      const staging = this.device.createBuffer({ size, usage });
+      this.device.queue.writeBuffer(staging, 0, source);
+      this._getCommandEncoder().copyBufferToBuffer(staging, 0, destination, offset, size);
+      this._retireBuffer(staging);
+      return;
+    }
+    if (this._uploadOffset + size > pageSize) {
+      this._retireBuffer(this._uploadPage!);
+      this._uploadPage = undefined;
+      this._uploadOffset = 0;
+    }
+    const page = (this._uploadPage ??= this.device.createBuffer({
+      label: "Galacean ordered buffer updates",
+      size: pageSize,
+      usage
+    }));
+    this.device.queue.writeBuffer(page, this._uploadOffset, source);
+    this._getCommandEncoder().copyBufferToBuffer(page, this._uploadOffset, destination, offset, size);
+    this._uploadOffset += size;
   }
 
   _retireBuffer(buffer: GPUBuffer): void {
-    this._retiredResources.push(buffer);
+    if (this._destroyed || (!this._commandEncoder && this._pendingClearFlags === CameraClearFlags.None))
+      buffer.destroy();
+    else this._retiredResources.push(buffer);
   }
 
   /** @internal */
-  _generateMipmaps(
-    texture: GPUTexture,
-    format: GPUTextureFormat,
-    width: number,
-    height: number,
-    mipLevelCount: number,
-    layerCount: number
-  ): void {
-    this.flush();
-    this._mipmapGenerator.generate(texture, format, width, height, mipLevelCount, layerCount);
+  _generateMipmaps(texture: GPUTexture): void {
+    if (texture.mipLevelCount > 1) this._mipmapGenerator.generate(this._getCommandEncoder(), texture);
   }
 
   private _createMainRenderPassDescriptor(): GPURenderPassDescriptor {
@@ -1369,12 +1388,21 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     });
   }
 
-  private _endRenderPass(): void {
-    if (this._renderPass) {
-      this._bundles.end();
-      this._renderPass.end();
-      this._renderPass = undefined;
-    }
+  private _endRenderPass(final = false): void {
+    const pass = this._renderPass;
+    if (!pass) return;
+    this._bundles.end();
+    if (pass instanceof WebGPUDeferredPass) {
+      const resolve =
+        final && this._colorStore === RenderBufferStoreAction.Resolve && this._getAttachmentState().sampleCount > 1;
+      pass.end(
+        this._commandEncoder!,
+        resolve || (final && this._colorStore === RenderBufferStoreAction.DontCare),
+        final && this._depthStore === RenderBufferStoreAction.DontCare,
+        resolve
+      );
+    } else pass.end();
+    this._renderPass = undefined;
   }
 
   private _endComputePass(): void {

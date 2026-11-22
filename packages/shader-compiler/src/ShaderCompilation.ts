@@ -36,7 +36,7 @@ export function requireValidShaderSource(result: ShaderSourceParseResult): IShad
  * @param parsed - Neutral parser output.
  * @param vertexEntry - Vertex entry name.
  * @param fragmentEntry - Fragment entry name.
- * @param backend - Target GLES language.
+ * @param backend - Target shader language.
  * @param coreInfo - Optional stage facts already derived from this exact parser result.
  * @returns Generated program, or `undefined` when parser or entry admission fails.
  * @internal

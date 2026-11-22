@@ -17,12 +17,34 @@ export interface Declaration {
   extent?: string;
 }
 
-export const tokens = (source: string): string[] =>
-  source
-    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|^[ \t]*#version[^\n]*/gm, " ")
-    .match(
-      /[A-Za-z_]\w*|0[xX][\da-fA-F]+[uU]?|(?:\d*\.\d+|\d+\.?\d*)(?:[eE][+-]?\d+)?[uUfF]?|<<=|>>=|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||\^\^|[+\-*/%&|^]=|[^\s]/g
-    ) ?? [];
+export function tokens(source: string): string[] {
+  const words: string[] =
+    source
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|^[ \t]*#version[^\n]*/gm, " ")
+      .match(
+        /[A-Za-z_]\w*|0[xX][\da-fA-F]+[uU]?|(?:\d*\.\d+|\d+\.?\d*)(?:[eE][+-]?\d+)?[uUfF]?|<<=|>>=|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||\^\^|[+\-*/%&|^]=|[^\s]/g
+      ) ?? [];
+  // Historical instructions and raw GLSL may share one qualifier/type across
+  // several resources. Each resource needs its own binding and declaration span.
+  for (let i = 0; i < words.length; i++) {
+    if (words[i] !== "uniform") continue;
+    const type = /^(?:lowp|mediump|highp)$/.test(words[i + 1]) ? i + 2 : i + 1;
+    if (words[type + 1] === "{") {
+      i = matching(words, type + 1);
+      continue;
+    }
+    const start = i;
+    for (i = type + 1; i < words.length && words[i] !== ";"; i++) {
+      if (words[i] === "[" || words[i] === "(") i = matching(words, i);
+      else if (words[i] === ",") {
+        const prefix = words.slice(start, type + 1);
+        words.splice(i, 1, ";", ...prefix);
+        i += prefix.length;
+      }
+    }
+  }
+  return words;
+}
 
 export function matching(t: string[], open: number): number {
   const close = { "(": ")", "[": "]", "{": "}" }[t[open]];

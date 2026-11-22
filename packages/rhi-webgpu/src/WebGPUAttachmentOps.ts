@@ -1,5 +1,6 @@
 import { CameraClearFlags } from "@galacean/engine-core";
 import { Color, Vector4 } from "@galacean/engine-math";
+import type { WebGPURenderCommands } from "./WebGPUDeferredPass";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
 
 const triangle = `
@@ -14,7 +15,7 @@ export class WebGPUAttachmentOps {
   constructor(public deviceOwner: WebGPUGraphicDevice) {}
 
   clear(
-    pass: GPURenderPassEncoder,
+    pass: WebGPURenderCommands,
     target: ReturnType<WebGPUGraphicDevice["_getAttachmentState"]>,
     rect: Vector4,
     flags: CameraClearFlags,
@@ -65,6 +66,9 @@ export class WebGPUAttachmentOps {
       });
       this._pipelines.set(key, pipeline);
     }
+    pass.setScissorRect(rect.x, rect.y, rect.z, rect.w);
+    pass.setViewport(rect.x, rect.y, rect.z, rect.w, 0, 1);
+    pass.setStencilReference(0);
     pass.setPipeline(pipeline);
     if (target.colorFormats.length) {
       const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM, mappedAtCreation: true });
@@ -79,9 +83,6 @@ export class WebGPUAttachmentOps {
       );
       this.deviceOwner._retireBuffer(buffer);
     }
-    pass.setScissorRect(rect.x, rect.y, rect.z, rect.w);
-    pass.setViewport(rect.x, rect.y, rect.z, rect.w, 0, 1);
-    pass.setStencilReference(0);
     pass.draw(3);
   }
 

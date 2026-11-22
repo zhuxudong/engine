@@ -146,7 +146,7 @@ export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
     return buffer._gpuBuffer;
   }
 
-  private _createKernel(code: string, writable: number, prefix: GPUBindGroupLayout[]): Kernel {
+  private _createKernel(code: string, writable: number, prefix: (GPUBindGroupLayout | null)[]): Kernel {
     const device = this._device;
     const entries: GPUBindGroupLayoutEntry[] = [];
     for (let i = 0; i <= writable; i++) {
