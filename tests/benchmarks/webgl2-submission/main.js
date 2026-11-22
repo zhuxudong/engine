@@ -1,6 +1,6 @@
 import { AssetType, Camera, DirectLight, MeshRenderer, PrimitiveMesh, UnlitMaterial } from "@galacean/engine-core";
 import { Vector3 } from "@galacean/engine-math";
-import { inspectWebGPUFrame, captureRGBA } from "./webgpu";
+import { inspectWebGPUFrame, captureRGBA, trackBundleEncoding } from "./webgpu";
 import { prepareScene } from "./scenes";
 
 function submissionScene(engine, root, camera) {
@@ -92,7 +92,7 @@ function framebufferHash(gl) {
   } finally {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
   }
-  captureRGBA(pixels,gl.drawingBufferWidth,gl.drawingBufferHeight,4*gl.drawingBufferWidth,true);
+  captureRGBA(pixels, gl.drawingBufferWidth, gl.drawingBufferHeight, 4 * gl.drawingBufferWidth, true);
   let hash = 0x811c9dc5;
   for (const byte of pixels) hash = Math.imul(hash ^ byte, 0x01000193);
   return (hash >>> 0).toString(16).padStart(8, "0");
@@ -123,12 +123,23 @@ async function measure() {
         : scenario === "S5"
           ? await sponzaScene(engine, root, camera)
           : await prepareScene(scenario, engine, root, camera);
-    let firstDrawMs;
+    const stopTracking = gpu && trackBundleEncoding();
+    let firstDrawMs, timeToFirstFrameMs;
     for (let i = 0; i < 30; ++i) {
       await frame();
       const drawStart = performance.now();
       engine.update();
-      if (i === 0) firstDrawMs = performance.now() - drawStart;
+      if (i === 0) {
+        firstDrawMs = performance.now() - drawStart;
+        timeToFirstFrameMs = performance.now() - start;
+      }
+    }
+    if (stopTracking) stopTracking();
+    let preparationMs;
+    if (setup.preparePipelines && new URLSearchParams(location.search).has("prewarm")) {
+      const before = performance.now();
+      await setup.preparePipelines();
+      preparationMs = performance.now() - before;
     }
     // Keep timing free of driver instrumentation, GL queries and GPU synchronization.
     const cpu = [],
@@ -155,7 +166,10 @@ async function measure() {
       counts = result.counts;
       rgbaHash = result.hash;
       renderer = device.adapterInfo?.description;
-      if (scenario === "S1" && counts.drawIndexed !== 2048)
+      if (
+        scenario === "S1" &&
+        ((counts.drawIndexed ?? 0) + (counts.bundleDrawIndexed ?? 0) !== 2048 || counts.unknownBundles)
+      )
         throw new Error("Unexpected WebGPU draw count " + JSON.stringify(counts));
       evidence = await setup.validate?.();
       const error = await device.popErrorScope();
@@ -183,6 +197,8 @@ async function measure() {
       backend: gpu ? "webgpu" : "webgl2",
       initializationMs,
       firstDrawMs,
+      timeToFirstFrameMs,
+      preparationMs,
       ...setup.details,
       ...evidence,
       frames: cpu.length,

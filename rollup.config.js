@@ -39,10 +39,23 @@ const shaderCompilerPlugin = shaderCompiler({
     output: path.join(__dirname, "packages/shader/compiledShaders")
   }
 });
+const webGPUShaderWatcher = shaderCompiler({
+  precompile: {
+    input: path.join(__dirname, "packages/shader/src/Shaders"),
+    output: path.join(__dirname, "packages/shader/compiledWebGPUShaders"),
+    platformTarget: 1
+  }
+});
 
 const commonPlugins = [
   resolve({ extensions, preferBuiltins: true, mainFields }),
   shaderCompilerPlugin,
+  {
+    name: "watch-webgpu-shaders",
+    buildStart() {
+      if (this.meta.watchMode) return webGPUShaderWatcher.buildStart.call(this);
+    }
+  },
   swc(
     defineRollupSwcOption({
       include: /\.[mc]?[jt]sx?$/,

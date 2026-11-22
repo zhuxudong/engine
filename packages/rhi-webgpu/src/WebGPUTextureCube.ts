@@ -37,11 +37,27 @@ export class WebGPUTextureCube extends WebGPUTexture implements IPlatformTexture
     this._copyExternalImage(imageSource, mipLevel, { x, y, z: face }, flipY, premultiplyAlpha);
   }
 
-  getPixelBuffer(): void {
-    this._unsupportedReadback();
+  getPixelBuffer(
+    face: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): void {
+    this._readCachedPixels(face, x, y, width, height, mipLevel, out);
   }
 
-  getPixelBufferAsync(face:number,x:number,y:number,width:number,height:number,mipLevel:number,out:ArrayBufferView): Promise<void> {
-    return this._readPixels(face,x,y,width,height,mipLevel,out);
+  getPixelBufferAsync(
+    face: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): Promise<void> {
+    return this._readPixels(face, x, y, width, height, mipLevel, out);
   }
 }

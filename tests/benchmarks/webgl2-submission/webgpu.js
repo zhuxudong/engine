@@ -1,7 +1,49 @@
+// Observe native bundle encoding during warmup and the final inspection frame. The timed frames run uninstrumented.
+const recorded = new WeakMap();
+export function trackBundleEncoding() {
+  const encoders = new WeakMap();
+  const proto = GPURenderBundleEncoder.prototype;
+  const original = [proto.draw, proto.drawIndexed, proto.finish];
+  for (const [index, name] of ["draw", "drawIndexed"].entries()) {
+    proto[name] = function (...args) {
+      let counts = encoders.get(this);
+      if (!counts) encoders.set(this, (counts = { draw: 0, drawIndexed: 0 }));
+      counts[name]++;
+      return original[index].apply(this, args);
+    };
+  }
+  proto.finish = function (...args) {
+    const bundle = original[2].apply(this, args);
+    recorded.set(bundle, encoders.get(this) ?? { draw: 0, drawIndexed: 0 });
+    return bundle;
+  };
+  return () => {
+    [proto.draw, proto.drawIndexed, proto.finish] = original;
+  };
+}
+
 /** Count native submissions outside the timed loop, then hash bottom-up RGBA8 to match WebGL readPixels. */
 export async function inspectWebGPUFrame(canvas, device, render) {
   const counts = {};
-  const restore = [];
+  const restore = [trackBundleEncoding()];
+  const renderPass = GPURenderPassEncoder.prototype;
+  const executeBundles = renderPass.executeBundles;
+  renderPass.executeBundles = function (bundles) {
+    counts.executeBundles = (counts.executeBundles ?? 0) + 1;
+    for (const bundle of bundles) {
+      const commands = recorded.get(bundle);
+      if (!commands) {
+        counts.unknownBundles = (counts.unknownBundles ?? 0) + 1;
+        continue;
+      }
+      counts.bundleDrawIndexed = (counts.bundleDrawIndexed ?? 0) + commands.drawIndexed;
+      counts.bundleDraw = (counts.bundleDraw ?? 0) + commands.draw;
+    }
+    return executeBundles.call(this, bundles);
+  };
+  restore.push(() => {
+    renderPass.executeBundles = executeBundles;
+  });
   const hooks = [
     [GPURenderPassEncoder, ["draw", "drawIndexed", "setPipeline", "setBindGroup"]],
     [GPUComputePassEncoder, ["dispatchWorkgroups"]],
@@ -40,7 +82,7 @@ export async function inspectWebGPUFrame(canvas, device, render) {
     await staging.mapAsync(GPUMapMode.READ);
     const data = new Uint8Array(staging.getMappedRange());
     const bgra = texture.format.startsWith("bgra");
-    captureRGBA(data,width,height,stride,false,bgra);
+    captureRGBA(data, width, height, stride, false, bgra);
     const channels = bgra ? [2, 1, 0, 3] : [0, 1, 2, 3];
     let hash = 0x811c9dc5;
     for (let y = height - 1; y >= 0; --y) {
@@ -54,22 +96,23 @@ export async function inspectWebGPUFrame(canvas, device, render) {
   }
 }
 
-
 export function captureRGBA(bytes, width, height, stride, bottomUp, bgra = false) {
   if (!new URLSearchParams(location.search).has("capture")) return;
   const image = new ImageData(width, height);
-  for (let y=0;y<height;y++) {
-    const sourceY = bottomUp ? height-1-y : y;
-    const row = bytes.subarray(sourceY*stride,sourceY*stride+width*4);
-    image.data.set(row, y*width*4);
-    if (bgra) for (let x=0; x<width; x++) {
-      const i=(y*width+x)*4;
-      image.data[i]=row[x*4+2];
-      image.data[i+2]=row[x*4];
-    }
+  for (let y = 0; y < height; y++) {
+    const sourceY = bottomUp ? height - 1 - y : y;
+    const row = bytes.subarray(sourceY * stride, sourceY * stride + width * 4);
+    image.data.set(row, y * width * 4);
+    if (bgra)
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        image.data[i] = row[x * 4 + 2];
+        image.data[i + 2] = row[x * 4];
+      }
   }
-  const canvas=document.createElement("canvas");
-  canvas.width=width; canvas.height=height;
-  canvas.getContext("2d").putImageData(image,0,0);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").putImageData(image, 0, 0);
   window.benchmarkCapture = canvas.toDataURL("image/png").split(",")[1];
 }

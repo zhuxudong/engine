@@ -1,7 +1,15 @@
 import { LoaderUtils } from "./LoaderUtils";
 import { readSpineVersion } from "./SpineVersion";
 import type { ISpineRuntime } from "../runtime/ISpineRuntime";
-import { AssetPromise, Engine, EngineConfiguration, Loader, LoadItem, resourceLoader, ResourceManager } from "@galacean/engine-core";
+import {
+  AssetPromise,
+  Engine,
+  EngineConfiguration,
+  Loader,
+  LoadItem,
+  resourceLoader,
+  ResourceManager
+} from "@galacean/engine-core";
 import { SpineResource } from "./SpineResource";
 
 type SpineAssetPath = {

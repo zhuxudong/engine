@@ -141,7 +141,7 @@ export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
 
   private _storage(binding: VertexBufferBinding, write = false): GPUBuffer {
     const buffer = binding.buffer._platformBuffer as WebGPUBuffer;
-    if (write) buffer._contentVersion++;
+    if (write) buffer._markShaderWrite();
     buffer._markUsed();
     return buffer._gpuBuffer;
   }
@@ -199,6 +199,7 @@ export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
     device.queue.writeBuffer(this._page, this._pageStart, this._params);
     this._offset[0] = this._pageStart;
     this._pageStart += alignment;
+    program?._prepareTextures();
     const pass = this._hardware._getCommandEncoder().beginComputePass({ label: "Particle feedback" });
     pass.setPipeline(kernel.pipeline);
     program?._bindGroups(pass, 3);

@@ -29,7 +29,7 @@ export class TextureCube extends Texture {
     super(engine, size, size, format, mipmap, isSRGBColorSpace);
 
     this._platformTexture = engine._hardwareRenderer.createPlatformTextureCube(this);
-    this.filterMode = TextureFilterMode.Bilinear;
+    this.filterMode = this._isIntFormat() ? TextureFilterMode.Point : TextureFilterMode.Bilinear;
     this.wrapModeU = this.wrapModeV = TextureWrapMode.Clamp;
 
     this._memorySize = TextureUtils.getTextureByteCount(format, size, size, this._mipmapCount, 6);

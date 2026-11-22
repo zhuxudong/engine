@@ -116,7 +116,14 @@ export class Sky {
     ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
 
     const pass = shader.subShaders[0].passes[0];
-    const program = pass._getShaderProgram(engine, compileMacros, undefined, mesh._primitive, undefined, materialShaderData);
+    const program = pass._getShaderProgram(
+      engine,
+      compileMacros,
+      undefined,
+      mesh._primitive,
+      undefined,
+      materialShaderData
+    );
     program.bind();
     program.regroupUniformBlocks();
     program.uploadAll(program.sceneUniformBlock, sceneData);

@@ -128,7 +128,17 @@ export class CascadedShadowCasterPass extends PipelinePass {
     this._depthTexture = shadowTexture;
 
     // @todo: shouldn't set viewport and scissor in activeRenderTarget
-    context.setRenderTarget(renderTarget, CascadedShadowCasterPass._viewport, 0, undefined, undefined, undefined, RenderBufferLoadAction.DontCare, undefined, "Directional Shadows");
+    context.setRenderTarget(
+      renderTarget,
+      CascadedShadowCasterPass._viewport,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      RenderBufferLoadAction.DontCare,
+      undefined,
+      "Directional Shadows"
+    );
     rhi.clearRenderTarget(engine, CameraClearFlags.Depth, null);
 
     // prepare light and camera direction

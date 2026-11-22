@@ -1,4 +1,18 @@
-import { BoolUpdateFlag, Camera, CameraModifyFlags, Component, DependentMode, DisorderedArray, Entity, EntityModifyFlags, Layer, Logger, RenderElement, dependentComponents, ignoreClone } from "@galacean/engine-core";
+import {
+  BoolUpdateFlag,
+  Camera,
+  CameraModifyFlags,
+  Component,
+  DependentMode,
+  DisorderedArray,
+  Entity,
+  EntityModifyFlags,
+  Layer,
+  Logger,
+  RenderElement,
+  dependentComponents,
+  ignoreClone
+} from "@galacean/engine-core";
 import { MathUtil, Matrix, Ray, Vector2, Vector3 } from "@galacean/engine-math";
 import type { ICloneHook } from "@galacean/engine-core";
 import { Utils } from "../Utils";

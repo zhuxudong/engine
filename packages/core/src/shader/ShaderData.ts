@@ -1,3 +1,4 @@
+import { exposeCalculatedMatrix } from "../RenderPipeline/MatrixSnapshot";
 import { DataObject } from "../base/DataObject";
 import { IClone } from "@galacean/engine-design";
 import { Color, Matrix, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
@@ -65,6 +66,9 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
   /** @internal */
   @ignoreClone
   _propertyValueMap: Record<number, ShaderPropertyValueType> = Object.create(null);
+  /** @internal Revision of values used by a pass's variable render state. */
+  @ignoreClone
+  _renderStateRevision = 0;
   /** @internal */
   @ignoreClone
   _macroCollection: ShaderMacroCollection = new ShaderMacroCollection();
@@ -526,7 +530,9 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
     if (typeof property === "string") {
       property = ShaderProperty.getByName(property);
     }
-    return this._propertyValueMap[property._uniqueId] as T;
+    const value = this._propertyValueMap[property._uniqueId] as T;
+    if (this._group === ShaderDataGroup.Renderer) exposeCalculatedMatrix(value);
+    return value;
   }
 
   /**
@@ -655,6 +661,7 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
 
   cloneTo(target: ShaderData): void {
     if (target === this) return;
+    ++target._renderStateRevision;
     const targetMacroCollection = target._macroCollection;
     targetMacroCollection.clear();
     targetMacroCollection.unionCollection(this._macroCollection);
@@ -706,6 +713,7 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
         } else {
           const targetProperty = targetPropertyValueMap[k];
           if (targetProperty && targetProperty.constructor === property.constructor) {
+            if (target._group === ShaderDataGroup.Renderer) exposeCalculatedMatrix(targetProperty);
             targetProperty.copyFrom(property);
           } else {
             targetPropertyValueMap[k] = property.clone();
@@ -749,6 +757,7 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
 
     const propertyValueMap = this._propertyValueMap;
     const lastValue = propertyValueMap[id] as T;
+    if (property._controlsRenderState && lastValue !== value) ++this._renderStateRevision;
     this._updateRendererBatchSharedFields(property, type, value);
     propertyValueMap[id] = value;
     return lastValue;

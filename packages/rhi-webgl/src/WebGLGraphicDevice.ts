@@ -92,14 +92,21 @@ interface UniformBufferRanges {
 export class WebGLGraphicDevice implements IHardwareRenderer {
   readonly backend = "webgl2";
   beginFrame(): void {}
-  endRenderPass(): void { this._flushPendingStoreActions(); }
+  endRenderPass(): void {
+    this._flushPendingStoreActions();
+  }
   endFrame(): void {}
 
   createPlatformShaderProgram(engine: Engine, source: IPlatformShaderSource): IPlatformShaderProgram {
     return new GLShaderProgram(this, engine, source);
   }
 
-  applyRenderState(state: RenderState, previous: RenderState, invert: boolean, custom?: RenderStateElementMap | null): void {
+  applyRenderState(
+    state: RenderState,
+    previous: RenderState,
+    invert: boolean,
+    custom?: RenderStateElementMap | null
+  ): void {
     applyGLRenderState(this, state, previous, invert, custom);
   }
   private static readonly _rangesByContext = new WeakMap<WebGL2RenderingContext, UniformBufferRanges>();
@@ -732,17 +739,29 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     let sampler: WebGLSampler | null = null;
     if (texture._isDepthTexture) {
       const filter = compare ? texture.filterMode : TextureFilterMode.Point;
-      const func = compare ? texture.depthCompareFunction ?? TextureDepthCompareFunction.LessEqual : 0;
+      const func = compare ? (texture.depthCompareFunction ?? TextureDepthCompareFunction.LessEqual) : 0;
       const mipmaps = texture._mipmap;
-      const u = texture.wrapModeU, v = texture.wrapModeV;
+      const u = texture.wrapModeU,
+        v = texture.wrapModeV;
       const key = u | (v << 2) | (filter << 4) | (+mipmaps << 6) | (+compare << 7) | (func << 8);
       sampler = this._depthSamplers.get(key) ?? null;
       if (!sampler) {
         sampler = gl.createSampler();
         if (!sampler) return;
-        const wrap = (value: TextureWrapMode) => value === TextureWrapMode.Clamp ? gl.CLAMP_TO_EDGE : value === TextureWrapMode.Repeat ? gl.REPEAT : gl.MIRRORED_REPEAT;
+        const wrap = (value: TextureWrapMode) =>
+          value === TextureWrapMode.Clamp
+            ? gl.CLAMP_TO_EDGE
+            : value === TextureWrapMode.Repeat
+              ? gl.REPEAT
+              : gl.MIRRORED_REPEAT;
         const mag = filter === TextureFilterMode.Point ? gl.NEAREST : gl.LINEAR;
-        const min = !mipmaps ? mag : filter === TextureFilterMode.Point ? gl.NEAREST_MIPMAP_NEAREST : filter === TextureFilterMode.Bilinear ? gl.LINEAR_MIPMAP_NEAREST : gl.LINEAR_MIPMAP_LINEAR;
+        const min = !mipmaps
+          ? mag
+          : filter === TextureFilterMode.Point
+            ? gl.NEAREST_MIPMAP_NEAREST
+            : filter === TextureFilterMode.Bilinear
+              ? gl.LINEAR_MIPMAP_NEAREST
+              : gl.LINEAR_MIPMAP_LINEAR;
         gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_S, wrap(u));
         gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_T, wrap(v));
         gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, mag);
@@ -798,7 +817,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   protected _initGLState(gl: WebGL2RenderingContext): void {
     let samplerUnits = WebGLGraphicDevice._samplerUnitsByContext.get(gl);
-    if (!samplerUnits) WebGLGraphicDevice._samplerUnitsByContext.set(gl, samplerUnits = []);
+    if (!samplerUnits) WebGLGraphicDevice._samplerUnitsByContext.set(gl, (samplerUnits = []));
     samplerUnits.length = 0;
     this._samplerUnits = samplerUnits;
     this._shaderConstantValues = Object.create(null);

@@ -18,8 +18,9 @@ import { WebGPUTexture } from "./WebGPUTexture";
 export class WebGPURenderTarget implements IPlatformRenderTarget {
   private readonly _device: WebGPUGraphicDevice;
   private readonly _target: RenderTarget;
-  private readonly _multisampledColors: GPUTexture[] = [];
-  private readonly _ownedDepth: GPUTexture;
+  private _multisampledColors: GPUTexture[] = [];
+  private _ownedDepth?: GPUTexture;
+  private readonly _transients = new Map<number, { colors: GPUTexture[]; depth?: GPUTexture }>();
   private _mipLevel = 0;
   private _faceIndex?: TextureCubeFace;
 
@@ -27,45 +28,59 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
     this._device = device;
     this._target = target;
 
-    const sampleCount = target.antiAliasing;
-    if (sampleCount > 1) {
-      for (const color of target.colorTextures) {
-        const platformTexture = (color as TextureInternal)._platformTexture as WebGPUTexture;
-        this._multisampledColors.push(
-          device.device.createTexture({
-            label: `${color.name || "RenderTarget"} MSAA`,
-            size: { width: target.width, height: target.height },
-            sampleCount,
-            format: platformTexture._format,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT
-          })
-        );
-      }
-    }
+    target._antiAliasing = target.antiAliasing > 1 ? 4 : 1;
+    this._selectAttachments(0, 0);
+  }
 
-    const depth = (target as RenderTargetInternal)._depth;
-    if (typeof depth === "number") {
-      this._ownedDepth = device.device.createTexture({
-        label: "RenderTarget depth",
-        size: { width: target.width, height: target.height },
-        sampleCount,
-        format: WebGPUTexture._getFormat(depth, false),
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-      });
-    } else if (depth instanceof Texture && sampleCount > 1) {
-      this._ownedDepth = device.device.createTexture({
-        label: `${depth.name || "RenderTarget"} depth MSAA`,
-        size: { width: target.width, height: target.height },
-        sampleCount,
-        format: ((depth as TextureInternal)._platformTexture as WebGPUTexture)._format,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-      });
+  private _selectAttachments(mip: number, face: number): void {
+    const target = this._target,
+      samples = target.antiAliasing;
+    const depth = target._depth;
+    if (samples === 1 && typeof depth !== "number") return;
+    const key = mip * 6 + (samples > 1 ? face : 0);
+    let set = this._transients.get(key);
+    if (!set) {
+      const size = { width: Math.max(1, target.width >> mip), height: Math.max(1, target.height >> mip) };
+      const colors =
+        samples === 1
+          ? []
+          : target.colorTextures.map((color) =>
+              this._device.device.createTexture({
+                label: "RenderTarget MSAA",
+                size,
+                sampleCount: samples,
+                format: (color._platformTexture as WebGPUTexture)._format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
+              })
+            );
+      const format = this.depthStencilFormat;
+      const attachment =
+        format && (typeof depth === "number" || samples > 1)
+          ? this._device.device.createTexture({
+              label: "RenderTarget depth",
+              size,
+              sampleCount: samples,
+              format,
+              usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+            })
+          : undefined;
+      set = { colors, depth: attachment };
+      this._transients.set(key, set);
     }
+    this._multisampledColors = set.colors;
+    this._ownedDepth = set.depth;
+  }
+
+  _invalidatePixels(): void {
+    for (const texture of this._target.colorTextures) (texture._platformTexture as WebGPUTexture)._invalidatePixels();
+    const depth = this._target.depthTexture;
+    if (depth) (depth._platformTexture as WebGPUTexture)._invalidatePixels();
   }
 
   activeRenderTarget(mipLevel: number = 0, faceIndex?: TextureCubeFace): void {
     this._mipLevel = mipLevel;
     this._faceIndex = faceIndex;
+    this._selectAttachments(mipLevel, faceIndex ?? 0);
     this._device._setRenderTarget(this);
   }
 
@@ -73,29 +88,46 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
     this._device._getCommandEncoder();
     const depth = this._target.depthTexture;
     if (this._target.antiAliasing > 1 && depth) {
-      this._device._resolveDepth(this._ownedDepth,(depth._platformTexture as WebGPUTexture)._gpuTexture);
+      this._device._resolveDepth(
+        this._ownedDepth!,
+        (depth._platformTexture as WebGPUTexture)._gpuTexture,
+        this._mipLevel,
+        this._faceIndex ?? 0
+      );
     }
   }
 
   colorTexture(index = 0): GPUTexture {
-    return (this._target.getColorTexture(index)._platformTexture as WebGPUTexture)._gpuTexture;
+    return (this._target.getColorTexture(index)!._platformTexture as WebGPUTexture)._gpuTexture;
   }
 
   colorAttachment(index = 0): GPUTexture {
     return this._multisampledColors[index] ?? this.colorTexture(index);
   }
 
+  colorView(forAttachment = false): GPUTextureViewDescriptor | undefined {
+    return forAttachment && this.sampleCount > 1 ? undefined : this._viewDescriptor(this._target.getColorTexture(0)!);
+  }
+
+  depthView(): GPUTextureViewDescriptor | undefined {
+    const depth = this._target.depthTexture;
+    return !this._ownedDepth && depth ? this._viewDescriptor(depth) : undefined;
+  }
+
   depthTexture(): GPUTexture | undefined {
     const depth = this._target._depth;
-    return this._ownedDepth ?? (depth instanceof Texture ? (depth._platformTexture as WebGPUTexture)._gpuTexture : undefined);
+    return (
+      this._ownedDepth ?? (depth instanceof Texture ? (depth._platformTexture as WebGPUTexture)._gpuTexture : undefined)
+    );
   }
 
   destroy(): void {
     this._device.flush();
-    for (const texture of this._multisampledColors) {
-      texture.destroy();
+    for (const set of this._transients.values()) {
+      for (const texture of set.colors) texture.destroy();
+      set.depth?.destroy();
     }
-    this._ownedDepth?.destroy();
+    this._transients.clear();
   }
 
   /** @internal */
@@ -154,7 +186,7 @@ export class WebGPURenderTarget implements IPlatformRenderTarget {
 
     const targetInternal = target as RenderTargetInternal;
     const depth = targetInternal._depth;
-    let depthStencilAttachment: GPURenderPassDepthStencilAttachment;
+    let depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined;
     if (depth !== null) {
       const view =
         this._ownedDepth?.createView() ??

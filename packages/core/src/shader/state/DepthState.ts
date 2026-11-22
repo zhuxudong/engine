@@ -8,7 +8,6 @@ import { RenderStateElementKey } from "../enums/RenderStateElementKey";
  * Depth state.
  */
 export class DepthState extends DataObject {
-
   /** Whether to enable the depth test. */
   enabled: boolean = true;
   /** Depth comparison function. */

@@ -22,6 +22,9 @@ import type { RenderBufferStoreAction } from "./RenderBufferStoreAction";
 
 /** Graphics resource and command boundary used by the engine. */
 export interface IHardwareRenderer {
+  /** An XR compositor requested the scene depth produced by this eye camera. */
+  readonly hasExternalProjectionDepth?: boolean;
+  storeExternalProjectionDepth?(source: RenderTarget, viewport: Vector4): void;
   readonly supportsCompute: boolean;
   readonly supportsTransformFeedback: boolean;
   createFeedbackCompute?(): import("./IPlatformFeedbackCompute").IPlatformFeedbackCompute;
@@ -30,6 +33,14 @@ export interface IHardwareRenderer {
   readonly maxUniformBufferBindings: number;
   readonly maxVertexUniformBlocks: number;
   readonly maxFragmentUniformBlocks: number;
+  readonly maxSampledTexturesPerShaderStage?: number;
+  readonly maxSamplersPerShaderStage?: number;
+  /** Textures with the same key can be copied into layers of one GPU texture. */
+  getTextureArrayKey?(texture: import("../texture/Texture").Texture): string | undefined;
+  getTextureSamplerKey?(
+    texture: import("../texture/Texture").Texture | undefined,
+    kind: "filtering" | "non-filtering" | "comparison"
+  ): object;
   /** Resolve a language-defined device limit used in a shader constant expression. */
   readonly resolveShaderConstant: (name: string) => number | undefined;
   /** Required byte alignment of a uniform buffer range's starting offset. */
@@ -57,7 +68,12 @@ export interface IHardwareRenderer {
   supportsGenerateMipmaps(format: TextureFormat, isSRGBColorSpace: boolean): boolean;
   createPlatformPrimitive(primitive: Primitive): IPlatformPrimitive;
   createPlatformShaderProgram(engine: Engine, source: IPlatformShaderSource): IPlatformShaderProgram;
-  applyRenderState(state: RenderState, lastState: RenderState, frontFaceInvert: boolean, custom?: RenderStateElementMap | null): void;
+  applyRenderState(
+    state: RenderState,
+    lastState: RenderState,
+    frontFaceInvert: boolean,
+    custom?: RenderStateElementMap | null
+  ): void;
   beginFrame(): void;
   endRenderPass(): void;
   endFrame(): void;

@@ -19,7 +19,7 @@ export { ShaderBlockProperty } from "./ShaderBlockProperty";
 export { ShaderFactory } from "./ShaderFactory";
 export { ShaderMacro } from "./ShaderMacro";
 export { ShaderMacroProcessor } from "./ShaderMacroProcessor";
-export { ShaderPass } from "./ShaderPass";
+export { ShaderPass, type ShaderPipelinePreparation } from "./ShaderPass";
 export { ShaderProperty } from "./ShaderProperty";
 export { ShaderTagKey } from "./ShaderTagKey";
 export { SubShader } from "./SubShader";

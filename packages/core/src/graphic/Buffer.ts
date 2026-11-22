@@ -21,6 +21,7 @@ export class Buffer extends GraphicsResource {
   private _bufferUsage: BufferUsage;
   private _readable: boolean;
   private _cpuDataValid = true;
+  private _cpuShaderWriteRevision = 0;
   private _data: Uint8Array | null;
 
   /**
@@ -68,7 +69,11 @@ export class Buffer extends GraphicsResource {
 
   /** @internal Current CPU-side contents, if available without a GPU readback. */
   get _readableData(): Uint8Array | null {
-    return this._readable && this._cpuDataValid ? this._data : null;
+    return this._readable &&
+      this._cpuDataValid &&
+      this._cpuShaderWriteRevision === (this._platformBuffer.shaderWriteRevision ?? 0)
+      ? this._data
+      : null;
   }
 
   /**
@@ -191,20 +196,21 @@ export class Buffer extends GraphicsResource {
     options: SetDataOptions = SetDataOptions.None
   ): void {
     this._platformBuffer.setData(this._byteLength, data, bufferByteOffset, dataOffset, dataLength, options);
-    this._onDataUploaded(data, bufferByteOffset, dataOffset, dataLength);
+    this._onDataUploaded(data, bufferByteOffset, dataOffset, dataLength, options === SetDataOptions.Discard);
   }
 
   /** @internal Bind a uniform range and optionally upload the complete contents of that slice. */
   _bindUniformRange(binding: number, offset: number, size: number, data?: ArrayBufferView, discard?: boolean): void {
     this._engine._hardwareRenderer.bindUniformBufferRange(binding, this._platformBuffer, offset, size, data, discard);
-    if (data) this._onDataUploaded(data, offset, 0);
+    if (data) this._onDataUploaded(data, offset, 0, undefined, discard);
   }
 
   private _onDataUploaded(
     data: ArrayBuffer | ArrayBufferView,
     bufferByteOffset: number,
     dataOffset: number,
-    dataLength?: number
+    dataLength?: number,
+    discard = false
   ): void {
     if (this._readable) {
       const view = ArrayBuffer.isView(data) ? data : undefined;
@@ -212,9 +218,18 @@ export class Buffer extends GraphicsResource {
       const bytes = (data as TypedArray).BYTES_PER_ELEMENT || 1;
       const start = dataOffset * bytes;
       const length = dataLength === undefined ? data.byteLength - start : dataLength * bytes;
-      if (bufferByteOffset === 0 && length === this._byteLength) this._cpuDataValid = true;
       const src = new Uint8Array(buffer, (view?.byteOffset ?? 0) + start, length);
-      this._data!.set(src, bufferByteOffset);
+      const snapshot = this._data!;
+      snapshot.set(src, bufferByteOffset);
+      if (discard) {
+        // The source may alias the CPU snapshot. Copy its range before clearing the rest of the orphaned store.
+        snapshot.fill(0, 0, bufferByteOffset);
+        snapshot.fill(0, bufferByteOffset + length);
+      }
+      if (discard || (bufferByteOffset === 0 && length === this._byteLength)) {
+        this._cpuDataValid = true;
+        this._cpuShaderWriteRevision = this._platformBuffer.shaderWriteRevision ?? 0;
+      }
     }
     this._isContentLost = false;
     this._dataUpdateManager.dispatch();
@@ -243,7 +258,7 @@ export class Buffer extends GraphicsResource {
   getData(data: ArrayBufferView, bufferByteOffset: number, dataOffset: number, dataLength: number): void;
 
   getData(data: ArrayBufferView, bufferByteOffset: number = 0, dataOffset: number = 0, dataLength?: number): void {
-    if (this._platformBuffer.supportsSynchronousReadback === false && this._readable && this._cpuDataValid) {
+    if (this._platformBuffer.supportsSynchronousReadback === false && this._readableData) {
       const bytes = (data as TypedArray).BYTES_PER_ELEMENT || 1;
       const size = dataLength === undefined ? data.byteLength - dataOffset * bytes : dataLength * bytes;
       if (
@@ -280,9 +295,12 @@ export class Buffer extends GraphicsResource {
   copyFromBuffer(srcBuffer: Buffer, srcByteOffset: number, dstByteOffset: number, byteLength: number): void {
     this._platformBuffer.copyFromBuffer(srcBuffer._platformBuffer, srcByteOffset, dstByteOffset, byteLength);
     if (this._readable) {
-      if (srcBuffer._readable && srcBuffer._cpuDataValid) {
+      if (srcBuffer._readableData) {
         this._data!.set(srcBuffer._data!.subarray(srcByteOffset, srcByteOffset + byteLength), dstByteOffset);
-        if (dstByteOffset === 0 && byteLength === this._byteLength) this._cpuDataValid = true;
+        if (dstByteOffset === 0 && byteLength === this._byteLength) {
+          this._cpuDataValid = true;
+          this._cpuShaderWriteRevision = this._platformBuffer.shaderWriteRevision ?? 0;
+        }
       } else {
         this._cpuDataValid = false;
       }
@@ -301,12 +319,17 @@ export class Buffer extends GraphicsResource {
    * @internal
    */
   override _rebuild(): void {
+    const snapshot = this._readableData;
     const platformBuffer = this._engine._hardwareRenderer.createPlatformBuffer(
       this._type,
       this._byteLength,
-      this._bufferUsage
+      this._bufferUsage,
+      snapshot ?? undefined
     );
     this._platformBuffer = platformBuffer;
+    this._cpuShaderWriteRevision = platformBuffer.shaderWriteRevision ?? 0;
+    this._cpuDataValid = !!snapshot;
+    if (snapshot) this._isContentLost = false;
     this._engine._renderingStatistics._bufferMemory += this._byteLength;
   }
 

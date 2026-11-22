@@ -17,17 +17,17 @@ export class ShaderProgramMap {
   private _cacheMap: Tree = Object.create(null);
   private _lastQueryMap: Record<number, ShaderProgram>;
   private _lastQueryKey: number;
-  private _specializations?: Map<string, ShaderProgramMap>;
+  private _specializations?: Map<string | number, ShaderProgramMap>;
 
   constructor(engine: Engine) {
     this.engine = engine;
   }
 
   /** Distinguish native feedback outputs and integer vertex inputs sharing the same macro mask. */
-  specialize(key: string): ShaderProgramMap {
+  specialize(key: string | number): ShaderProgramMap {
     const maps = (this._specializations ??= new Map());
     let map = maps.get(key);
-    if (!map) maps.set(key, map = new ShaderProgramMap(this.engine));
+    if (!map) maps.set(key, (map = new ShaderProgramMap(this.engine)));
     return map;
   }
 

@@ -18,13 +18,22 @@ let builtinShaders: Core.BuiltinShaders;
 
 /** Browser engine with the WebGPU runtime and its matching built-in shaders. */
 export class WebGPUEngine extends PlatformEngine {
-  static override async create(configuration: WebGPUEngineConfiguration): Promise<WebGPUEngine> {
-    const webGPUShaderCompiler = configuration.webGPUShaderCompiler ?? (await createWebGPUShaderCompiler());
-    return super.create({
+  private static _compiler?: ReturnType<typeof createWebGPUShaderCompiler>;
+
+  protected static override async _prepareConfiguration(
+    configuration: WebGPUEngineConfiguration
+  ): Promise<WebGPUEngineConfiguration> {
+    const webGPUShaderCompiler =
+      configuration.webGPUShaderCompiler ??
+      (await (this._compiler ??= createWebGPUShaderCompiler().catch((error) => {
+        this._compiler = undefined;
+        throw error;
+      })));
+    return {
       ...configuration,
       webGPUShaderCompiler,
       shaderCompiler: configuration.shaderCompiler ?? new ShaderCompiler(webGPUShaderCompiler),
       builtinShaders: configuration.builtinShaders ?? (builtinShaders ??= Core.createBuiltinShaders(sources))
-    });
+    };
   }
 }

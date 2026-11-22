@@ -1,5 +1,27 @@
 # WebGPU renderer
 
+Applications can select the WebGPU flavor through `@galacean/engine-webgpu`. Serve the application over HTTPS or localhost so the browser exposes `navigator.gpu`.
+
+```ts
+import { Camera, MeshRenderer, PrimitiveMesh, UnlitMaterial, WebGPUEngine } from "@galacean/engine-webgpu";
+
+const engine = await WebGPUEngine.create({ canvas: "canvas" });
+const root = engine.sceneManager.activeScene.createRootEntity();
+const camera = root.createChild("Camera").addComponent(Camera);
+camera.entity.transform.setPosition(0, 0, 3);
+
+const renderer = root.createChild("Cube").addComponent(MeshRenderer);
+const mesh = (renderer.mesh = PrimitiveMesh.createCuboid(engine, 1, 1, 1));
+const material = new UnlitMaterial(engine);
+material.baseColor.set(1, 0.25, 0, 1);
+renderer.setMaterial(material);
+engine.run();
+```
+
+To move the first use of a material variant into a loading phase, call `await pass.preparePipeline(mesh, material, camera.renderTarget, { camera, renderer })` on its forward shader pass. This takes the mesh vertex layout, active macros, render state and camera attachment formats into account. Repeat preparation when introducing a new variant.
+
+Use `await buffer.getDataAsync(out)` or `await texture.getPixelBufferAsync(out)` to read GPU-produced data. Readable buffers also support synchronous access to their current CPU copy. For repeated synchronous texture reads, call `await texture.makePixelBufferReadable(mipLevel, layer)` once after the last upload or render to that subresource. `MeshShape.prepare()` lets a loading phase await mesh-surface emission data.
+
 ## Backend contracts
 
 | Engine input | Backend contract |
@@ -11,4 +33,4 @@
 | Vertex inputs | Attribute semantic and shader location are independent of the physical buffer format. Integer attributes supplied to floating-point ShaderLab inputs require a matching integer vertex input and numeric conversion. The pipeline key includes the actual vertex layout. |
 | Particles | The WebGL2 backend captures feedback varyings. The WebGPU backend dispatches the same selected simulation through a compute entry and exposes the resulting storage buffer as the next vertex binding. Parent trajectory gather respects ring offsets and the number of children per parent. |
 
-The optional WebGPU entry owns its compiler payload and GPU resources. Historical WebGL shader bytecode retains its original instruction values. A device loss invalidates pipelines, bind groups, buffer slices and texture views owned by that device.
+The WebGPU entry loads the shader compiler WASM when creating an engine. Each device owns its pipelines, bind groups, buffer slices and texture views. Historical shader bytecode retains its original instruction values. The loader can use the instruction stream to specialize old assets for WebGPU. Built-in WebGPU shaders also carry WGSL and reflection for their default variant.

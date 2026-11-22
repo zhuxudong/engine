@@ -1,4 +1,15 @@
-import { VertexMergeBatcher, DependentMode, Entity, EntityModifyFlags, Renderer, RendererUpdateFlags, ShaderMacroCollection, ShaderProperty, dependentComponents, ignoreClone } from "@galacean/engine-core";
+import {
+  VertexMergeBatcher,
+  DependentMode,
+  Entity,
+  EntityModifyFlags,
+  Renderer,
+  RendererUpdateFlags,
+  ShaderMacroCollection,
+  ShaderProperty,
+  dependentComponents,
+  ignoreClone
+} from "@galacean/engine-core";
 import { Color, Matrix, Plane, Ray, Vector3, Vector4 } from "@galacean/engine-math";
 import type { PrimitiveChunkManager } from "@galacean/engine-core";
 import { Utils } from "../Utils";

@@ -1,4 +1,5 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "module": "esnext",
     "target": "esnext",
@@ -12,12 +13,7 @@
     "sourceMap": true,
     "incremental": false,
     "skipLibCheck": true,
-    "stripInternal": true,
-    "types": [
-      "@webgpu/types"
-    ]
+    "types": ["@webgpu/types"]
   },
-  "include": [
-    "src/**/*"
-  ]
+  "include": ["src/**/*"]
 }

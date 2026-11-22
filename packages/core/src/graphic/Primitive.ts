@@ -48,7 +48,7 @@ export class Primitive extends GraphicsResource {
       types[element.attribute] = type;
       fields.push(element.attribute + ":" + type);
     }
-    return this._shaderInputs = { key: fields.sort().join(","), types };
+    return (this._shaderInputs = { key: fields.sort().join(","), types });
   }
 
   get vertexElements(): VertexElement[] {

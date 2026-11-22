@@ -1,4 +1,13 @@
-import { Engine, Logger, ShaderBlockProperty, ShaderFactory, ShaderProperty, Texture, type IPlatformShaderProgram, type IPlatformShaderSource } from "@galacean/engine-core";
+import {
+  Engine,
+  Logger,
+  ShaderBlockProperty,
+  ShaderFactory,
+  ShaderProperty,
+  Texture,
+  type IPlatformShaderProgram,
+  type IPlatformShaderSource
+} from "@galacean/engine-core";
 import type { IShaderUniformVariable } from "@galacean/engine-design";
 import { Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import { GLShaderUniform } from "./GLShaderUniform";
@@ -24,7 +33,6 @@ export class GLShaderProgram implements IPlatformShaderProgram {
       .join("\n");
   }
 
-
   readonly id = GLShaderProgram._counter++;
   readonly attributeLocation: Record<string, number> = Object.create(null);
   readonly uniforms: GLShaderUniform[] = [];
@@ -34,7 +42,11 @@ export class GLShaderProgram implements IPlatformShaderProgram {
   private readonly _glProgram: WebGLProgram | null;
   private _activeTextureUint = 0;
 
-  constructor(private _device: WebGLGraphicDevice, private _engine: Engine, source: IPlatformShaderSource) {
+  constructor(
+    private _device: WebGLGraphicDevice,
+    private _engine: Engine,
+    source: IPlatformShaderSource
+  ) {
     this._gl = _device.gl;
     this._glProgram = this._createProgram(source.vertexSource, source.fragmentSource, source.feedbackVaryings);
     this.isValid = !!this._glProgram;
@@ -78,12 +90,15 @@ export class GLShaderProgram implements IPlatformShaderProgram {
 
     const fragmentShader = this._createShader(gl.FRAGMENT_SHADER, fragmentSource);
     if (!fragmentShader) {
+      gl.deleteShader(vertexShader);
       return null;
     }
 
     // Create program and link shader
     const program = gl.createProgram();
     if (!program) {
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
       return null;
     }
 
@@ -96,22 +111,18 @@ export class GLShaderProgram implements IPlatformShaderProgram {
     }
 
     gl.linkProgram(program);
-    gl.validateProgram(program);
-
+    const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
+    if (!linked && Logger.isEnabled && !gl.isContextLost()) {
+      this._reportShaderError(vertexShader, "vertex", vertexSource);
+      this._reportShaderError(fragmentShader, "fragment", fragmentSource);
+      Logger.error(`Could not link WebGL program\n${gl.getProgramInfoLog(program)}`);
+    }
     gl.deleteShader(vertexShader);
     gl.deleteShader(fragmentShader);
-
-    if (Logger.isEnabled && !gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
-      Logger.error(
-        `Could not link WebGL program\n\n` +
-          `Shader error: ${gl.getError()}\n\n` +
-          `Validate status: ${gl.getProgramParameter(program, gl.VALIDATE_STATUS)}\n\n` +
-          `Program information log: ${gl.getProgramInfoLog(program)}`
-      );
+    if (!linked) {
       gl.deleteProgram(program);
       return null;
     }
-
     return program;
   }
 
@@ -126,18 +137,16 @@ export class GLShaderProgram implements IPlatformShaderProgram {
     gl.shaderSource(shader, shaderSource);
     gl.compileShader(shader);
 
-    if (Logger.isEnabled && !gl.getShaderParameter(shader, gl.COMPILE_STATUS) && !gl.isContextLost()) {
-      console.warn(
-        `Could not compile WebGL shader\n\n` +
-          `Shader type: ${shaderType == gl.VERTEX_SHADER ? "vertex" : "fragment"}\n\n` +
-          `Shader information log:\n${gl.getShaderInfoLog(shader)}\n` +
-          `Shader source:\n${GLShaderProgram._addLineNum(shaderSource)}`
-      );
-      gl.deleteShader(shader);
-      return null;
-    }
-
     return shader;
+  }
+
+  private _reportShaderError(shader: WebGLShader, stage: string, source: string): void {
+    const gl = this._gl;
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      Logger.error(
+        `Could not compile ${stage} shader\n${gl.getShaderInfoLog(shader)}\n${GLShaderProgram._addLineNum(source)}`
+      );
+    }
   }
 
   /**

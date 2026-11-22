@@ -7,7 +7,31 @@ import type { SpinePhysicsSupport } from "../SpinePhysics";
 import type { SpineSkeletonData } from "../SpineSkeletonData";
 import type { SpineAnimationStateData } from "../SpineAnimationStateData";
 import type { ISpineRuntime } from "../runtime/ISpineRuntime";
-import { assignmentClone, BlendFactor, Buffer, BufferBindFlag, BufferUsage, deepClone, Entity, Engine, ignoreClone, IndexBufferBinding, IndexFormat, Material, Primitive, Renderer, RendererUpdateFlags, ShaderData, ShaderDataGroup, ShaderProperty, Signal, SubPrimitive, VertexBufferBinding, VertexElement, VertexElementFormat } from "@galacean/engine-core";
+import {
+  assignmentClone,
+  BlendFactor,
+  Buffer,
+  BufferBindFlag,
+  BufferUsage,
+  deepClone,
+  Entity,
+  Engine,
+  ignoreClone,
+  IndexBufferBinding,
+  IndexFormat,
+  Material,
+  Primitive,
+  Renderer,
+  RendererUpdateFlags,
+  ShaderData,
+  ShaderDataGroup,
+  ShaderProperty,
+  Signal,
+  SubPrimitive,
+  VertexBufferBinding,
+  VertexElement,
+  VertexElementFormat
+} from "@galacean/engine-core";
 import { BoundingBox, Vector3 } from "@galacean/engine-math";
 import { SpineResource } from "../loader/SpineResource";
 import { SpineMaterial } from "./SpineMaterial";

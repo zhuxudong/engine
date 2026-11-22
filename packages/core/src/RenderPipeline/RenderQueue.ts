@@ -126,69 +126,79 @@ export class RenderQueue {
           }
         }
 
-        const program = shaderPass._getShaderProgram(engine, compileMacros, undefined, curElement.primitive, rendererData, materialData, renderElementShaderData);
+        const program = shaderPass._getShaderProgram(
+          engine,
+          compileMacros,
+          undefined,
+          curElement.primitive,
+          rendererData,
+          materialData,
+          renderElementShaderData
+        );
         if (!program.isValid) {
           continue;
         }
 
         const switchProgram = program.bind();
-        const switchRenderCount = renderCount !== program._uploadRenderCount;
+        if (program._platformProgram.uniforms.length) {
+          const switchRenderCount = renderCount !== program._uploadRenderCount;
 
-        // Upload uniforms (cache-aware per block). Renderer block carries plain samplers/arrays
-        // even on the instanced path (GLSL forbids them in UBOs); `_canBatch` ensures the whole
-        // batch agrees on those, so the leader's values are correct for the draw call
-        if (switchRenderCount) {
-          program.regroupUniformBlocks();
-          program.uploadAll(program.sceneUniformBlock, sceneData);
-          program.uploadAll(program.cameraUniformBlock, cameraData);
-          program.uploadAll(program.rendererUniformBlock, rendererData);
-          program._uploadRendererId = isInstanced ? -1 : rendererId;
-          program.uploadAll(program.materialUniformBlock, materialData);
-          renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
-          // UnGroup textures should upload default value, texture uint maybe change by logic of texture bind
-          program.uploadUnGroupTextures();
-          program._uploadSceneId = sceneId;
-          program._uploadCameraId = cameraId;
-          program._uploadMaterialId = materialId;
-          program._uploadRenderCount = renderCount;
-        } else {
-          if (program._uploadSceneId !== sceneId) {
+          // Upload uniforms (cache-aware per block). Renderer block carries plain samplers/arrays
+          // even on the instanced path (GLSL forbids them in UBOs); `_canBatch` ensures the whole
+          // batch agrees on those, so the leader's values are correct for the draw call
+          if (switchRenderCount) {
+            program.regroupUniformBlocks();
             program.uploadAll(program.sceneUniformBlock, sceneData);
-            program._uploadSceneId = sceneId;
-          } else if (switchProgram) {
-            program.uploadTextures(program.sceneUniformBlock, sceneData);
-          }
-
-          if (program._uploadCameraId !== cameraId) {
             program.uploadAll(program.cameraUniformBlock, cameraData);
-            program._uploadCameraId = cameraId;
-          } else if (switchProgram) {
-            program.uploadTextures(program.cameraUniformBlock, cameraData);
-          }
-
-          if (isInstanced) {
-            // Different batches may have different leaders, re-upload every time
             program.uploadAll(program.rendererUniformBlock, rendererData);
-            program._uploadRendererId = -1;
-          } else if (program._uploadRendererId !== rendererId) {
-            program.uploadAll(program.rendererUniformBlock, rendererData);
-            program._uploadRendererId = rendererId;
-          } else if (switchProgram) {
-            program.uploadTextures(program.rendererUniformBlock, rendererData);
-          }
-
-          if (program._uploadMaterialId !== materialId) {
+            program._uploadRendererId = isInstanced ? -1 : rendererId;
             program.uploadAll(program.materialUniformBlock, materialData);
-            program._uploadMaterialId = materialId;
-          } else if (switchProgram) {
-            program.uploadTextures(program.materialUniformBlock, materialData);
-          }
-
-          renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
-
-          // We only consider switchProgram case, because UnGroup texture's value is always default
-          if (switchProgram) {
+            renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
+            // UnGroup textures should upload default value, texture uint maybe change by logic of texture bind
             program.uploadUnGroupTextures();
+            program._uploadSceneId = sceneId;
+            program._uploadCameraId = cameraId;
+            program._uploadMaterialId = materialId;
+            program._uploadRenderCount = renderCount;
+          } else {
+            if (program._uploadSceneId !== sceneId) {
+              program.uploadAll(program.sceneUniformBlock, sceneData);
+              program._uploadSceneId = sceneId;
+            } else if (switchProgram) {
+              program.uploadTextures(program.sceneUniformBlock, sceneData);
+            }
+
+            if (program._uploadCameraId !== cameraId) {
+              program.uploadAll(program.cameraUniformBlock, cameraData);
+              program._uploadCameraId = cameraId;
+            } else if (switchProgram) {
+              program.uploadTextures(program.cameraUniformBlock, cameraData);
+            }
+
+            if (isInstanced) {
+              // Different batches may have different leaders, re-upload every time
+              program.uploadAll(program.rendererUniformBlock, rendererData);
+              program._uploadRendererId = -1;
+            } else if (program._uploadRendererId !== rendererId) {
+              program.uploadAll(program.rendererUniformBlock, rendererData);
+              program._uploadRendererId = rendererId;
+            } else if (switchProgram) {
+              program.uploadTextures(program.rendererUniformBlock, rendererData);
+            }
+
+            if (program._uploadMaterialId !== materialId) {
+              program.uploadAll(program.materialUniformBlock, materialData);
+              program._uploadMaterialId = materialId;
+            } else if (switchProgram) {
+              program.uploadTextures(program.materialUniformBlock, materialData);
+            }
+
+            renderElementShaderData && program.uploadAll(program.renderElementUniformBlock, renderElementShaderData);
+
+            // We only consider switchProgram case, because UnGroup texture's value is always default
+            if (switchProgram) {
+              program.uploadUnGroupTextures();
+            }
           }
         }
         const layout = program._instanceLayout;

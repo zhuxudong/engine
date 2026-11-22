@@ -13,6 +13,8 @@ export interface IPlatformBuffer {
   ): void;
 
   readonly supportsSynchronousReadback?: boolean;
+  /** Changes when a GPU shader writes the buffer without supplying CPU data. */
+  readonly shaderWriteRevision?: number;
 
   getData(data: ArrayBufferView, bufferByteOffset?: number, dataOffset?: number, dataLength?: number): void;
 

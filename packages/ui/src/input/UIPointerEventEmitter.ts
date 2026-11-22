@@ -1,4 +1,14 @@
-import { CameraClearFlags, DisorderedArray, Entity, Layer, Pointer, PointerEventData, PointerEventEmitter, Scene, registerPointerEventEmitter } from "@galacean/engine-core";
+import {
+  CameraClearFlags,
+  DisorderedArray,
+  Entity,
+  Layer,
+  Pointer,
+  PointerEventData,
+  PointerEventEmitter,
+  Scene,
+  registerPointerEventEmitter
+} from "@galacean/engine-core";
 import { UICanvas } from "..";
 import { UIRenderer } from "../component/UIRenderer";
 import { UIHitResult } from "./UIHitResult";

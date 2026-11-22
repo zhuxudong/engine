@@ -22,9 +22,7 @@
   ],
   "dependencies": {
     "@galacean/engine-core": "workspace:*",
-    "@galacean/engine-math": "workspace:*"
-  },
-  "devDependencies": {
+    "@galacean/engine-math": "workspace:*",
     "@galacean/engine-design": "workspace:*",
     "@webgpu/types": "^0.1.71"
   }

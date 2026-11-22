@@ -22,6 +22,16 @@ export type TextureReadArguments =
 export abstract class Texture extends GraphicsResource {
   name: string;
 
+  /**
+   * Make a mip level and layer available to synchronous getPixelBuffer calls.
+   * On asynchronous devices, writes invalidate the snapshot. Call again to capture changed pixels.
+   * @param mipLevel - Mip level to read.
+   * @param layer - Array layer or cube face.
+   */
+  async makePixelBufferReadable(mipLevel = 0, layer = 0): Promise<void> {
+    await this._platformTexture.makePixelBufferReadable?.(mipLevel, layer);
+  }
+
   protected _readRegion(args: TextureReadArguments): TextureReadRegion {
     switch (args.length) {
       case 1:
@@ -217,6 +227,7 @@ export abstract class Texture extends GraphicsResource {
     this._width = width;
     this._height = height;
     this._format = format;
+    this._isDepthTexture = format >= TextureFormat.Depth && format <= TextureFormat.Depth32Stencil8;
     this._mipmap = mipmap;
     this._isSRGBColorSpace = isSRGBColorSpace;
 

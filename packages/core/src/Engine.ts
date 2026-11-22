@@ -44,7 +44,10 @@ export class Engine extends EventDispatcher {
   /** @internal */
   static _builtinShaders: BuiltinShaders;
   /** @internal Built-in shader assets selected by this engine's distribution. */
-  readonly _builtinShaders: BuiltinShaders;
+  get _builtinShaders(): BuiltinShaders {
+    return this._configuredBuiltinShaders ?? Engine._builtinShaders;
+  }
+  private readonly _configuredBuiltinShaders?: BuiltinShaders;
   /** @internal */
   readonly _shaderCompiler?: IShaderCompiler;
 
@@ -91,8 +94,6 @@ export class Engine extends EventDispatcher {
   _renderTargetPool: RenderTargetPool;
   /** @internal */
   _lastRenderState: RenderState = new RenderState();
-  /** @internal Scratch values resolved from a pass, material and render element for this draw. */
-  readonly _resolvedRenderState = new RenderState();
   /** @internal Backend-specific specialization belongs to the device's engine. */
   readonly _webGPUShaderCompiler?: IWebGPUShaderCompiler;
   private _frameDepth = 0;
@@ -257,7 +258,7 @@ export class Engine extends EventDispatcher {
     super();
     this._hardwareRenderer = hardwareRenderer;
     this._webGPUShaderCompiler = configuration.webGPUShaderCompiler;
-    this._builtinShaders = configuration.builtinShaders ?? Engine._builtinShaders;
+    this._configuredBuiltinShaders = configuration.builtinShaders;
     this._shaderCompiler = configuration.shaderCompiler;
     this._hardwareRenderer.init(canvas, this._onDeviceLost.bind(this), this._onDeviceRestored.bind(this));
 
@@ -664,7 +665,8 @@ export class Engine extends EventDispatcher {
       // ShaderFactory dependency, so the binding has to be wired here at the
       // runtime boundary.
       shaderCompiler._setIncludeMap(ShaderFactory.includeMap);
-      if (this._hardwareRenderer.backend !== "webgpu" || !Shader._shaderCompiler) Shader._shaderCompiler = shaderCompiler;
+      if (this._hardwareRenderer.backend !== "webgpu" || !Shader._shaderCompiler)
+        Shader._shaderCompiler = shaderCompiler;
     }
 
     const initializePromises: (Promise<unknown> | void)[] = [];

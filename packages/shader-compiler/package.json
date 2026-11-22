@@ -73,7 +73,9 @@
   },
   "typesVersions": {
     "*": {
-      "webgpu": ["types/webgpu.d.ts"],
+      "webgpu": [
+        "types/webgpu.d.ts"
+      ],
       "precompile": [
         "types/precompile.d.ts"
       ],

@@ -42,7 +42,7 @@ export class Texture2DArray extends Texture {
 
     this._length = length;
     this._platformTexture = engine._hardwareRenderer.createPlatformTexture2DArray(this);
-    this.filterMode = TextureFilterMode.Bilinear;
+    this.filterMode = this._isIntFormat() ? TextureFilterMode.Point : TextureFilterMode.Bilinear;
     this.wrapModeU = this.wrapModeV = TextureWrapMode.Repeat;
 
     this._memorySize = TextureUtils.getTextureByteCount(format, width, height, this._mipmapCount, length);

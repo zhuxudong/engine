@@ -1,4 +1,5 @@
 import { Matrix, Vector4 } from "@galacean/engine-math";
+import { MatrixSnapshot } from "./MatrixSnapshot";
 import { Camera } from "../Camera";
 import { Engine } from "../Engine";
 import { VirtualCamera } from "../VirtualCamera";
@@ -30,6 +31,12 @@ export class RenderContext {
   private static _flipYProjectionMatrix = new Matrix();
   private static _flipYViewProjectionMatrix = new Matrix();
 
+  private readonly _viewSnapshot = new MatrixSnapshot();
+  private readonly _viewProjectionSnapshot = new MatrixSnapshot();
+  private readonly _flippedViewProjectionSnapshot = new MatrixSnapshot();
+  viewRevision = -1;
+  viewProjectionRevision = -1;
+
   private _projectionParams: Vector4 = new Vector4();
 
   camera: Camera;
@@ -59,6 +66,12 @@ export class RenderContext {
       viewProjectionMatrix = RenderContext._flipYViewProjectionMatrix;
     }
 
+    // GL can visit both projection orientations in one camera render. Keep independent revisions for each.
+    const viewProjectionSnapshot = flipProjection ? this._flippedViewProjectionSnapshot : this._viewProjectionSnapshot;
+    this._viewSnapshot.update(viewMatrix);
+    viewProjectionSnapshot.update(viewProjectionMatrix);
+    this.viewRevision = this._viewSnapshot.revision;
+    this.viewProjectionRevision = viewProjectionSnapshot.revision;
     this.viewMatrix = viewMatrix;
     this.projectionMatrix = projectionMatrix;
     this.viewProjectionMatrix = viewProjectionMatrix;

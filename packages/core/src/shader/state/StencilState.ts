@@ -9,8 +9,6 @@ import { StencilOperation } from "../enums/StencilOperation";
  * Stencil state.
  */
 export class StencilState extends DataObject {
-
-
   /** Whether to enable stencil test. */
   enabled: boolean = false;
   /** Write the reference value of the stencil buffer. */

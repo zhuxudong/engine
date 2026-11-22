@@ -215,8 +215,9 @@ async function loadShaderCompiler(platformTarget?: number): Promise<ShaderPrecom
   let webgpu: unknown;
   if (platformTarget === 1) {
     const localRequire = createRequire(import.meta.url);
-    const module = localRequire(process.env.GALACEAN_SHADER_COMPILER_BOOTSTRAP === "true"
-      ? "../.bootstrap/webgpu.js" : "../dist/webgpu.main.js");
+    const module = localRequire(
+      process.env.GALACEAN_SHADER_COMPILER_BOOTSTRAP === "true" ? "../.bootstrap/webgpu.js" : "../dist/webgpu.main.js"
+    );
     const wasm = fs.readFileSync(localRequire.resolve("web-naga/web_naga_bg.wasm"));
     webgpu = await module.createWebGPUShaderCompiler(wasm);
   }

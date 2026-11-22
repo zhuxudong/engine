@@ -1,9 +1,23 @@
-import { Camera, Material, MeshRenderer, PrimitiveMesh, RenderTarget, Shader, Texture2D, TextureDepthCompareFunction, TextureFormat, WebGLEngine } from "@galacean/engine";
+import {
+  Camera,
+  Material,
+  MeshRenderer,
+  PrimitiveMesh,
+  RenderTarget,
+  Shader,
+  Texture2D,
+  TextureDepthCompareFunction,
+  TextureFormat,
+  WebGLEngine
+} from "@galacean/engine";
 import { ShaderCompiler } from "@galacean/engine-shader-compiler";
 import { expect, it } from "vitest";
 
 it("samples one depth texture as raw and comparison data in the same draw", async () => {
-  const engine = await WebGLEngine.create({ canvas: document.createElement("canvas"), shaderCompiler: new ShaderCompiler() });
+  const engine = await WebGLEngine.create({
+    canvas: document.createElement("canvas"),
+    shaderCompiler: new ShaderCompiler()
+  });
   const shader = Shader.create(`Shader "Tests/DepthSampler" { SubShader "Default" { Pass "Forward" {
     mat4 renderer_MVPMat;
     mediump sampler2D probeDepth;
@@ -29,7 +43,10 @@ it("samples one depth texture as raw and comparison data in the same draw", asyn
     material.shaderData.setTexture("probeShadow", depth);
     meshRenderer.setMaterial(material);
     const pixel = new Uint8Array(4);
-    for (const [compare, expected] of [[TextureDepthCompareFunction.Less, 255], [TextureDepthCompareFunction.Greater, 0]]) {
+    for (const [compare, expected] of [
+      [TextureDepthCompareFunction.Less, 255],
+      [TextureDepthCompareFunction.Greater, 0]
+    ]) {
       depth.depthCompareFunction = compare;
       camera.render();
       color.getPixelBuffer(4, 4, 1, 1, pixel);

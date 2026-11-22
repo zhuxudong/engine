@@ -19,9 +19,11 @@ interface VertexLayout {
   defaultBufferSlot?: number;
   key: string;
   streams: VertexStream[];
+  expandedStreams: VertexStream[];
 }
 type IShaderVertexInputReflection = NonNullable<IPlatformShaderSource["reflection"]>["vertexInputs"][number];
 import { WebGPUPrimitiveEmulation } from "./WebGPUPrimitiveEmulation";
+import type { RenderDrawCommands } from "./WebGPUDrawBundles";
 import { WebGPUBuffer } from "./WebGPUBuffer";
 import type { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
 import { WebGPUShaderProgram } from "./WebGPUShaderProgram";
@@ -53,15 +55,14 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   _prepareIndexBuffer(sub: SubPrimitive, vertex: VertexLayout): GPUBuffer | undefined {
-    for (const stream of vertex.streams) {
-      if (stream.rate > 1) {
-        this._emulation ??= new WebGPUPrimitiveEmulation(this._device);
-        stream.expanded = this._emulation.instances(
-          this.primitive.vertexBufferBindings[stream.binding]!,
-          stream.rate,
-          this.primitive.instanceCount || 1
-        );
-      }
+    for (let i = 0; i < vertex.expandedStreams.length; i++) {
+      const stream = vertex.expandedStreams[i];
+      this._emulation ??= new WebGPUPrimitiveEmulation(this._device);
+      stream.expanded = this._emulation.instances(
+        this.primitive.vertexBufferBindings[stream.binding]!,
+        stream.rate,
+        this.primitive.instanceCount || 1
+      );
     }
     if (sub.topology === MeshTopology.LineLoop || sub.topology === MeshTopology.TriangleFan) {
       this._emulation ??= new WebGPUPrimitiveEmulation(this._device);
@@ -144,7 +145,13 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       };
     }
 
-    const result = { buffers, defaultBufferSlot, streams, key: JSON.stringify(buffers) };
+    const result = {
+      buffers,
+      defaultBufferSlot,
+      streams,
+      expandedStreams: streams.filter((stream) => stream.rate > 1),
+      key: JSON.stringify(buffers)
+    };
     this._layouts.set(inputs, result);
     return result;
   }
@@ -166,7 +173,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
 
   /** @internal */
   _encodeDraw(
-    pass: GPURenderPassEncoder,
+    pass: RenderDrawCommands,
     subPrimitive: SubPrimitive,
     vertex: VertexLayout,
     indexBuffer?: GPUBuffer
@@ -192,7 +199,7 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
       const format = this._indexFormat();
       const buffer = indexBinding.buffer._platformBuffer as WebGPUBuffer;
       buffer._markUsed();
-      this._device._setIndexBuffer(pass, indexBuffer, format);
+      this._device._setIndexBuffer(pass, indexBuffer!, format);
       pass.drawIndexed(subPrimitive.count, instanceCount, subPrimitive.start, 0, 0);
     } else {
       pass.draw(subPrimitive.count, instanceCount, subPrimitive.start, 0);
@@ -200,14 +207,14 @@ export class WebGPUPrimitive implements IPlatformPrimitive {
   }
 
   private _indexFormat(): GPUIndexFormat {
-    switch (this.primitive.indexBufferBinding.format) {
+    switch (this.primitive.indexBufferBinding!.format) {
       case IndexFormat.UInt8:
       case IndexFormat.UInt16:
         return "uint16";
       case IndexFormat.UInt32:
         return "uint32";
       default:
-        throw new Error(`Unsupported index format ${this.primitive.indexBufferBinding.format}.`);
+        throw new Error(`Unsupported index format ${this.primitive.indexBufferBinding!.format}.`);
     }
   }
 

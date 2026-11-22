@@ -36,12 +36,18 @@ export class WebGPUTexture2D extends WebGPUTexture implements IPlatformTexture2D
     this._copyExternalImage(imageSource, mipLevel, { x, y, z: 0 }, flipY, premultiplyAlpha);
   }
 
-  getPixelBuffer(): void {
-    this._unsupportedReadback();
+  getPixelBuffer(x: number, y: number, width: number, height: number, mipLevel: number, out: ArrayBufferView): void {
+    this._readCachedPixels(0, x, y, width, height, mipLevel, out);
   }
 
-  getPixelBufferAsync(x:number,y:number,width:number,height:number,mipLevel:number,out:ArrayBufferView): Promise<void> {
-    return this._readPixels(0,x,y,width,height,mipLevel,out);
+  getPixelBufferAsync(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): Promise<void> {
+    return this._readPixels(0, x, y, width, height, mipLevel, out);
   }
-
 }

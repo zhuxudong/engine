@@ -144,6 +144,17 @@ export class XRManagerExtended extends XRManager {
     return this.sessionManager._getCancelAnimationFrame();
   }
 
+  override _beginCamera(type: CameraType): boolean {
+    const manager = this.sessionManager;
+    if (manager.state !== XRSessionState.Running) return true;
+    const eye = type === CameraType.XRLeftCamera ? "left" : type === CameraType.XRRightCamera ? "right" : "none";
+    return manager._platformSession?.beginView?.(eye) ?? true;
+  }
+
+  override _endCamera(): void {
+    this.sessionManager._platformSession?.endView?.();
+  }
+
   override _getCameraIgnoreClearFlags(type: CameraType): CameraClearFlags {
     return this.cameraManager._getIgnoreClearFlags(type);
   }

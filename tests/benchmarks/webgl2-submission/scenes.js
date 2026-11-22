@@ -234,6 +234,16 @@ function variants(engine, root, camera) {
   let active = 0;
   return {
     details: { variantCount, batchSize, batchInterval },
+    async preparePipelines() {
+      await Promise.all(
+        entities.map((entity) => {
+          const renderer = entity.getComponent(MeshRenderer);
+          const material = renderer.getMaterial();
+          const pass = material.shader.subShaders[0].passes.find((p) => p.getTagValue("pipelineStage") === "Forward");
+          return pass.preparePipeline(sphere, material, camera.renderTarget, { camera, renderer });
+        })
+      );
+    },
     beforeFrame(index) {
       if (index < 0 || active === variantCount) return;
       const required = Math.min((Math.floor(index / batchInterval) + 1) * batchSize, variantCount);

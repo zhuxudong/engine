@@ -13,8 +13,6 @@ import { RenderTargetBlendState } from "./RenderTargetBlendState";
  * Blend state.
  */
 export class BlendState extends DataObject {
-
-
   private static _getBlendFactor(
     property: ShaderProperty,
     materialData: ShaderData,

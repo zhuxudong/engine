@@ -47,6 +47,8 @@ export class ShaderProperty {
   _builtinGlobalGroup: ShaderDataGroup = ShaderDataGroup.None;
   /** @internal A renderer override for this field remains shared by an entire instanced draw. */
   _requiresSharedInstanceValue: boolean;
+  /** @internal Set when a shader pass uses this property to control its render state. */
+  _controlsRenderState = false;
   /** @internal */
   _types: ShaderPropertyType = ShaderPropertyType.None;
 

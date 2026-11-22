@@ -1,4 +1,17 @@
-import { Entity, ISpriteAssembler, ISpriteRenderer, RendererUpdateFlags, SimpleSpriteAssembler, SlicedSpriteAssembler, Sprite, SpriteDrawMode, SpriteModifyFlags, SpriteTileMode, TiledSpriteAssembler, ignoreClone } from "@galacean/engine-core";
+import {
+  Entity,
+  ISpriteAssembler,
+  ISpriteRenderer,
+  RendererUpdateFlags,
+  SimpleSpriteAssembler,
+  SlicedSpriteAssembler,
+  Sprite,
+  SpriteDrawMode,
+  SpriteModifyFlags,
+  SpriteTileMode,
+  TiledSpriteAssembler,
+  ignoreClone
+} from "@galacean/engine-core";
 import { BoundingBox, MathUtil } from "@galacean/engine-math";
 import { CanvasRenderMode } from "../../enums/CanvasRenderMode";
 import { RootCanvasModifyFlags } from "../UICanvas";

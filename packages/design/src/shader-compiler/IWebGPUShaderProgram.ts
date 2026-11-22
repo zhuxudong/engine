@@ -26,6 +26,11 @@ export interface IWebGPUShaderTexture {
   name: string;
   /** Index in a ShaderData texture array when GLSL uses a combined sampler array. */
   arrayIndex?: number;
+  /** Layer of a compatible material texture in a shared physical 2D array view. */
+  arrayLayer?: number;
+  /** Original mip zero and count within a physical array shared by different texture extents. */
+  arrayMipOffset?: number;
+  arrayMipCount?: number;
   group: number;
   textureBinding: number;
   samplerBinding?: number;
@@ -38,6 +43,10 @@ export interface IWebGPUShaderTexture {
 }
 
 export interface IWebGPUShaderReflection {
+  /** Resolve actual texture sampler descriptors when the independent sampler count exceeds the device limit. */
+  requiresSamplerKeys?: boolean;
+  /** Resolve texture identity and physical array-copy compatibility for this variant. */
+  requiresTextureKeys?: boolean;
   uniformBlocks: IWebGPUShaderUniformBlock[];
   textures: IWebGPUShaderTexture[];
   vertexInputs: IWebGPUShaderAttribute[];
@@ -62,10 +71,19 @@ export interface IWebGPUShaderOptions {
   unfilterableTextures?: ReadonlySet<string>;
   computeFeedback?: boolean;
   maxSamplersPerStage?: number;
+  maxTexturesPerStage?: number;
+  samplerKeys?: Readonly<Record<string, string>>;
+  textureKeys?: Readonly<Record<string, string>>;
+  textureArrayKeys?: Readonly<Record<string, string>>;
+  textureExtents?: Readonly<Record<string, { width: number; height: number; mipCount: number; format: string }>>;
   maxUniformBlockBytes?: number;
 }
 
 export interface IWebGPUShaderCompiler {
-  compileWebGPUVariant(vertexSource: string, fragmentSource: string, options?: IWebGPUShaderOptions): IWebGPUShaderProgram;
+  compileWebGPUVariant(
+    vertexSource: string,
+    fragmentSource: string,
+    options?: IWebGPUShaderOptions
+  ): IWebGPUShaderProgram;
   compileDefaultVariant(program: IShaderProgramSource): IWebGPUShaderProgram;
 }

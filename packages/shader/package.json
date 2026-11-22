@@ -48,7 +48,9 @@
   ],
   "typesVersions": {
     "*": {
-      "webgpu": ["types/src/webgpu.d.ts"],
+      "webgpu": [
+        "types/src/webgpu.d.ts"
+      ],
       "sources": [
         "types/src/sources.d.ts"
       ]

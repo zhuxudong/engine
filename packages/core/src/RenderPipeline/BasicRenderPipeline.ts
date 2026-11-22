@@ -88,6 +88,38 @@ export class BasicRenderPipeline {
     this._camera = null!;
   }
 
+  /** @internal Acquire the same forward attachments for a draw or pipeline preparation. */
+  _allocateInternalColorTarget(msaaSamples: number): RenderTarget {
+    const camera = this._camera;
+    const engine = camera.engine;
+    const rhi = engine._hardwareRenderer;
+    let depthFormat: TextureFormat | null;
+    if (camera.renderTarget) {
+      depthFormat = camera.renderTarget._depthFormat;
+    } else if (rhi._options.depth && rhi._options.stencil) {
+      depthFormat = TextureFormat.Depth24Stencil8;
+    } else if (rhi._options.depth) {
+      depthFormat = TextureFormat.Depth24;
+    } else if (rhi._options.stencil) {
+      depthFormat = TextureFormat.Stencil;
+    } else {
+      depthFormat = null;
+    }
+    const viewport = camera.pixelViewport;
+    return engine._renderTargetPool.allocateRenderTarget(
+      viewport.width,
+      viewport.height,
+      camera._getInternalColorTextureFormat(),
+      depthFormat,
+      false,
+      false,
+      !camera._isInternalFormatHDR(),
+      msaaSamples,
+      TextureWrapMode.Clamp,
+      TextureFilterMode.Bilinear
+    );
+  }
+
   /**
    * Perform scene rendering.
    * @param context - Render context
@@ -150,31 +182,8 @@ export class BasicRenderPipeline {
 
     // Check if need to create internal color texture or grab texture
     if (independentCanvasEnabled) {
-      let depthFormat: TextureFormat | null;
-      if (camera.renderTarget) {
-        depthFormat = camera.renderTarget._depthFormat;
-      } else if (rhi._options.depth && rhi._options.stencil) {
-        depthFormat = TextureFormat.Depth24Stencil8;
-      } else if (rhi._options.depth) {
-        depthFormat = TextureFormat.Depth24;
-      } else if (rhi._options.stencil) {
-        depthFormat = TextureFormat.Stencil;
-      } else {
-        depthFormat = null;
-      }
       const viewport = camera.pixelViewport;
-      this._internalColorTarget = pool.allocateRenderTarget(
-        viewport.width,
-        viewport.height,
-        camera._getInternalColorTextureFormat(),
-        depthFormat,
-        false,
-        false,
-        !camera._isInternalFormatHDR(),
-        msaaSamples,
-        TextureWrapMode.Clamp,
-        TextureFilterMode.Bilinear
-      );
+      this._internalColorTarget = this._allocateInternalColorTarget(msaaSamples);
 
       if (this._shouldCopyBackgroundColor) {
         const colorTexture = camera.renderTarget?.getColorTexture(0);
@@ -233,12 +242,16 @@ export class BasicRenderPipeline {
     const colorViewport = internalColorTarget ? PipelineUtils.defaultViewport : camera.viewport;
     // WebGL textures start at the bottom left. Cube capture uses the opposite winding
     // to match the face orientation used when sampling a cube on both backends.
-    const needFlipProjection = !!colorTarget && (rhi.backend === "webgl2") === (!!internalColorTarget || cubeFace == undefined);
+    const needFlipProjection =
+      !!colorTarget && (rhi.backend === "webgl2") === (!!internalColorTarget || cubeFace == undefined);
     const keepColorFlag = !!internalColorTarget && (~finalClearFlags & CameraClearFlags.Color) !== 0;
     const hasInternalMSAA = !!internalColorTarget && internalColorTarget.antiAliasing > 1;
     const finalColorStoreAction = hasInternalMSAA ? RenderBufferStoreAction.Resolve : RenderBufferStoreAction.Store;
     const finalDepthStoreAction =
-      internalColorTarget && !internalColorTarget.depthTexture && internalColorTarget._depthFormat !== null
+      internalColorTarget &&
+      !internalColorTarget.depthTexture &&
+      internalColorTarget._depthFormat !== null &&
+      !rhi.hasExternalProjectionDepth
         ? RenderBufferStoreAction.DontCare
         : RenderBufferStoreAction.Store;
     const opaqueColorStoreAction = camera.opaqueTextureEnabled
@@ -407,6 +420,8 @@ export class BasicRenderPipeline {
       );
     }
 
+    if (internalColorTarget && !cameraRenderTarget && rhi.hasExternalProjectionDepth)
+      rhi.storeExternalProjectionDepth!(internalColorTarget, camera.viewport);
     cameraRenderTarget?._blitRenderTarget();
     cameraRenderTarget?.generateMipmaps();
   }
@@ -508,7 +523,14 @@ export class BasicRenderPipeline {
     const pass = material.shader.subShaders[0].passes[0];
     const compileMacros = Shader._compileMacros;
     ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
-    const program = pass._getShaderProgram(engine, compileMacros, undefined, mesh._primitive, undefined, material.shaderData);
+    const program = pass._getShaderProgram(
+      engine,
+      compileMacros,
+      undefined,
+      mesh._primitive,
+      undefined,
+      material.shaderData
+    );
     program.bind();
     program.uploadAll(program.materialUniformBlock, material.shaderData);
     program.uploadAll(program.cameraUniformBlock, camera.shaderData);
@@ -526,6 +548,8 @@ export class BasicRenderPipeline {
     const { _renderers: renderers, _canvases: canvases } = camera.scene!._componentsManager;
 
     const rendererElements = renderers._elements;
+    const frustumRevision = camera._frustumSnapshot.revision;
+    const frameCount = engine.time.frameCount;
     for (let i = renderers.length - 1; i >= 0; --i) {
       const renderer = rendererElements[i];
       // Filter by camera culling mask
@@ -534,13 +558,9 @@ export class BasicRenderPipeline {
       }
 
       // Filter by camera frustum
-      if (enableFrustumCulling) {
-        if (!frustum.intersectsBox(renderer.bounds)) {
-          continue;
-        }
-      }
+      if (enableFrustumCulling && !renderer._intersectsFrustum(frustum, frustumRevision)) continue;
       renderer._prepareRender(context);
-      renderer._renderFrameCount = engine.time.frameCount;
+      renderer._renderFrameCount = frameCount;
     }
 
     const canvasesElements = canvases._elements;

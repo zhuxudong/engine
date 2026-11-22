@@ -59,33 +59,34 @@ export interface BuiltinShaderSources {
 /** @internal Creates a catalog, resolving common passes before material shaders. */
 export function createBuiltinShaders(sources: BuiltinShaderSources): BuiltinShaders {
   const byName: Record<string, Shader> = Object.create(null);
-  const create = (source: IPrecompiledShader): Shader => (byName[source.name] = Shader._createFromPrecompiled(source, byName));
-// Material shaders resolve UsePass references during creation
-    create(sources.ShadowCasterSource);
-    create(sources.DepthOnlySource);
+  const create = (source: IPrecompiledShader): Shader =>
+    (byName[source.name] = Shader._createFromPrecompiled(source, byName));
+  // Material shaders resolve UsePass references during creation
+  create(sources.ShadowCasterSource);
+  create(sources.DepthOnlySource);
 
-    return {
-      byName,
-      blit: create(sources.BlitSource),
-      blitScreen: create(sources.BlitScreenSource),
-      pbr: create(sources.PBRSource),
-      blinnPhong: create(sources.BlinnPhongSource),
-      unlit: create(sources.UnlitSource),
-      skybox: create(sources.SkyboxSource),
-      skyProcedural: create(sources.SkyProceduralSource),
-      backgroundTexture: create(sources.BackgroundTextureSource),
-      sprite: create(sources.SpriteSource),
-      spriteMask: create(sources.SpriteMaskSource),
-      text: create(sources.TextSource),
-      trail: create(sources.TrailSource),
-      ui: create(sources.UIDefaultSource),
-      spine: create(sources.SpineSource),
-      particle: create(sources.ParticleSource),
-      particleFeedback: create(sources.ParticleFeedbackSource),
-      uber: create(sources.UberSource),
-      finalSRGB: create(sources.FinalSRGBSource),
-      finalAntiAliasing: create(sources.FinalAntiAliasingSource),
-      bloom: create(sources.BloomSource),
-      scalableAmbientOcclusion: create(sources.ScalableAmbientOcclusionSource)
-    };
+  return {
+    byName,
+    blit: create(sources.BlitSource),
+    blitScreen: create(sources.BlitScreenSource),
+    pbr: create(sources.PBRSource),
+    blinnPhong: create(sources.BlinnPhongSource),
+    unlit: create(sources.UnlitSource),
+    skybox: create(sources.SkyboxSource),
+    skyProcedural: create(sources.SkyProceduralSource),
+    backgroundTexture: create(sources.BackgroundTextureSource),
+    sprite: create(sources.SpriteSource),
+    spriteMask: create(sources.SpriteMaskSource),
+    text: create(sources.TextSource),
+    trail: create(sources.TrailSource),
+    ui: create(sources.UIDefaultSource),
+    spine: create(sources.SpineSource),
+    particle: create(sources.ParticleSource),
+    particleFeedback: create(sources.ParticleFeedbackSource),
+    uber: create(sources.UberSource),
+    finalSRGB: create(sources.FinalSRGBSource),
+    finalAntiAliasing: create(sources.FinalAntiAliasingSource),
+    bloom: create(sources.BloomSource),
+    scalableAmbientOcclusion: create(sources.ScalableAmbientOcclusionSource)
+  };
 }

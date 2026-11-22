@@ -2,8 +2,7 @@ import type { IShaderUniformBlock } from "@galacean/engine-design";
 import type { IPlatformShaderProgram, IPlatformShaderSource, IPlatformUniform } from "../renderingHardwareInterface";
 import type { Engine } from "../Engine";
 import { Texture } from "../texture";
-import { TextureFormat } from "../texture/enums/TextureFormat";
-import { GLCapabilityType } from "../base/Constant";
+import { ShaderTextureLayout } from "./ShaderTextureLayout";
 import { ShaderData, ShaderPropertyValueType } from "./ShaderData";
 import { ShaderProperty } from "./ShaderProperty";
 import { ShaderUniformBlock } from "./ShaderUniformBlock";
@@ -36,32 +35,50 @@ export class ShaderProgram {
   /** @internal */
   _instanceLayout: InstanceBufferLayout | null = null;
 
-
   readonly _platformProgram: IPlatformShaderProgram;
-  get id(): number { return this._platformProgram.id; }
-  get attributeLocation(): Record<string, number> { return this._platformProgram.attributeLocation; }
-  get uniformBlockIds(): readonly number[] { return this._platformProgram.uniformBlockIds; }
-  get isValid(): boolean { return this._platformProgram.isValid; }
+  get id(): number {
+    return this._platformProgram.id;
+  }
+  get attributeLocation(): Record<string, number> {
+    return this._platformProgram.attributeLocation;
+  }
+  get uniformBlockIds(): readonly number[] {
+    return this._platformProgram.uniformBlockIds;
+  }
+  get isValid(): boolean {
+    return this._platformProgram.isValid;
+  }
   private _groupConflictVersion = 0;
   private _uniformBlocks?: GlobalUniformBlock[];
   /** @internal Floating-point sampler inputs that can also read unfilterable resources. */
-  readonly _filterableTextures?: ShaderProperty[];
-  private readonly _float32Filterable: boolean;
+  readonly _textureLayout?: ShaderTextureLayout;
 
-  constructor(private _engine: Engine, source: IPlatformShaderSource, uniformBlocks?: readonly IShaderUniformBlock[], instanceBindingName?: string) {
+  constructor(
+    private _engine: Engine,
+    source: IPlatformShaderSource,
+    uniformBlocks?: readonly IShaderUniformBlock[],
+    instanceBindingName?: string
+  ) {
     const platform = (this._platformProgram = _engine._hardwareRenderer.createPlatformShaderProgram(_engine, source));
-    if (source.reflection) {
-      this._float32Filterable = _engine._hardwareRenderer.canIUse(GLCapabilityType.textureFloatLinear);
-      this._filterableTextures = source.reflection.textures.filter((texture) => texture.sampleType === "float").map((texture) => ShaderProperty.getByName(texture.name));
+    if (
+      source.reflection &&
+      (source.reflection.requiresTextureKeys ||
+        source.reflection.requiresSamplerKeys ||
+        source.reflection.textures.some((texture) => texture.sampleType === "float"))
+    ) {
+      this._textureLayout = new ShaderTextureLayout(_engine._hardwareRenderer, source.reflection, platform);
     }
     if (!platform.isValid) return;
     try {
       // WGSL reflection also describes blocks recovered from historical .shaderc assets.
       if (source.reflection) {
-        uniformBlocks = source.reflection.uniformBlocks.filter((block) => block.name !== "Instance").sort((a,b) => a.physicalBinding - b.physicalBinding) as IShaderUniformBlock[];
+        uniformBlocks = source.reflection.uniformBlocks
+          .filter((block) => block.name !== "Instance")
+          .sort((a, b) => a.physicalBinding - b.physicalBinding) as IShaderUniformBlock[];
       }
       if (uniformBlocks) this._bindGlobalBlockLayouts(uniformBlocks);
-      if (instanceBindingName) platform.bindUniformBlock(instanceBindingName, ConstantBufferBindingPoint.RendererInstance);
+      if (instanceBindingName)
+        platform.bindUniformBlock(instanceBindingName, ConstantBufferBindingPoint.RendererInstance);
       for (const uniform of platform.uniforms) {
         this._groupingUniform(uniform, ShaderProperty._propertyIdMap[uniform.propertyId], uniform.isTexture);
       }
@@ -70,13 +87,6 @@ export class ShaderProgram {
       this.destroy();
       throw error;
     }
-  }
-
-  /** @internal Inspect the resolved texture since a material or renderer can override its format. */
-  _usesUnfilterableTexture(property: ShaderProperty, scene?: ShaderData, camera?: ShaderData, renderer?: ShaderData, material?: ShaderData, element?: ShaderData): boolean {
-    const texture = ShaderData._findValue(property._uniqueId, scene, camera, renderer, material, element, property._groups) as Texture | undefined;
-    if (!texture) return false;
-    return texture._isDepthTexture || (!this._float32Filterable && (texture.format === TextureFormat.R32_SFloat || texture.format === TextureFormat.R32G32_SFloat || texture.format === TextureFormat.R32G32B32A32_SFloat));
   }
 
   /**
@@ -204,7 +214,9 @@ export class ShaderProgram {
     this._regroupUniformBlock(this.otherUniformBlock, ShaderDataGroup.None);
   }
 
-  bind(): boolean { return this._platformProgram.bind(); }
+  bind(): boolean {
+    return this._platformProgram.bind();
+  }
 
   destroy(): void {
     if (this._uniformBlocks) {
@@ -283,5 +295,4 @@ export class ShaderProgram {
       (this._uniformBlocks ??= []).push(GlobalUniformBlock.acquire(this._engine, layout, binding));
     }
   }
-
 }

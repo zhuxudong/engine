@@ -32,6 +32,12 @@ export interface IPlatformShaderProgram {
   readonly uniformBlockIds: readonly number[];
   bind(): boolean;
   bindUniformBlock(name: string, binding: number): boolean;
-  prewarm?(primitive: Primitive, subPrimitive: SubPrimitive, target: RenderTarget | null, state: RenderState, frontFaceInvert: boolean): Promise<void>;
+  prewarm?(
+    primitive: Primitive,
+    subPrimitive: SubPrimitive,
+    target: RenderTarget | null,
+    state: RenderState,
+    frontFaceInvert: boolean
+  ): Promise<void>;
   destroy(): void;
 }

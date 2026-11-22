@@ -104,8 +104,11 @@ export class PrimitiveChunk {
       this.updateVertexEnd = Number.MIN_SAFE_INTEGER;
     }
 
-    primitive.indexBufferBinding!.buffer.setData(this.indices, 0, 0, this.updateIndexLength, SetDataOptions.Discard);
-    this.updateIndexLength = 0;
+    // A nested mask pass flushes all chunk managers while the outer sprite queue still uses its indices.
+    if (this.updateIndexLength > 0) {
+      primitive.indexBufferBinding!.buffer.setData(this.indices, 0, 0, this.updateIndexLength, SetDataOptions.Discard);
+      this.updateIndexLength = 0;
+    }
   }
 
   destroy(): void {

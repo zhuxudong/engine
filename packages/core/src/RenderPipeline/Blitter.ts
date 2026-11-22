@@ -76,7 +76,17 @@ export class Blitter {
 
     const resolvedLoadAction =
       destination && destination.colorTextureCount === 1 ? colorLoadAction : RenderBufferLoadAction.Load;
-    context.setRenderTarget(destination, viewport, 0, undefined, resolvedLoadAction, undefined, undefined, undefined, pass.name);
+    context.setRenderTarget(
+      destination,
+      viewport,
+      0,
+      undefined,
+      resolvedLoadAction,
+      undefined,
+      undefined,
+      undefined,
+      pass.name
+    );
 
     const rendererShaderData = Blitter._rendererShaderData;
 
@@ -84,8 +94,13 @@ export class Blitter {
     rendererShaderData.setFloat(Blitter._blitMipLevelProperty, mipLevel);
     Blitter._texelSize.set(1 / source.width, 1 / source.height, source.width, source.height);
     rendererShaderData.setVector4(Blitter._blitTexelSizeProperty, Blitter._texelSize);
-    rendererShaderData.setVector4(Blitter._sourceScaleOffsetProperty, sourceScaleOffset ??
-      (blitMaterial === basicResources.blitScreenMaterial && rhi.backend === "webgl2" ? Blitter._flippedScreenScaleOffset : Blitter._defaultScaleOffset));
+    rendererShaderData.setVector4(
+      Blitter._sourceScaleOffsetProperty,
+      sourceScaleOffset ??
+        (blitMaterial === basicResources.blitScreenMaterial && rhi.backend === "webgl2"
+          ? Blitter._flippedScreenScaleOffset
+          : Blitter._defaultScaleOffset)
+    );
 
     const compileMacros = Shader._compileMacros;
 
@@ -97,7 +112,14 @@ export class Blitter {
 
     ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
 
-    const program = pass._getShaderProgram(engine, compileMacros, undefined, blitMesh._primitive, rendererShaderData, blitMaterial.shaderData);
+    const program = pass._getShaderProgram(
+      engine,
+      compileMacros,
+      undefined,
+      blitMesh._primitive,
+      rendererShaderData,
+      blitMaterial.shaderData
+    );
 
     program.bind();
     program.regroupUniformBlocks();

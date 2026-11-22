@@ -1,3 +1,4 @@
+import { MatrixSnapshot } from "./RenderPipeline/MatrixSnapshot";
 import { BoundingFrustum, MathUtil, Matrix, Ray, Rect, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import { BoolUpdateFlag } from "./BoolUpdateFlag";
 import { Component } from "./Component";
@@ -116,6 +117,9 @@ export class Camera extends Component {
   _globalShaderMacro: ShaderMacroCollection = new ShaderMacroCollection();
   /** @internal */
   _frustum: BoundingFrustum = new BoundingFrustum();
+  /** @internal Revision of the exact matrix used by the culling planes. */
+  @ignoreClone
+  readonly _frustumSnapshot = new MatrixSnapshot();
   /** @internal */
   @ignoreClone
   _renderPipeline: BasicRenderPipeline;
@@ -629,9 +633,12 @@ export class Camera extends Component {
     context.replacementFailureStrategy = this._replacementFailureStrategy;
 
     // compute cull frustum.
-    if (this.enableFrustumCulling && this._frustumChangeFlag.flag) {
-      this._frustum.calculateFromMatrix(virtualCamera.viewProjectionMatrix);
-      this._frustumChangeFlag.flag = false;
+    if (this.enableFrustumCulling) {
+      const changed = this._frustumSnapshot.update(virtualCamera.viewProjectionMatrix);
+      if (changed || this._frustumChangeFlag.flag) {
+        this._frustum.calculateFromMatrix(virtualCamera.viewProjectionMatrix);
+        this._frustumChangeFlag.flag = false;
+      }
     }
 
     this._updateShaderData();
@@ -644,7 +651,12 @@ export class Camera extends Component {
     );
 
     let ignoreClearFlags: CameraClearFlags | undefined;
-    if (this._cameraType !== CameraType.Normal && !this._renderTarget) {
+    const xrCamera = this._cameraType !== CameraType.Normal && !this._renderTarget;
+    if (xrCamera) {
+      if (!engine.xrManager._beginCamera(this._cameraType)) {
+        context.camera = null!;
+        return;
+      }
       ignoreClearFlags = engine.xrManager._getCameraIgnoreClearFlags(this._cameraType);
     }
     engine._beginFrame();
@@ -654,6 +666,7 @@ export class Camera extends Component {
     } finally {
       context.camera = null!;
       engine._hardwareRenderer.endRenderPass();
+      if (xrCamera) engine.xrManager._endCamera();
       engine._endFrame();
     }
   }

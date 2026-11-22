@@ -58,8 +58,12 @@ export function generateParsedShaderPassData(
   if (backend === ShaderLanguage.WGSL && !webgpu) {
     throw new Error("WGSL compilation requires a backend from createWebGPUShaderCompiler().");
   }
-  const result = generateShaderProgram(parsed.ir, resolvedCoreInfo,
-    backend === ShaderLanguage.WGSL ? ShaderLanguage.GLSLES300 : backend, parsed.preprocessorExpressions);
+  const result = generateShaderProgram(
+    parsed.ir,
+    resolvedCoreInfo,
+    backend === ShaderLanguage.WGSL ? ShaderLanguage.GLSLES300 : backend,
+    parsed.preprocessorExpressions
+  );
   if (result && backend === ShaderLanguage.WGSL) {
     const wgsl = webgpu!.compileDefaultVariant(result);
     result.wgsl = wgsl;

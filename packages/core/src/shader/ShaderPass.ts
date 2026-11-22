@@ -15,10 +15,13 @@ import { ShaderMacro } from "./ShaderMacro";
 import { ShaderMacroCollection } from "./ShaderMacroCollection";
 import { ShaderPart } from "./ShaderPart";
 import { ShaderProgramMap } from "./ShaderProgramMap";
+import type { ShaderTextureOptions } from "./ShaderTextureLayout";
 import { ShaderProgram } from "./ShaderProgram";
 import type { IPlatformShaderSource } from "../renderingHardwareInterface";
 import type { Primitive } from "../graphic/Primitive";
 import type { Mesh } from "../graphic/Mesh";
+import type { MeshRenderer } from "../mesh/MeshRenderer";
+import type { Camera } from "../Camera";
 import type { Material } from "../material/Material";
 import type { RenderTarget } from "../texture/RenderTarget";
 import type { ShaderData } from "./ShaderData";
@@ -26,6 +29,16 @@ import { ShaderProperty } from "./ShaderProperty";
 import { ShaderLanguage } from "./enums/ShaderLanguage";
 import { ShaderMacroProcessor } from "./ShaderMacroProcessor";
 import { RenderState } from "./state/RenderState";
+
+/** Inputs that affect a prepared mesh pipeline's shader variant and raster state. */
+export interface ShaderPipelinePreparation {
+  camera?: Camera;
+  renderer?: MeshRenderer;
+  renderElementData?: ShaderData;
+  macros?: readonly ShaderMacro[];
+  subMeshIndex?: number;
+  frontFaceInvert?: boolean;
+}
 
 const precisionStr = `
     precision highp float;
@@ -110,10 +123,12 @@ export class ShaderPass extends ShaderPart {
     primitive?: Primitive,
     renderer?: ShaderData,
     material?: ShaderData,
-    element?: ShaderData
+    element?: ShaderData,
+    camera = engine._renderContext.camera
   ): ShaderProgram {
     let shaderProgramMap = engine._getShaderProgramMap(this._shaderPassId, this._shaderProgramMaps);
-    if (feedbackVaryings?.length) shaderProgramMap = shaderProgramMap.specialize("feedback:" + feedbackVaryings.join(","));
+    if (feedbackVaryings?.length)
+      shaderProgramMap = shaderProgramMap.specialize("feedback:" + feedbackVaryings.join(","));
     if (primitive && engine._hardwareRenderer.backend === "webgpu") {
       shaderProgramMap = shaderProgramMap.specialize(primitive._getShaderInputs().key);
     }
@@ -122,25 +137,26 @@ export class ShaderPass extends ShaderPart {
       shaderProgram = this._compileShaderProgram(engine, macroCollection, feedbackVaryings, primitive);
       shaderProgramMap.cache(shaderProgram);
     }
-    const properties = shaderProgram._filterableTextures;
-    if (properties?.length) {
-      const camera = engine._renderContext.camera;
-      const sceneData = camera?.scene?.shaderData;
-      const cameraData = camera?.shaderData;
-      let specialized = shaderProgramMap;
-      for (const property of properties) {
-        if (shaderProgram._usesUnfilterableTexture(property, sceneData, cameraData, renderer, material, element)) {
-          specialized = specialized.specialize("sampler:" + property.name);
-        }
-      }
+    const layout = shaderProgram._textureLayout;
+    if (layout) {
+      const specialized = layout.select(
+        shaderProgramMap,
+        camera?.scene?.shaderData,
+        camera?.shaderData,
+        renderer,
+        material,
+        element
+      );
       if (specialized !== shaderProgramMap) {
         const cached = specialized.get(macroCollection);
         if (cached) return cached;
-        const names = new Set<string>();
-        for (const property of properties) {
-          if (shaderProgram._usesUnfilterableTexture(property, sceneData, cameraData, renderer, material, element)) names.add(property.name);
-        }
-        shaderProgram = this._compileShaderProgram(engine, macroCollection, feedbackVaryings, primitive, names);
+        shaderProgram = this._compileShaderProgram(
+          engine,
+          macroCollection,
+          feedbackVaryings,
+          primitive,
+          layout.options()
+        );
         specialized.cache(shaderProgram);
       }
     }
@@ -148,20 +164,66 @@ export class ShaderPass extends ShaderPart {
   }
 
   /** Prepare the selected shader and pipeline for a mesh, material and render target before its first draw. */
-  async preparePipeline(mesh: Mesh, material: Material, target: RenderTarget | null, macros: readonly ShaderMacro[] = [], subMeshIndex = 0, frontFaceInvert = false): Promise<void> {
+  async preparePipeline(
+    mesh: Mesh,
+    material: Material,
+    target: RenderTarget | null,
+    options: ShaderPipelinePreparation = {}
+  ): Promise<void> {
     const engine = mesh.engine;
-    if (material.engine !== engine || (target && target.engine !== engine)) throw new Error("Pipeline resources must belong to the same engine.");
+    if (material.engine !== engine || (target && target.engine !== engine))
+      throw new Error("Pipeline resources must belong to the same engine.");
+    const { camera, renderer, renderElementData, macros, subMeshIndex = 0 } = options;
+    if ((renderer && renderer.mesh !== mesh) || (camera && camera.engine !== engine))
+      throw new Error("The preparation context must match the mesh and engine.");
     const subMesh = mesh.subMeshes[subMeshIndex];
     if (!subMesh) throw new RangeError("Cannot prepare a pipeline without the selected sub-mesh.");
     const collection = new ShaderMacroCollection();
     ShaderMacroCollection.unionCollection(engine._macroCollection, material.shaderData._macroCollection, collection);
-    if (target) collection.disable(Engine._outputSRGBCorrectMacro);
+    if (camera) {
+      collection.unionCollection(camera.scene!.shaderData._macroCollection);
+      collection.unionCollection(camera.shaderData._macroCollection);
+    }
+    if (renderer) {
+      renderer._updateVertexElementMacros();
+      collection.unionCollection(renderer.shaderData._macroCollection);
+    }
+    const internalForwardTarget =
+      camera &&
+      camera.renderTarget === target &&
+      this.getTagValue("pipelineStage") === "Forward" &&
+      camera._isIndependentCanvasEnabled();
+    if (target || internalForwardTarget) collection.disable(Engine._outputSRGBCorrectMacro);
     else collection.enable(Engine._outputSRGBCorrectMacro);
-    for (const macro of macros) collection.enable(macro);
-    const program = this._getShaderProgram(engine, collection, undefined, mesh._primitive, undefined, material.shaderData);
+    if (macros) for (const macro of macros) collection.enable(macro);
+    const program = this._getShaderProgram(
+      engine,
+      collection,
+      undefined,
+      mesh._primitive,
+      renderer?.shaderData,
+      material.shaderData,
+      renderElementData,
+      camera
+    );
     if (!program.isValid) throw new Error(`Could not compile shader pass '${this.name}'.`);
-    const state = this._renderState._resolve(engine, this._renderStateDataMap, material.shaderData);
-    await program._platformProgram.prewarm?.(mesh._primitive, subMesh, target, state, frontFaceInvert);
+    const state = this._renderState._resolve(engine, this._renderStateDataMap, material.shaderData, renderElementData);
+    const frontFaceInvert = options.frontFaceInvert ?? renderer?._isFrontFaceInvert() ?? false;
+    const platform = program._platformProgram;
+    if (!platform.prewarm) return;
+    const temporary = internalForwardTarget
+      ? camera._renderPipeline._allocateInternalColorTarget(
+          Math.min(target?.antiAliasing ?? camera.msaaSamples, engine._hardwareRenderer.capability.maxAntiAliasing)
+        )
+      : null;
+    let prepared: Promise<void>;
+    try {
+      // The platform consumes attachment formats synchronously when creating the native pipeline descriptor.
+      prepared = platform.prewarm(mesh._primitive, subMesh, temporary ?? target, state, frontFaceInvert);
+    } finally {
+      if (temporary) engine._renderTargetPool.freeRenderTarget(temporary);
+    }
+    await prepared;
   }
 
   /**
@@ -185,7 +247,7 @@ export class ShaderPass extends ShaderPart {
     macroCollection: ShaderMacroCollection,
     feedbackVaryings?: string[],
     primitive?: Primitive,
-    unfilterableTextures?: ReadonlySet<string>
+    textureOptions?: ShaderTextureOptions
   ): ShaderProgram {
     const names = this._vertexOutputNames;
     if (names && feedbackVaryings?.length) {
@@ -197,13 +259,35 @@ export class ShaderPass extends ShaderPart {
     const device = engine._hardwareRenderer;
     const vertexInputTypes = device.backend === "webgpu" ? primitive?._getShaderInputs().types : undefined;
     const baked = this._wgsl;
-    if (device.backend === "webgpu" && baked && !feedbackVaryings?.length && !unfilterableTextures?.size &&
-        !macroCollection._mask.slice(0, macroCollection._length).some(Boolean) &&
-        baked.reflection.vertexInputs.every((input) => !vertexInputTypes?.[input.name] || vertexInputTypes[input.name] === input.type)) {
-      return new ShaderProgram(engine, {vertexSource: baked.vertex, fragmentSource: baked.fragment, vertexEntryPoint: baked.vertexEntryPoint, fragmentEntryPoint: baked.fragmentEntryPoint, reflection: baked.reflection});
+    if (
+      device.backend === "webgpu" &&
+      baked &&
+      !feedbackVaryings?.length &&
+      !textureOptions &&
+      !macroCollection._mask.slice(0, macroCollection._length).some(Boolean) &&
+      baked.reflection.vertexInputs.every(
+        (input) => !vertexInputTypes?.[input.name] || vertexInputTypes[input.name] === input.type
+      )
+    ) {
+      return new ShaderProgram(engine, {
+        vertexSource: baked.vertex,
+        fragmentSource: baked.fragment,
+        vertexEntryPoint: baked.vertexEntryPoint,
+        fragmentEntryPoint: baked.fragmentEntryPoint,
+        reflection: baked.reflection
+      });
     }
-    const variant = this._compileShaderSource(engine, macroCollection, isGPUInstance && (device.backend !== "webgpu" || !!this._uniformPlan));
-    let source: IPlatformShaderSource = { vertexSource: variant.vertexSource, fragmentSource: variant.fragmentSource, feedbackVaryings, looseUniforms: variant.looseUniforms };
+    const variant = this._compileShaderSource(
+      engine,
+      macroCollection,
+      isGPUInstance && (device.backend !== "webgpu" || !!this._uniformPlan)
+    );
+    let source: IPlatformShaderSource = {
+      vertexSource: variant.vertexSource,
+      fragmentSource: variant.fragmentSource,
+      feedbackVaryings,
+      looseUniforms: variant.looseUniforms
+    };
     if (device.backend === "webgpu") {
       const compiler = engine._webGPUShaderCompiler;
       if (!compiler) throw new Error("WebGPU shader specialization requires a WebGPU shader compiler.");
@@ -211,19 +295,24 @@ export class ShaderPass extends ShaderPart {
       const compiled = compiler.compileWebGPUVariant(variant.vertexSource, variant.fragmentSource, {
         uniformBlocks: variant.uniformBlocks,
         vertexInputTypes,
-        unfilterableTextures,
+        ...textureOptions,
+        maxTexturesPerStage: device.maxSampledTexturesPerShaderStage,
+        maxSamplersPerStage: device.maxSamplersPerShaderStage,
+        maxUniformBlockBytes: device.maxUniformBlockSize,
         computeFeedback: !!feedbackVaryings?.length,
         instanceBindingName: variant.instanceBindingName,
         instanceByteLength: layout ? (layout.headerBytes ?? 0) + layout.structSize * layout.instanceMaxCount : undefined
       });
-      source = { vertexSource: compiled.vertex, fragmentSource: compiled.fragment, vertexEntryPoint: compiled.vertexEntryPoint, fragmentEntryPoint: compiled.fragmentEntryPoint, reflection: compiled.reflection, feedbackVaryings };
+      source = {
+        vertexSource: compiled.vertex,
+        fragmentSource: compiled.fragment,
+        vertexEntryPoint: compiled.vertexEntryPoint,
+        fragmentEntryPoint: compiled.fragmentEntryPoint,
+        reflection: compiled.reflection,
+        feedbackVaryings
+      };
     }
-    const program = new ShaderProgram(
-      engine,
-      source,
-      variant.uniformBlocks,
-      variant.instanceBindingName
-    );
+    const program = new ShaderProgram(engine, source, variant.uniformBlocks, variant.instanceBindingName);
     program._instanceLayout = variant.instanceLayout;
     return program;
   }
@@ -243,7 +332,11 @@ export class ShaderPass extends ShaderPart {
     const shaderMacroList = ShaderPass._shaderMacroList;
     shaderMacroList.length = 0;
     ShaderMacro._getMacrosElements(macroCollection, shaderMacroList);
-    shaderMacroList.push(ShaderMacro.getByName(engine._hardwareRenderer.backend === "webgpu" ? "GRAPHICS_API_WEBGPU" : "GRAPHICS_API_WEBGL2"));
+    shaderMacroList.push(
+      ShaderMacro.getByName(
+        engine._hardwareRenderer.backend === "webgpu" ? "GRAPHICS_API_WEBGPU" : "GRAPHICS_API_WEBGL2"
+      )
+    );
     shaderMacroList.push(ShaderMacro.getByName("HAS_TEX_LOD"));
     shaderMacroList.push(ShaderMacro.getByName("HAS_DERIVATIVES"));
 

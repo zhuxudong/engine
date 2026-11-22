@@ -39,11 +39,27 @@ export class WebGPUTexture2DArray extends WebGPUTexture implements IPlatformText
     this._copyExternalImage(imageSource, mipLevel, { x, y, z: index }, flipY, premultiplyAlpha);
   }
 
-  getPixelBuffer(): void {
-    this._unsupportedReadback();
+  getPixelBuffer(
+    layer: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): void {
+    this._readCachedPixels(layer, x, y, width, height, mipLevel, out);
   }
 
-  getPixelBufferAsync(layer:number,x:number,y:number,width:number,height:number,mipLevel:number,out:ArrayBufferView): Promise<void> {
-    return this._readPixels(layer,x,y,width,height,mipLevel,out);
+  getPixelBufferAsync(
+    layer: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): Promise<void> {
+    return this._readPixels(layer, x, y, width, height, mipLevel, out);
   }
 }

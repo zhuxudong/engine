@@ -1,4 +1,14 @@
-import { BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, RenderStateElementKey, StencilOperation, type RenderState, type RenderStateElementMap } from "@galacean/engine-core";
+import {
+  BlendFactor,
+  BlendOperation,
+  ColorWriteMask,
+  CompareFunction,
+  CullMode,
+  RenderStateElementKey,
+  StencilOperation,
+  type RenderState,
+  type RenderStateElementMap
+} from "@galacean/engine-core";
 import type { WebGLGraphicDevice } from "./WebGLGraphicDevice";
 
 function _getGLBlendFactor(rhi: WebGLGraphicDevice, blendFactor: BlendFactor): number {
@@ -293,22 +303,12 @@ function applyStencil(
     // apply stencil func.
     const referenceOrMaskChange = referenceValue !== lastState.referenceValue || mask !== lastState.mask;
     if (referenceOrMaskChange || compareFunctionFront !== lastState.compareFunctionFront) {
-      gl.stencilFuncSeparate(
-        gl.FRONT,
-        _getGLCompareFunction(rhi, compareFunctionFront),
-        referenceValue,
-        mask
-      );
+      gl.stencilFuncSeparate(gl.FRONT, _getGLCompareFunction(rhi, compareFunctionFront), referenceValue, mask);
       lastState.compareFunctionFront = compareFunctionFront;
     }
 
     if (referenceOrMaskChange || compareFunctionBack !== lastState.compareFunctionBack) {
-      gl.stencilFuncSeparate(
-        gl.BACK,
-        _getGLCompareFunction(rhi, compareFunctionBack),
-        referenceValue,
-        mask
-      );
+      gl.stencilFuncSeparate(gl.BACK, _getGLCompareFunction(rhi, compareFunctionBack), referenceValue, mask);
       lastState.compareFunctionBack = compareFunctionBack;
     }
     if (referenceOrMaskChange) {
@@ -405,21 +405,27 @@ function applyRaster(
 
   // apply polygonOffset.
   if (depthBias !== lastState.depthBias || slopeScaledDepthBias !== lastState.slopeScaledDepthBias) {
-      if (depthBias !== 0 || slopeScaledDepthBias !== 0) {
-        gl.enable(gl.POLYGON_OFFSET_FILL);
-        gl.polygonOffset(slopeScaledDepthBias, depthBias);
-      } else {
-        gl.disable(gl.POLYGON_OFFSET_FILL);
-      }
-      lastState.depthBias = depthBias;
-      lastState.slopeScaledDepthBias = slopeScaledDepthBias;
+    if (depthBias !== 0 || slopeScaledDepthBias !== 0) {
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(slopeScaledDepthBias, depthBias);
+    } else {
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+    }
+    lastState.depthBias = depthBias;
+    lastState.slopeScaledDepthBias = slopeScaledDepthBias;
   }
 }
 
-export function applyGLRenderState(rhi: WebGLGraphicDevice, state: RenderState, last: RenderState, invert: boolean, custom?: RenderStateElementMap | null): void {
-  applyBlend(state.blendState,rhi,last.blendState,custom);
-  applyDepth(state.depthState,rhi,last.depthState,custom);
-  applyStencil(state.stencilState,rhi,last.stencilState,custom);
-  applyRaster(state.rasterState,rhi,last.rasterState,invert,custom);
+export function applyGLRenderState(
+  rhi: WebGLGraphicDevice,
+  state: RenderState,
+  last: RenderState,
+  invert: boolean,
+  custom?: RenderStateElementMap | null
+): void {
+  applyBlend(state.blendState, rhi, last.blendState, custom);
+  applyDepth(state.depthState, rhi, last.depthState, custom);
+  applyStencil(state.stencilState, rhi, last.stencilState, custom);
+  applyRaster(state.rasterState, rhi, last.rasterState, invert, custom);
 }
 import { Color } from "@galacean/engine-math";

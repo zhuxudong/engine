@@ -1,4 +1,22 @@
-import { CharRenderInfo, Engine, Entity, Font, FontStyle, ITextRenderer, OverflowMode, RendererUpdateFlags, ShaderData, ShaderDataGroup, ShaderProperty, SubFont, TextHorizontalAlignment, TextUtils, TextVerticalAlignment, Texture2D, ignoreClone } from "@galacean/engine-core";
+import {
+  CharRenderInfo,
+  Engine,
+  Entity,
+  Font,
+  FontStyle,
+  ITextRenderer,
+  OverflowMode,
+  RendererUpdateFlags,
+  ShaderData,
+  ShaderDataGroup,
+  ShaderProperty,
+  SubFont,
+  TextHorizontalAlignment,
+  TextUtils,
+  TextVerticalAlignment,
+  Texture2D,
+  ignoreClone
+} from "@galacean/engine-core";
 import { BoundingBox, Vector3 } from "@galacean/engine-math";
 import { CanvasRenderMode } from "../../enums/CanvasRenderMode";
 import { RootCanvasModifyFlags } from "../UICanvas";

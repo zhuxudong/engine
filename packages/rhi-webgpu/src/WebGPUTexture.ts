@@ -6,6 +6,8 @@ import {
   TextureFormat,
   TextureWrapMode
 } from "@galacean/engine-core";
+import { WebGPUDepthTransfer } from "./WebGPUDepthTransfer";
+import { pixelPacking, packRGBA8Row, unpackRGBA8 } from "./WebGPUPixelConversion";
 import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
 
 /**
@@ -14,6 +16,7 @@ import { WebGPUGraphicDevice } from "./WebGPUGraphicDevice";
  */
 export abstract class WebGPUTexture implements IPlatformTexture {
   readonly _gpuTexture: GPUTexture;
+  readonly arrayKey?: string;
   /** @internal */
   readonly _format: GPUTextureFormat;
   /** @internal */
@@ -22,16 +25,18 @@ export abstract class WebGPUTexture implements IPlatformTexture {
   protected readonly _device: WebGPUGraphicDevice;
   protected readonly _texture: Texture;
   protected readonly _layerCount: number;
+  private _readablePixels?: Map<number, Uint8Array>;
+  _contentRevision = 0;
 
   private _wrapModeU = TextureWrapMode.Clamp;
   private _wrapModeV = TextureWrapMode.Clamp;
   private _filterMode = TextureFilterMode.Bilinear;
   private _anisoLevel = 1;
   private _depthCompareFunction = TextureDepthCompareFunction.LessEqual;
-  private readonly _samplers: Partial<Record<GPUSamplerBindingType,GPUSampler>> = {};
+  private readonly _samplers: Partial<Record<GPUSamplerBindingType, GPUSampler>> = {};
+  private _mipSamplers?: Map<number,GPUSampler>;
   private _view: GPUTextureView;
   private _depthView?: GPUTextureView;
-
 
   get wrapModeU(): TextureWrapMode {
     return this._wrapModeU;
@@ -39,7 +44,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   set wrapModeU(value: TextureWrapMode) {
     this._wrapModeU = value;
-    this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
+    this._invalidateSamplers();
   }
 
   get wrapModeV(): TextureWrapMode {
@@ -48,7 +53,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   set wrapModeV(value: TextureWrapMode) {
     this._wrapModeV = value;
-    this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
+    this._invalidateSamplers();
   }
 
   get filterMode(): TextureFilterMode {
@@ -57,7 +62,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   set filterMode(value: TextureFilterMode) {
     this._filterMode = value;
-    this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
+    this._invalidateSamplers();
   }
 
   get anisoLevel(): number {
@@ -66,7 +71,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   set anisoLevel(value: number) {
     this._anisoLevel = value;
-    this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
+    this._invalidateSamplers();
   }
 
   get depthCompareFunction(): TextureDepthCompareFunction {
@@ -75,7 +80,12 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   set depthCompareFunction(value: TextureDepthCompareFunction) {
     this._depthCompareFunction = value;
+    this._invalidateSamplers();
+  }
+
+  private _invalidateSamplers():void {
     this._samplers.filtering = this._samplers.comparison = this._samplers["non-filtering"] = undefined;
+    this._mipSamplers?.clear();
   }
 
   /** @internal */
@@ -85,27 +95,37 @@ export abstract class WebGPUTexture implements IPlatformTexture {
 
   sampleView(type: GPUTextureSampleType): GPUTextureView | undefined {
     if (this._format.startsWith("depth")) {
-      return this._depthView ??= this._gpuTexture.createView({dimension:this._viewDimension, aspect:"depth-only"});
+      return (this._depthView ??= this._gpuTexture.createView({
+        dimension: this._viewDimension,
+        aspect: "depth-only"
+      }));
     }
     if (type === "depth") return undefined;
+    if ((type === "sint") !== this._format.endsWith("sint") || (type === "uint") !== this._format.endsWith("uint"))
+      return undefined;
     return this.view;
   }
 
-  getSampler(type: GPUSamplerBindingType): GPUSampler {
-    let sampler = this._samplers[type];
+  getSampler(type: GPUSamplerBindingType, mipOffset?:number, mipCount?:number): GPUSampler {
+    const levelKey = mipCount===undefined ? undefined : ((type==="filtering" ? 1 : type==="comparison" ? 2 : 3)*32+(mipOffset ?? 0))*32 + mipCount;
+    let sampler = levelKey===undefined ? this._samplers[type] : this._mipSamplers?.get(levelKey);
     if (!sampler) {
       const nearest = type === "non-filtering" || this._filterMode === TextureFilterMode.Point;
-      const anisotropy = nearest ? 1 : Math.min(16,Math.max(1,Math.floor(this._anisoLevel)));
+      const anisotropy = nearest ? 1 : Math.min(16, Math.max(1, Math.floor(this._anisoLevel)));
       sampler = this._device._getSampler({
         addressModeU: WebGPUTexture._getAddressMode(this._wrapModeU),
         addressModeV: WebGPUTexture._getAddressMode(this._wrapModeV),
         minFilter: nearest ? "nearest" : "linear",
         magFilter: nearest ? "nearest" : "linear",
-        mipmapFilter: !nearest && (this._filterMode === TextureFilterMode.Trilinear || anisotropy > 1) ? "linear" : "nearest",
+        mipmapFilter:
+          !nearest && (this._filterMode === TextureFilterMode.Trilinear || anisotropy > 1) ? "linear" : "nearest",
         maxAnisotropy: anisotropy,
+        lodMinClamp:mipOffset,
+        lodMaxClamp:mipCount===undefined ? undefined : (mipOffset ?? 0)+mipCount-1,
         compare: type === "comparison" ? WebGPUTexture._getCompareFunction(this.depthCompareFunction) : undefined
       });
-      this._samplers[type] = sampler;
+      if(levelKey===undefined) this._samplers[type] = sampler;
+      else (this._mipSamplers ??= new Map()).set(levelKey,sampler);
     }
     return sampler;
   }
@@ -122,6 +142,11 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     this._layerCount = layerCount;
     this._viewDimension = viewDimension;
     this._format = WebGPUTexture._getFormat(texture.format, texture.isSRGBColorSpace);
+    if (viewDimension === "2d" && !/^(depth|stencil)/.test(this._format)) {
+      let width=texture.width, height=texture.height;
+      while(width>1 && height>1 && !(width&1) && !(height&1)) {width/=2; height/=2;}
+      this.arrayKey=[this._format,width,height].join("/");
+    }
     this._gpuTexture = device.device.createTexture({
       label: texture.name,
       size: {
@@ -137,16 +162,20 @@ export abstract class WebGPUTexture implements IPlatformTexture {
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.COPY_DST |
         GPUTextureUsage.COPY_SRC |
-        (device.supportsRenderTargetColorFormat(texture.format) || /^(depth|stencil)/.test(this._format) ? GPUTextureUsage.RENDER_ATTACHMENT : 0)
+        (device.supportsRenderTargetColorFormat(texture.format) || /^(depth|stencil)/.test(this._format)
+          ? GPUTextureUsage.RENDER_ATTACHMENT
+          : 0)
     });
   }
 
   destroy(): void {
+    this._invalidatePixels();
     this._device.flush();
     this._gpuTexture.destroy();
   }
 
   generateMipmaps(): void {
+    this._invalidatePixels();
     this._device._generateMipmaps(
       this._gpuTexture,
       this._format,
@@ -163,21 +192,39 @@ export abstract class WebGPUTexture implements IPlatformTexture {
   protected _writeTexture(
     colorBuffer: ArrayBufferView,
     mipLevel: number,
-    origin: GPUOrigin3D,
+    origin: { x: number; y: number; z: number },
     width: number,
     height: number,
     depthOrArrayLayers: number
   ): void {
+    this._invalidatePixels();
     const layout = WebGPUTexture._getTexelLayout(this._format);
-    if (this._texture.format === TextureFormat.R8G8B8_UNorm) {
-      const source = new Uint8Array(colorBuffer.buffer,colorBuffer.byteOffset,colorBuffer.byteLength);
-      const expanded = new Uint8Array(width*height*depthOrArrayLayers*4);
-      if (source.length < expanded.length/4*3) throw new RangeError("RGB texture upload is too small.");
-      for (let i=0,j=0;j<expanded.length;i+=3,j+=4) {
-        expanded[j]=source[i]; expanded[j+1]=source[i+1]; expanded[j+2]=source[i+2]; expanded[j+3]=255;
-      }
-      colorBuffer = expanded;
+    const packing = pixelPacking(this._texture.format);
+    const byteLength =
+      Math.ceil(width / layout.blockWidth) *
+      Math.ceil(height / layout.blockHeight) *
+      (packing?.bytes ?? layout.bytesPerBlock) *
+      depthOrArrayLayers;
+    this._validateRegion(mipLevel, origin.x, origin.y, origin.z, width, height, depthOrArrayLayers, layout);
+    if (colorBuffer.byteLength < byteLength) throw new RangeError("Texture upload source is too small.");
+    if (!byteLength) return;
+    if (this._format.startsWith("depth") || this._format === "stencil8") {
+      WebGPUDepthTransfer.forDevice(this._device).write(
+        this._device,
+        this._gpuTexture,
+        this._texture.format,
+        mipLevel,
+        origin.z,
+        origin.x,
+        origin.y,
+        width,
+        height,
+        depthOrArrayLayers,
+        colorBuffer
+      );
+      return;
     }
+    if (packing) colorBuffer = unpackRGBA8(colorBuffer, width * height * depthOrArrayLayers, packing);
     this._device.flush();
     this._device.device.queue.writeTexture(
       { texture: this._gpuTexture, mipLevel, origin },
@@ -186,7 +233,11 @@ export abstract class WebGPUTexture implements IPlatformTexture {
         bytesPerRow: Math.ceil(width / layout.blockWidth) * layout.bytesPerBlock,
         rowsPerImage: Math.ceil(height / layout.blockHeight)
       },
-      { width: Math.ceil(width/layout.blockWidth)*layout.blockWidth, height:Math.ceil(height/layout.blockHeight)*layout.blockHeight, depthOrArrayLayers }
+      {
+        width: Math.ceil(width / layout.blockWidth) * layout.blockWidth,
+        height: Math.ceil(height / layout.blockHeight) * layout.blockHeight,
+        depthOrArrayLayers
+      }
     );
   }
 
@@ -197,6 +248,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     flipY: boolean,
     premultipliedAlpha: boolean
   ): void {
+    this._invalidatePixels();
     const dimensions = WebGPUTexture._getExternalImageSize(source);
     this._device.flush();
     this._device.device.queue.copyExternalImageToTexture(
@@ -215,47 +267,186 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     );
   }
 
-  protected _unsupportedReadback(): never {
-    throw new Error("Synchronous texture readback is not supported by the WebGPU backend.");
+  /** @internal */
+  _invalidatePixels(): void {
+    this._contentRevision++;
+    this._readablePixels?.clear();
   }
 
-  protected async _readPixels(layer: number,x: number,y: number,width: number,height: number,mipLevel: number,out: ArrayBufferView): Promise<void> {
-    const layout = WebGPUTexture._getTexelLayout(this._format);
-    const bytes = Math.ceil(width/layout.blockWidth)*layout.bytesPerBlock;
-    const rows = Math.ceil(height/layout.blockHeight);
-    const pitch = Math.ceil(bytes/256)*256;
-    const rgb=this._texture.format === TextureFormat.R8G8B8_UNorm;
-    if (out.byteLength < (rgb ? width*3 : bytes)*rows) throw new RangeError("Readback destination is too small.");
-    if (!rows || !bytes) return;
-    const staging = this._device.device.createBuffer({size:rows*pitch,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
-    try {
-      this._device._getCommandEncoder().copyTextureToBuffer(
-        {texture:this._gpuTexture,mipLevel,origin:{x,y,z:layer}},
-        {buffer:staging,bytesPerRow:pitch},
-        {width:Math.ceil(width/layout.blockWidth)*layout.blockWidth,height:rows*layout.blockHeight}
+  async makePixelBufferReadable(mipLevel: number, layer: number): Promise<void> {
+    if (
+      !Number.isInteger(mipLevel) ||
+      mipLevel < 0 ||
+      mipLevel >= this._texture.mipmapCount ||
+      !Number.isInteger(layer) ||
+      layer < 0 ||
+      layer >= this._layerCount
+    )
+      throw new RangeError("Invalid texture subresource.");
+    const width = Math.max(1, this._texture.width >> mipLevel);
+    const height = Math.max(1, this._texture.height >> mipLevel);
+    const { blockWidth, blockHeight, bytesPerBlock } = WebGPUTexture._getTexelLayout(this._format);
+    const bytes = pixelPacking(this._texture.format)?.bytes ?? bytesPerBlock;
+    const pixels = new Uint8Array(Math.ceil(width / blockWidth) * Math.ceil(height / blockHeight) * bytes);
+    const revision = this._contentRevision;
+    const cache = (this._readablePixels ??= new Map());
+    await this._readPixels(layer, 0, 0, width, height, mipLevel, pixels);
+    if (this._contentRevision !== revision) throw new Error("The texture changed while preparing a synchronous read.");
+    cache.set(layer * this._texture.mipmapCount + mipLevel, pixels);
+  }
+
+  protected _readCachedPixels(
+    layer: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): void {
+    const cache = this._readablePixels?.get(layer * this._texture.mipmapCount + mipLevel);
+    if (!cache)
+      throw new Error(
+        "Use getPixelBufferAsync() or await makePixelBufferReadable() before synchronous texture readback."
       );
+    const { blockWidth, blockHeight, bytesPerBlock } = WebGPUTexture._getTexelLayout(this._format);
+    const bytes = pixelPacking(this._texture.format)?.bytes ?? bytesPerBlock;
+    const w = Math.max(1, this._texture.width >> mipLevel);
+    const h = Math.max(1, this._texture.height >> mipLevel);
+    const stride = Math.ceil(w / blockWidth) * bytes;
+    const pitch = Math.ceil(width / blockWidth) * bytes;
+    const rows = Math.ceil(height / blockHeight);
+    if (
+      x < 0 ||
+      y < 0 ||
+      width < 0 ||
+      height < 0 ||
+      x + width > w ||
+      y + height > h ||
+      x % blockWidth ||
+      y % blockHeight ||
+      out.byteLength < pitch * rows
+    )
+      throw new RangeError("Invalid texture readback rectangle or destination.");
+    const destination = new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
+    let start = (y / blockHeight) * stride + (x / blockWidth) * bytes;
+    for (let row = 0; row < rows; row++, start += stride)
+      destination.set(cache.subarray(start, start + pitch), row * pitch);
+  }
+
+  protected async _readPixels(
+    layer: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mipLevel: number,
+    out: ArrayBufferView
+  ): Promise<void> {
+    const layout = WebGPUTexture._getTexelLayout(this._format);
+    const bytes = Math.ceil(width / layout.blockWidth) * layout.bytesPerBlock;
+    const rows = Math.ceil(height / layout.blockHeight);
+    const pitch = Math.ceil(bytes / 256) * 256;
+    const packing = pixelPacking(this._texture.format);
+    if (out.byteLength < (packing ? width * packing.bytes : bytes) * rows)
+      throw new RangeError("Readback destination is too small.");
+    this._validateRegion(mipLevel, x, y, layer, width, height, 1, layout);
+    if (!rows || !bytes) return;
+    if (this._format.startsWith("depth") || this._format === "stencil8") {
+      return WebGPUDepthTransfer.forDevice(this._device).read(
+        this._device,
+        this._gpuTexture,
+        this._texture.format,
+        mipLevel,
+        layer,
+        x,
+        y,
+        width,
+        height,
+        out
+      );
+    }
+    const staging = this._device.device.createBuffer({
+      size: rows * pitch,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    try {
+      this._device
+        ._getCommandEncoder()
+        .copyTextureToBuffer(
+          { texture: this._gpuTexture, mipLevel, origin: { x, y, z: layer } },
+          { buffer: staging, bytesPerRow: pitch },
+          { width: Math.ceil(width / layout.blockWidth) * layout.blockWidth, height: rows * layout.blockHeight }
+        );
       this._device.flush();
       await staging.mapAsync(GPUMapMode.READ);
       const mapped = new Uint8Array(staging.getMappedRange());
-      const dst = new Uint8Array(out.buffer,out.byteOffset,out.byteLength);
-      for (let i=0;i<rows;i++) {
-        if (rgb) for (let x=0;x<width;x++) {
-          const src=i*pitch+x*4,j=(i*width+x)*3;
-          dst[j]=mapped[src]; dst[j+1]=mapped[src+1]; dst[j+2]=mapped[src+2];
-        } else dst.set(mapped.subarray(i*pitch,i*pitch+bytes),i*bytes);
+      const dst = new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
+      for (let i = 0; i < rows; i++) {
+        if (packing) packRGBA8Row(mapped, i * pitch, dst, i * width * packing.bytes, width, packing);
+        else dst.set(mapped.subarray(i * pitch, i * pitch + bytes), i * bytes);
       }
-    } finally { staging.destroy(); }
+    } finally {
+      staging.destroy();
+    }
+  }
+
+  private _validateRegion(
+    mip: number,
+    x: number,
+    y: number,
+    layer: number,
+    width: number,
+    height: number,
+    layers: number,
+    layout: { blockWidth: number; blockHeight: number }
+  ): void {
+    const w = Math.max(1, this._texture.width >> mip),
+      h = Math.max(1, this._texture.height >> mip);
+    if (
+      !Number.isInteger(mip) ||
+      mip < 0 ||
+      mip >= this._texture.mipmapCount ||
+      !Number.isInteger(x) ||
+      !Number.isInteger(y) ||
+      !Number.isInteger(layer) ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      !Number.isInteger(layers) ||
+      x < 0 ||
+      y < 0 ||
+      layer < 0 ||
+      width < 0 ||
+      height < 0 ||
+      layers < 0 ||
+      x + width > w ||
+      y + height > h ||
+      layer + layers > this._layerCount ||
+      x % layout.blockWidth ||
+      y % layout.blockHeight ||
+      (width % layout.blockWidth && x + width !== w) ||
+      (height % layout.blockHeight && y + height !== h)
+    )
+      throw new RangeError("Invalid texture subresource or region.");
   }
 
   /** @internal */
   static _getFormat(format: TextureFormat, srgb: boolean): GPUTextureFormat {
     switch (format) {
-      case TextureFormat.R16_UNorm: return "r16unorm";
-      case TextureFormat.R16G16_SFloat: return "rg16float";
-      case TextureFormat.R32_SFloat: return "r32float";
-      case TextureFormat.R32G32_SFloat: return "rg32float";
-      case TextureFormat.Stencil: return "stencil8";
+      case TextureFormat.R16_UNorm:
+        return "r16unorm";
+      case TextureFormat.R16G16_SFloat:
+        return "rg16float";
+      case TextureFormat.R32_SFloat:
+        return "r32float";
+      case TextureFormat.R32G32_SFloat:
+        return "rg32float";
+      case TextureFormat.Stencil:
+        return "stencil8";
       case TextureFormat.R8G8B8_UNorm:
+      case TextureFormat.R4G4B4A4_UNorm:
+      case TextureFormat.R5G5B5A1_UNorm:
+      case TextureFormat.R5G6B5_UNorm:
       case TextureFormat.R8G8B8A8_UNorm:
         return srgb ? "rgba8unorm-srgb" : "rgba8unorm";
       case TextureFormat.R16G16B16A16_SFloat:
@@ -342,7 +533,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
     )[compare];
   }
 
-  private static _getTexelLayout(format: GPUTextureFormat): {
+  static _getTexelLayout(format: GPUTextureFormat): {
     bytesPerBlock: number;
     blockWidth: number;
     blockHeight: number;
@@ -362,6 +553,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
       };
     }
     switch (format) {
+      case "stencil8":
       case "r8unorm":
         return { bytesPerBlock: 1, blockWidth: 1, blockHeight: 1 };
       case "rg8unorm":
@@ -369,6 +561,7 @@ export abstract class WebGPUTexture implements IPlatformTexture {
       case "r16float":
       case "depth16unorm":
         return { bytesPerBlock: 2, blockWidth: 1, blockHeight: 1 };
+      case "depth32float-stencil8":
       case "rgba16float":
       case "rg32float":
         return { bytesPerBlock: 8, blockWidth: 1, blockHeight: 1 };
