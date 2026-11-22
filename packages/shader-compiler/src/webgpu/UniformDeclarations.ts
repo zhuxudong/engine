@@ -11,7 +11,7 @@ import { declarations, matching, tokens } from "./StageInterface";
 
 /** Historical instruction streams predate declaration sites. Inspect their selected
  * top-level declarations once and pass them to exactly the same std140 packer. */
-function recoverStage(source: string): { source: string; sites: IShaderUniformSelection[] } {
+function recoverStage(source: string, findEntry = false): { source: string; sites: IShaderUniformSelection[] } {
   const words = tokens(source);
   const offsets: number[] = [];
   let offset = 0;
@@ -44,7 +44,10 @@ function recoverStage(source: string): { source: string; sites: IShaderUniformSe
             member = j + 1;
           }
       }
-      if (words[i - 1] === ")") start = end + 1;
+      if (words[i - 1] === ")") {
+        if (findEntry && words[start] === "void" && words[start + 1] === "main") add("entry", start, i);
+        start = end + 1;
+      }
       i = end;
     } else if (words[i] === ";") {
       const key = words[start];
@@ -55,6 +58,35 @@ function recoverStage(source: string): { source: string; sites: IShaderUniformSe
     }
   }
   return { source, sites };
+}
+
+/** Older assets lack marked entry points and uniform names. Reuse the current instance
+ * layout so renderer overrides made after initial compilation retain their own record. */
+export function recoverLegacyInstancing(
+  vertex: string,
+  fragment: string,
+  explicitBlocks: number,
+  maxBlockBytes: number
+) {
+  const vs = recoverStage(vertex, true);
+  const fs = recoverStage(fragment, true);
+  const names = new Set((vs.source + " " + fs.source).match(/[A-Za-z_]\w*/g));
+  function available(name: string): string {
+    while (names.has(name)) name += "_";
+    return name;
+  }
+  return finalizeShaderUniforms(vs.source, fs.source, vs.sites, fs.sites, {
+    maxBlockBytes,
+    maxBindings: 48,
+    explicitBlocks,
+    instancing: {
+      initialize: available("gs_initInstance"),
+      index: available("gs_instanceIndex"),
+      block: available("RendererInstanceData"),
+      struct: available("gs_Instance"),
+      instance: available("gs_instanceBuffer")
+    }
+  });
 }
 
 export function recoverUniforms(

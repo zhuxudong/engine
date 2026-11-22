@@ -2,6 +2,7 @@ import { Matrix, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import {
   normalizeShaderIncludeKey,
   type IShaderInstanceLayout,
+  type IShaderUniformBlock,
   type IShaderUniformSelection
 } from "@galacean/engine-design";
 import { Logger } from "../base/Logger";
@@ -188,7 +189,8 @@ mat3 _normalMatFromModel(mat3 m) {
   static createInstanceLayout(
     layout: IShaderInstanceLayout,
     vertexSites: readonly IShaderUniformSelection[],
-    fragmentSites: readonly IShaderUniformSelection[]
+    fragmentSites: readonly IShaderUniformSelection[],
+    explicitBlocks?: readonly IShaderUniformBlock[]
   ): InstanceBufferLayout {
     const instanceFields = layout.fields.map(({ name, type, offset, worldTransform }) => {
       const writer = worldTransform ? null : new Std140FieldWriter(type);
@@ -211,7 +213,12 @@ mat3 _normalMatFromModel(mat3 m) {
       headerFields.push({
         property: ShaderProperty.getByName(name),
         offsetInElements: offset / 4,
-        sceneOnly: vertexSites.some(inScene) || fragmentSites.some(inScene)
+        sceneOnly:
+          vertexSites.some(inScene) ||
+          fragmentSites.some(inScene) ||
+          !!explicitBlocks?.some(
+            (block) => block.name === "Scene" && block.members.some((member) => member.name === name)
+          )
       });
     }
     addCameraMatrix("camera_ViewMat", layout.viewOffset);
@@ -229,7 +236,7 @@ mat3 _normalMatFromModel(mat3 m) {
   /**
    * Scan VS/FS for renderer-group `uniform` declarations, replace them with a shared
    * std140 UBO (instanced array), and emit `#define` remapping so original uniform
-   * names resolve to `rendererData[instanceID].field`.
+   * names resolve to `rendererData.items[instanceID].field`.
    *
    * Inputs are expected to be already preprocessor-evaluated (no `#ifdef` left).
    */
@@ -239,12 +246,18 @@ mat3 _normalMatFromModel(mat3 m) {
     fragmentSource: string
   ): { vertexSource: string; fragmentSource: string; instanceLayout: InstanceBufferLayout | null } {
     const fieldMap: Record<number, string> = Object.create(null);
+    const originalVertex = vertexSource;
+    const originalFragment = fragmentSource;
     vertexSource = ShaderFactory._scanInstanceUniforms(vertexSource, fieldMap);
     fragmentSource = ShaderFactory._scanInstanceUniforms(fragmentSource, fieldMap);
 
     // Even when fieldMap is empty, derived built-ins (e.g. `renderer_MVPMat`) may have
     // had their declarations stripped by scan and still need a `#define` to compile
     const instanceLayout = ShaderFactory._buildLayout(engine, fieldMap);
+
+    if (!instanceLayout.instanceMaxCount) {
+      return { vertexSource: originalVertex, fragmentSource: originalFragment, instanceLayout: null };
+    }
 
     const { instanceFields } = instanceLayout;
     const uboDecl = ShaderFactory._buildUBODeclaration(instanceLayout);
@@ -343,7 +356,7 @@ mat3 _normalMatFromModel(mat3 m) {
     const structSize = Math.ceil(currentOffset / 16) * 16;
     const instanceMaxCount = Math.floor(maxUBOSize / structSize);
 
-    return { instanceFields, instanceMaxCount, structSize };
+    return { bindingName: ShaderFactory.RENDERER_INSTANCE_BLOCK_NAME, instanceFields, instanceMaxCount, structSize };
   }
 
   private static _prepareInstanceCameraInputs(
@@ -389,12 +402,12 @@ mat3 _normalMatFromModel(mat3 m) {
       `#define INSTANCE_MAX_COUNT ${instanceMaxCount}\n` +
       `struct RendererInstanceStruct {\n${structLines.join("\n")}\n};\n` +
       `layout(std140) uniform ${ShaderFactory.RENDERER_INSTANCE_BLOCK_NAME} {\n` +
-      `    RendererInstanceStruct rendererData[INSTANCE_MAX_COUNT];\n};\n`
+      `    RendererInstanceStruct items[INSTANCE_MAX_COUNT];\n} rendererData;\n`
     );
   }
 
   private static _buildFieldDefines(fields: InstanceFieldInfo[], idExpr: string, members: Set<string>): string {
-    const accessor = `rendererData[${idExpr}]`;
+    const accessor = `rendererData.items[${idExpr}]`;
     const lines: string[] = [];
     let model = "renderer_ModelMat";
     for (let i = 0; i < fields.length; i++) {

@@ -297,12 +297,7 @@ export class ShaderPass extends ShaderPart {
     if (canUseBaked && !macroCollection._mask.slice(0, macroCollection._length).some(Boolean)) {
       return this._createBakedProgram(engine, baked!);
     }
-    const variant = this._compileShaderSource(
-      engine,
-      macroCollection,
-      isGPUInstance && (device.backend !== "webgpu" || !!this._uniformPlan),
-      canUseBaked
-    );
+    const variant = this._compileShaderSource(engine, macroCollection, isGPUInstance, canUseBaked);
     if (variant.matchesBaked) return this._createBakedProgram(engine, baked!);
     let source: IPlatformShaderSource = {
       vertexSource: variant.vertexSource,
@@ -434,12 +429,32 @@ export class ShaderPass extends ShaderPart {
         instanceLayout = ShaderFactory.createInstanceLayout(variant.instanceLayout, vertexSites!, fragmentSites!);
         instanceBindingName = variant.instanceLayout.bindingName;
       }
+    } else if (
+      isGPUInstance &&
+      engine._hardwareRenderer.backend === "webgpu" &&
+      engine._webGPUShaderCompiler?.recoverLegacyInstancing
+    ) {
+      const variant = engine._webGPUShaderCompiler.recoverLegacyInstancing(
+        vertexSource,
+        fragmentSource,
+        uniformBlocks?.length ?? 0,
+        engine._hardwareRenderer.maxUniformBlockSize
+      );
+      if (!variant.instanceLayout) return this._compileShaderSource(engine, macroCollection, false);
+      vertexSource = variant.vertexSource;
+      fragmentSource = variant.fragmentSource;
+      instanceLayout = ShaderFactory.createInstanceLayout(variant.instanceLayout, [], [], uniformBlocks);
+      instanceBindingName = variant.instanceLayout.bindingName;
+      if (variant.uniformBlocks.length) uniformBlocks = [...(uniformBlocks ?? []), ...variant.uniformBlocks];
+      looseUniforms = variant.looseUniforms;
     } else if (isGPUInstance) {
       // Historical .shaderc contains the original instructions without compiler declaration metadata.
       const injected = ShaderFactory.injectInstanceUBO(engine, vertexSource, fragmentSource);
+      if (!injected.instanceLayout) return this._compileShaderSource(engine, macroCollection, false);
       vertexSource = injected.vertexSource;
       fragmentSource = injected.fragmentSource;
       instanceLayout = injected.instanceLayout;
+      instanceBindingName = instanceLayout.bindingName;
     }
 
     if (!plan) {

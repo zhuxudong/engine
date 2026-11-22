@@ -8,6 +8,7 @@ import {
   type IWebGPUShaderProgram
 } from "@galacean/engine-design";
 import { WGSLBackend } from "./webgpu/WGSLBackend";
+import { recoverLegacyInstancing } from "./webgpu/UniformDeclarations";
 import { ShaderInstructionEncoder } from "./ShaderInstructionEncoder";
 import type { InitInput } from "web-naga";
 
@@ -36,12 +37,15 @@ export function compileWebGPUShaderPass(
     pass.uniformPlan?.fragment,
     fs
   );
-  const variant = finalizeShaderUniforms(v, f, vs, fs, {
-    maxBlockBytes: options.maxUniformBlockBytes ?? 16384,
-    maxBindings: 24,
-    explicitBlocks: pass.uniformBlocks?.length,
-    instancing: macros.has("RENDERER_GPU_INSTANCE") ? pass.uniformPlan?.instancing : undefined
-  });
+  const legacyInstances = !pass.uniformPlan && macros.has("RENDERER_GPU_INSTANCE");
+  const variant = legacyInstances
+    ? recoverLegacyInstancing(v, f, pass.uniformBlocks?.length ?? 0, options.maxUniformBlockBytes ?? 16384)
+    : finalizeShaderUniforms(v, f, vs, fs, {
+        maxBlockBytes: options.maxUniformBlockBytes ?? 16384,
+        maxBindings: 24,
+        explicitBlocks: pass.uniformBlocks?.length,
+        instancing: macros.has("RENDERER_GPU_INSTANCE") ? pass.uniformPlan?.instancing : undefined
+      });
   if (variant.instanceOverflow) throw new Error("The selected instance does not fit a uniform buffer binding.");
   const i = variant.instanceLayout;
   return compiler.compileWebGPUVariant(variant.vertexSource, variant.fragmentSource, {
@@ -72,6 +76,7 @@ export async function createWebGPUShaderCompiler(moduleOrPath?: InitInput): Prom
     }
   });
   return {
+    recoverLegacyInstancing,
     normalizeRawStage: ShaderInstructionEncoder.normalizeRawStage,
     compileWebGPUVariant: backend.compileWebGPUVariant.bind(backend),
     compileDefaultVariant(program: IShaderInfo) {

@@ -2,6 +2,8 @@ import type { ShaderInstruction } from "./ICondition";
 import type { IShaderUniformBlock } from "./IShaderProgramSource";
 import type { IShaderProgramSource } from "./IShaderProgramSource";
 
+import type { IShaderUniformVariant } from "./ShaderUniformVariant";
+
 export type WebGPUShaderInputType = "float" | "sint" | "uint";
 
 /** Concrete stage interface after macro and vertex format selection. */
@@ -81,6 +83,13 @@ export interface IWebGPUShaderOptions {
 }
 
 export interface IWebGPUShaderCompiler {
+  /** Reconstruct declaration sites for an already selected historical instancing variant. */
+  recoverLegacyInstancing?(
+    vertex: string,
+    fragment: string,
+    explicitBlocks: number,
+    maxBlockBytes: number
+  ): IShaderUniformVariant;
   /** Expand embedded GLSL directives into instructions before evaluating a historical raw pass's active macros. */
   normalizeRawStage?(instructions: ShaderInstruction[]): ShaderInstruction[];
   compileWebGPUVariant(
