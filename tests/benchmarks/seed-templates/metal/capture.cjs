@@ -45,6 +45,15 @@ function childEnd(child) {
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
 }
+async function terminateRecorder(child, ended) {
+  if (child.exitCode === null && !child.signalCode) child.kill("SIGTERM");
+  try {
+    await timed(ended, 5000, "The local recorder did not terminate.");
+  } catch {
+    if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
+    await ended;
+  }
+}
 async function timed(promise, ms, message) {
   let timer;
   try {
@@ -167,12 +176,8 @@ async function recorder(pid, dir, group, developer, nativeArch) {
   } catch (e) {
     // A failed local Instruments service connection can ignore SIGINT while blocked in Mach IPC.
     // At this point no recording started. Reap only the xctrace child created for this pair.
-    if (proc.exitCode === null && !proc.signalCode) proc.kill("SIGTERM");
     try {
-      await timed(ended, 5000, "The failed local attach did not terminate.");
-    } catch {
-      if (proc.exitCode === null && !proc.signalCode) proc.kill("SIGKILL");
-      await ended;
+      await terminateRecorder(proc, ended);
     } finally {
       log.end();
     }
@@ -184,13 +189,22 @@ async function recorder(pid, dir, group, developer, nativeArch) {
     ended,
     async stop() {
       if (proc.exitCode === null && !proc.signalCode) proc.kill("SIGINT");
-      const result = await timed(ended, 720000, "Timed out finalizing local Metal trace");
-      log.end();
-      if (result.code !== 0) throw Error("xctrace recording failed: " + JSON.stringify(result));
+      try {
+        const result = await timed(ended, 150000, "Timed out finalizing local Metal trace");
+        if (result.code !== 0) throw Error("xctrace recording failed: " + JSON.stringify(result));
+      } catch (error) {
+        await terminateRecorder(proc, ended);
+        throw error;
+      } finally {
+        log.end();
+      }
     }
   };
 }
 async function main() {
+  const requested = env.CAPTURE_GROUPS?.split(",");
+  const selected = requested ? groups.filter((group) => requested.includes(group.id)) : groups;
+  if (requested && selected.length !== requested.length) throw Error("Unknown or duplicate CAPTURE_GROUPS entry");
   if (process.platform !== "darwin") throw Error("Mac desktop tracing requires macOS.");
   const localDevice = /"IOPlatformUUID" = "([\da-f-]{36})"/i.exec(
     execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8" })
@@ -239,7 +253,11 @@ async function main() {
   await fs.access(path.join(developer, "usr/bin/xctrace"));
   if (process.argv.includes("--plan")) {
     console.log(
-      JSON.stringify({ output, developer, urls, seed, width, height, frames, warmup, cameraDir, groups }, null, 2)
+      JSON.stringify(
+        { output, developer, urls, seed, width, height, frames, warmup, cameraDir, groups: selected },
+        null,
+        2
+      )
     );
     return;
   }
@@ -268,7 +286,7 @@ async function main() {
         throw Error("Resume configuration differs: " + key);
   }
   const completed = new Set();
-  for (const g of groups) {
+  for (const g of selected) {
     const dir = path.join(output, g.id);
     try {
       await fs.access(dir);
@@ -289,7 +307,7 @@ async function main() {
       await fs.rename(dir, path.join(output, "interrupted-" + g.id + "-" + Date.now()));
     }
   }
-  if (completed.size === groups.length) return;
+  if (completed.size === selected.length) return;
   const { chromium } = require(require.resolve("@playwright/test", { paths: [repo] }));
   const args = [
     "--ignore-gpu-blocklist",
@@ -337,7 +355,7 @@ async function main() {
     };
     metadata.sessionPids = [...new Set([...(previousManifest?.sessionPids || []), gpuPid])];
     await json(path.join(output, "manifest.json"), metadata);
-    for (const group of groups) {
+    for (const group of selected) {
       if (completed.has(group.id)) continue;
       if (diskGiB) {
         const used = Number(execFileSync("/usr/bin/du", ["-sk", output], { encoding: "utf8" }).split(/\s/)[0]) * 1024;
