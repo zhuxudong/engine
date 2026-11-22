@@ -634,6 +634,17 @@ diff --git a/packages/core/src/lighting/screenSpaceReflection/ScreenSpaceReflect
 
        this._currentVPMat.copyFrom(context.viewProjectionMatrix);
        const viewE = context.viewMatrix.elements;
+@@ -2345,7 +2344,9 @@
+       return false;
+     }
+
+-    this._receiverScissor.set(x0, y0, x1 - x0, y1 - y0);
++    // WebGPU scissors index rows from the top of the render target.
++    const scissorY = this.engine._hardwareRenderer.backend === "webgpu" ? traceH - y1 : y0;
++    this._receiverScissor.set(x0, scissorY, x1 - x0, y1 - y0);
+     return true;
+   }
+
 diff --git a/packages/core/src/postProcess/PostProcessManager.ts b/packages/core/src/postProcess/PostProcessManager.ts
 --- a/packages/core/src/postProcess/PostProcessManager.ts
 +++ b/packages/core/src/postProcess/PostProcessManager.ts
