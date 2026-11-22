@@ -67,8 +67,19 @@ export class Std140FieldWriter {
   }
 
   private _writeArray(view: WordView, offset: number, source: ArrayLike<number> | null): void {
-    if (source && source.length === this._contiguousLength && source.length > 0) {
+    const length = this._contiguousLength;
+    const count = source?.length ?? 0;
+    if (source && count === length && length > 0) {
       view.set(source, offset);
+      return;
+    }
+    if (count < length) {
+      // Keep numeric conversion and forward copy order for short inputs. A contiguous
+      // field owns every word in the tail, even when the preceding draw used more values.
+      if (source) {
+        for (let i = 0; i < count; ++i) view[offset + i] = source[i] ?? 0;
+      }
+      view.fill(0, offset + count, offset + length);
       return;
     }
     let index = 0;
