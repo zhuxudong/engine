@@ -17,30 +17,30 @@ The earlier PR-1/PR-2 WebGL2 checkpoint also ran S1–S5 on an iPhone 17 Pro Max
 
 ## Full engine update and frame pacing
 
-Each cell contains the median CPU update time and the P90 interval between animation frames, in milliseconds. Updates include scene traversal, culling, sorting, binding and submission. In a refresh-limited scene a 16.7 ms interval represents one display refresh.
+Each cell contains the median CPU update time and the P90 interval between animation frames, in milliseconds. Updates include scene traversal, culling, sorting, binding and submission. S1 uses the final interleaved visits described below for the reference and WebGPU columns. Its candidate WebGL2 cell comes from the earlier single visit. S2–S5 use the archived `b9faebd53` reference and fresh single visits on each candidate backend. In a refresh-limited scene a 16.7 ms interval represents one display refresh.
 
 | Scene | Reference WebGL2 | Candidate WebGL2 | Candidate WebGPU |
 | ----- | ---------------: | ---------------: | ---------------: |
-| S1    |       3.4 / 16.7 |       2.5 / 16.7 |       2.7 / 16.7 |
-| S2    |       0.6 / 16.7 |       0.8 / 16.7 |       0.9 / 16.7 |
-| S3    |       0.3 / 16.7 |       0.4 / 16.7 |       0.4 / 16.7 |
-| S4    |       0.3 / 16.7 |       0.4 / 16.7 |       0.7 / 16.7 |
-| S5    |       0.6 / 16.7 |       0.3 / 16.7 |       0.6 / 16.7 |
+| S1    |       3.3 / 16.7 |       2.5 / 16.7 |       2.8 / 16.7 |
+| S2    |       0.6 / 16.7 |       0.5 / 16.7 |       0.7 / 16.7 |
+| S3    |       0.3 / 16.7 |       0.3 / 16.7 |       0.6 / 16.7 |
+| S4    |       0.3 / 16.7 |       0.4 / 16.7 |       0.5 / 16.7 |
+| S5    |       0.6 / 16.7 |       0.4 / 16.7 |       0.9 / 16.7 |
 
-S1 renders 2,048 independently allocated indexed meshes with eight alternating materials. All three outputs had RGBA8 hash `284056bb`. An additional six visits in GL/GPU/GPU/GL/GL/GPU order instrumented the interval from camera draw-pass entry through final queue submission. Median full-update costs across each backend's three visits were 3.2 ms on reference WebGL2 and 2.9 ms on WebGPU (9.4% lower). The corresponding draw-through-submit times were 2.2 ms and 2.1 ms (4.5% lower).
+S1 renders 2,048 independently allocated indexed meshes with eight alternating materials. The final six visits ran in GL/GPU/GPU/GL/GL/GPU order. Every visit rendered the same RGBA8 hash `284056bb` and reported a 16.7 ms P90 frame interval. Across each backend's three visits, median full-update costs were 3.3 ms on reference WebGL2 and 2.8 ms on WebGPU (15.2% lower). From camera draw-pass entry through final submission, the median fell from 2.2 to 2.0 ms (9.1% lower). The per-visit submission medians were 2.2, 2.3 and 2.2 ms on WebGL2 and 1.9, 2.0 and 2.1 ms on WebGPU.
 
 S3 reported 50,000 live particles following GPU compute simulation. The WebGL2 baseline independently counted the same number of transform-feedback outputs. S5 loads Sponza and measures a full camera circuit after its assets are available. The all-effects Sponza renders are covered by the [image measurements](desktop-parity.md).
 
 ## Cold first use and preparation
 
-S4 stages fifty different PBR variants in groups of five. First draw measures the first engine update before those groups enter the scene. Time to first frame includes module load, engine initialization, scene setup and that draw. Preparation runs before the timed appearances of the groups.
+S4 stages fifty different PBR variants in groups of five. First draw measures the first engine update before those groups enter the scene. Time to first frame includes module load, engine initialization, scene setup and that draw. Preparation runs before the timed appearances of the groups. Switch P99 and maximum cover all 300 measured frame updates, including the ten batch appearances.
 
 | S4 visit | First draw, ms | Time to first frame, ms | Preparation, ms | Switch P99, ms | Switch maximum, ms |
 | --- | --: | --: | --: | --: | --: |
 | Reference WebGL2 | 5.2 | 53.4 | 0.0 | 30.1 | 34.4 |
-| Candidate WebGL2 | 6.1 | 58.3 | 0.0 | 29.5 | 35.8 |
-| WebGPU on first use | 3.6 | 81.6 | 0.0 | 21.6 | 50.3 |
-| WebGPU with asynchronous preparation | 3.6 | 81.5 | 330.0 | 1.5 | 1.9 |
+| Candidate WebGL2 | 6.3 | 61.3 | 0.0 | 29.7 | 37.6 |
+| WebGPU on first use | 3.7 | 75.8 | 0.0 | 23.8 | 72.8 |
+| WebGPU with asynchronous preparation | 3.6 | 69.8 | 328.8 | 1.8 | 2.2 |
 
 The platform shader cache persists across browser processes. In a separate controlled WebGL2 experiment, a fixed tiny change to the fragment output produced a new native program. Its first five-program batch took 837.8 ms, including 821.2 ms waiting for the native link result. A new browser process running the same modified shader took 35.8 ms for that batch, including 23.2 ms waiting for the link result. JavaScript macro expansion and layout took 11.5 and 8.0 ms respectively. This explains why cold hitches can exceed the repeat-visit values above on either WebGL2 revision.
 
@@ -54,14 +54,16 @@ The final S2 Metal trace alternated WebGL2, WebGPU, WebGPU and WebGL2 in one Chr
 
 | Dimension | Desktop result | Acceptance status |
 | --- | --- | --- |
-| CPU draw submission | S1 camera entry through submission improves from 2.2 to 2.1 ms across six interleaved visits. | Below the 30% target. The table above also gives the separate costs of running WebGL2 through the new code on all five scenes. |
+| CPU draw submission | S1 camera entry through submission improves from 2.2 to 2.0 ms across six interleaved visits (9.1%). | Below the 30% target. The table above also gives the separate costs of running WebGL2 through the new code on all five scenes. |
 | GPU execution | S2 Metal median active time falls from 1.648 to 1.458 ms (11.5%). | The measured GPU time clears the non-regression threshold. Register-spill counts remain unmeasured. |
 | Bandwidth and memory | S2's two WebGPU visits peak at 31.42 and 42.07 MB in tracked Metal resources, compared with 43.45 and 42.73 MB for WebGL2. Engine-accounted logical resources peak at 15.35 and 14.68 MB for WebGPU and WebGL2 respectively. | Partial. The trace sums reported sizes of live Metal objects, including texture views. Physical residency, tile store bytes and long-run growth remain open. [Allocation scope](metal-s2.md) |
-| First frame and shader switches | With preparation, S4 switch P99 and maximum fall to 1.5 and 1.9 ms. Eight fresh-profile HTTP visits give median navigation-to-first-update times of 74.45 ms on reference WebGL2 and 85.85 ms on WebGPU. | Prepared switching clears the baseline in these visits. Total cold-start latency misses the non-regression goal. |
+| First frame and shader switches | With preparation, S4 switch P99 and maximum fall to 1.8 and 2.2 ms. Eight fresh-profile HTTP visits give median navigation-to-first-update times of 74.45 ms on reference WebGL2 and 85.85 ms on WebGPU. | Prepared switching clears the baseline in these visits. Total cold-start latency misses the non-regression goal. |
 | Compute and large scenes | S3 simulates 50,000 particles. S3 and Sponza S5 both record a 16.7 ms P90 frame interval on each backend. | Desktop pacing reaches parity at this display refresh rate. Real-world Seed results are reported per template, effect and camera path. Final iPhone frame pacing and background/foreground recovery remain pending. [Seed results](../../seed-templates/results.md) |
 
 ## Verification
 
-On November 22, 2026 at revision `025ceb7b0`, `pnpm build` completed and the Chromium integration suite passed **4,446 tests across 241 files**. Package-consumer tests passed **54/54** and Spine packaging passed **5/5**. `pnpm lint` reported zero errors and 1,359 warnings. An earlier completed gallery run at `9a4235b35` passed all 101 cases against both same-run WebGL2 and historical JPEGs. [Gallery measurements and reproduction](desktop-parity.md)
+On November 22, 2026 at revision `025ceb7b0`, `pnpm build` completed shader precompilation, module bundling and package type generation. The Chromium integration suite passed **4,446 tests across 241 files**. Package-consumer tests passed **54/54** and Spine packaging passed **5/5**. `pnpm lint` reported zero errors and 1,359 warnings.
+
+The final desktop gallery rerun passed **303 image comparisons across 101 scenes**. Each scene compared WebGL2 and WebGPU separately with its historical JPEG, then compared their two live framebuffers. Particle noise produced the largest live-backend difference, 1.04833 RGB levels on average, with 0.782292% of pixels differing by more than 20 levels in at least one channel. [Gallery measurements and reproduction](desktop-parity.md)
 
 The remaining device gates are Safari WebGPU versus WebGL2 timing, foreground recovery after backgrounding the app, and the iPhone hardware counters for the final candidate. Desktop Chromium also exercises resource recreation after device loss. [Native recovery test](../../../src/rhi-webgpu/NativeRendering.test.ts)
