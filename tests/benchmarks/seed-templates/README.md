@@ -31,6 +31,22 @@ Defaults select both templates, both backends, and the full scene followed by in
 
 Each row starts a fresh world at seed 20261122 and 960 × 540 at DPR 1. The benchmark waits for publication, freezes navigation, advances simulation at 1/60 s and traverses the camera route once before measuring. CPU visits measure engine update time without GPU queries. GPU visits use native timers every tenth frame. Three inspected frames record draws, published population counts, terrain-horizon diagnostics and shader passes. PNG files contain the presentation canvas. Standard WebGL2 GPU measurements use a disjoint elapsed query. WebGPU records the beginning timestamp on the first submitted native render or compute pass and the end timestamp on the final submitted native pass. The last warmup frame identifies the terminal pass label. If that label changes during a sample, the benchmark learns the new label, drops the sample and records the change in `gpuTimingDiagnostics`. A valid sample includes the pass labels, pass and submission counts, and number of timestamp writes. The span can include gaps between passes; commands preceding the first pass or following the final pass are outside the interval. The optional API timers are diagnostics specific to each backend. For direct cross-backend GPU comparisons on a Mac, use the union of Metal active intervals over the same measured frames. Set `PASS_TIMINGS=1 MODES=gpu` in a separate output directory for per-pass diagnostics. This mode times WebGPU native passes and individual WebGL2 SSR and Bloom draws.
 
-The vegetation switch controls both original population roots and includes grass. The horizon switch removes terrain-horizon rejection while retaining frustum culling and LOD. The Hi-Z trace inside SSR serves reflections. Shader passes, effect flags, camera poses and repeat captures should be checked alongside the timing rows. Seed publishes some fine detail under a frame budget and fresh visits can differ by a few draws.
+`no-vegetation` hides the same two entity roots as the original **植被/草皮** panel control. `Population/Trees` contains ordinary tree groves and shrubs. `Population/Details` contains grass, flowers and natural understory. The benchmark measures this hierarchy switch. The interactive panel additionally pauses the natural vegetation update. The Sakura landmark and drifting petals remain active. Titan retains its landmark, template-authored flowers, shrubs, dead wood and grass, and its butterfly effects.
+
+Two optional variants isolate additional scene subtrees. Compare each against `full` with the same camera files. For example, after preparing and serving the fixtures above, run:
+
+```sh
+extras="$work/landmark-and-animals"
+mkdir -p "$extras"
+cp "$work/results/"*-camera.json "$extras/"
+RESULTS="$extras" VARIANTS=full,no-landmark-tree,no-animals WARMUP=90 FRAMES=180 node "$bench/run.mjs"
+```
+
+- `no-landmark-tree` hides the published template's direct model node, `World template: sakura-pearl/pearl-cherry-tree` or `World template: titan-wasteland/oasis-scarlet-tree`. Other template children and the population remain active.
+- `no-animals` hides `Seed World Runtime/Seed animals`, the hierarchy controlled by the original **动物** button. The benchmark leaves the host's simulation clock running. The interactive button additionally pauses `animals.advance`.
+
+For these visits the JSON records the exact entity path, immediate child count and hierarchy visibility in `before.subtree` and `effects.subtree`. The landmark result also records the number of imported scene roots beneath `Model fit`. CPU-mode PNGs show the final camera pose. A landmark run requires a unique, populated model for the published template.
+
+The horizon switch removes terrain-horizon rejection while retaining frustum culling and LOD. The Hi-Z trace inside SSR serves reflections. Shader passes, effect flags, camera poses and repeat captures should be checked alongside the timing rows. Seed publishes some fine detail under a frame budget and fresh visits can differ by a few draws.
 
 The stationary camera routes exercise the terrain horizon with rocks behind a ridge. [Stationary viewpoints and geometry reference](horizon/README.md)

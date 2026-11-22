@@ -45,7 +45,35 @@ function worldOf(context) {
   return world;
 }
 
-function status(context, world) {
+function namedChild(parent, name) {
+  const matches = parent.children.filter((entity) => entity.name === name);
+  if (matches.length !== 1) throw Error(`Expected one '${name}' under '${parent.name}', found ${matches.length}.`);
+  return matches[0];
+}
+
+function diagnosticSubtree(context, world, variant) {
+  if (variant !== "no-landmark-tree" && variant !== "no-animals") return null;
+  let entity, modelFit;
+  if (variant === "no-animals") {
+    entity = namedChild(context.root, "Seed animals");
+  } else {
+    const { template } = context.publication.current;
+    const id = template?.template?.id;
+    const landmark = { "sakura-pearl": "pearl-cherry-tree", "titan-wasteland": "oasis-scarlet-tree" }[id];
+    if (!landmark || namedChild(world.root, "World template: " + id) !== template.root)
+      throw Error("Expected the published Sakura or Titan template for the landmark-tree diagnostic.");
+    entity = namedChild(template.root, landmark);
+    modelFit = namedChild(entity, "Model fit");
+    if (!modelFit.childCount) throw Error("Landmark tree has no imported model: " + landmark);
+  }
+  if (!entity.childCount || !entity.isActiveInHierarchy)
+    throw Error("Expected a populated, active subtree: " + entity.name);
+  const names = [];
+  for (let node = entity; node; node = node.parent) names.push(node.name);
+  return { entity, path: names.reverse().join("/"), modelFit };
+}
+
+function status(context, world, subtree) {
   const pop = world.population;
   const post = context.post.getDebugSnapshot();
   return {
@@ -54,15 +82,33 @@ function status(context, world) {
     details: pop.details.isActiveInHierarchy,
     ssr: "enableScreenSpaceReflection" in context.camera ? context.camera.enableScreenSpaceReflection : null,
     bloom: post.enabled && post.bloom.enabled,
-    horizon: world.getTerrainOcclusionDiagnostics().horizonBuildMode
+    horizon: world.getTerrainOcclusionDiagnostics().horizonBuildMode,
+    ...(subtree && {
+      subtree: {
+        path: subtree.path,
+        active: subtree.entity.isActiveInHierarchy,
+        childCount: subtree.entity.childCount,
+        ...(subtree.modelFit && { modelSceneRoots: subtree.modelFit.childCount })
+      }
+    })
   };
 }
 
-function ablate(context, world, variant, undo) {
+function ablate(context, world, variant, undo, subtree) {
   const pop = world.population;
   switch (variant) {
     case "full":
       break;
+    case "no-landmark-tree":
+    case "no-animals": {
+      const { entity } = subtree;
+      const saved = entity.isActive;
+      undo.push(() => {
+        entity.isActive = saved;
+      });
+      entity.isActive = false;
+      break;
+    }
     case "no-grass": {
       const saved = pop.isDetailCategoryVisible("grass");
       undo.push(() => pop.setDetailCategoryVisible("grass", saved));
@@ -718,6 +764,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
   const gl = canvas.getContext("webgl2");
   const device = gl ? null : (renderer.device ?? state.devices.at(-1));
   if (!gl && !device) throw Error("No active WebGL2 or WebGPU device.");
+  const subtree = diagnosticSubtree(context, world, variant);
   const timer =
     mode === "gpu"
       ? gl
@@ -728,7 +775,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
           ? nativePassTimer(device)
           : nativeTimer(device)
       : null;
-  const before = status(context, world),
+  const before = status(context, world, subtree),
     undo = [];
   const cpu = [],
     intervals = [],
@@ -759,7 +806,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
       canvasHeight = canvas.height;
     undo.push(() => engine.canvas.setResolution(canvasWidth, canvasHeight));
     engine.canvas.setResolution(width, height);
-    ablate(context, world, variant, undo);
+    ablate(context, world, variant, undo, subtree);
     // Pin the simulation clock to frame index. CPU, RAF and GPU timers still use their native clocks.
     const clock = engine.time;
     const values = ["_deltaTime", "_actualDeltaTime", "_elapsedTime", "_actualElapsedTime", "_lastSystemTime"];
@@ -788,7 +835,7 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
     let previous,
       skipNextInterval = true;
     const update = () => engine.update();
-    const effects = status(context, world);
+    const effects = status(context, world, subtree);
     let captured;
     for (let i = 0; i < frames; ++i) {
       if (options.profileCpu && i > 0 && checkpoints.has(i) && !checkpoints.has(i - 1)) {
@@ -824,6 +871,9 @@ export async function measureSeedTemplate(context = globalThis.__seedBenchmarkCo
         if (mode === "cpu" && !inspect) cpu.push(performance.now() - start);
       }
       if (inspect) {
+        if (subtree && (subtree.entity.destroyed || !subtree.entity.parent || subtree.entity.isActiveInHierarchy)) {
+          throw Error("Expected the diagnostic subtree to stay attached and hidden: " + subtree.path);
+        }
         const actual = triple(transform.worldPosition);
         if (
           actual.some((v, j) => Math.abs(v - position[j]) > 0.02) ||
