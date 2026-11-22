@@ -1,5 +1,9 @@
 import { Matrix, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
-import { normalizeShaderIncludeKey } from "@galacean/engine-design";
+import {
+  normalizeShaderIncludeKey,
+  type IShaderInstanceLayout,
+  type IShaderUniformSelection
+} from "@galacean/engine-design";
 import { Logger } from "../base/Logger";
 import { Engine } from "../Engine";
 import { Renderer } from "../Renderer";
@@ -7,11 +11,12 @@ import { ConstantBufferBindingPoint } from "./enums/ConstantBufferBindingPoint";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
 import { ShaderBlockProperty } from "./ShaderBlockProperty";
 import { ShaderProperty } from "./ShaderProperty";
+import { Std140FieldWriter } from "./Std140FieldWriter";
 
 /**
  * Shader registry and GLSL utilities. Holds the `#include` lookup table
- * the runtime preprocessor reads and the GPU-instancing UBO injector that
- * `ShaderPass` runs over compiled GLSL source.
+ * the runtime preprocessor reads and the instancing compatibility path for
+ * compiled shaders that predate uniform declaration metadata.
  */
 export class ShaderFactory {
   static readonly RENDERER_INSTANCE_BLOCK_NAME = "RendererInstanceData";
@@ -168,6 +173,48 @@ mat3 _normalMatFromModel(mat3 m) {
    */
   static unRegisterInclude(includeName: string): void {
     ShaderFactory.unregisterInclude(includeName);
+  }
+
+  /** Resolve compiler-generated field layouts to CPU upload operations once at program link. */
+  static createInstanceLayout(
+    layout: IShaderInstanceLayout,
+    vertexSites: readonly IShaderUniformSelection[],
+    fragmentSites: readonly IShaderUniformSelection[]
+  ): InstanceBufferLayout {
+    const instanceFields = layout.fields.map(({ name, type, offset, worldTransform }) => {
+      const writer = worldTransform ? null : new Std140FieldWriter(type);
+      return {
+        property: ShaderProperty.getByName(name),
+        type,
+        offset,
+        offsetInElements: offset / 4,
+        useIntView: writer?.useIntView ?? false,
+        worldTransform: worldTransform ?? false,
+        pack: writer ? writer.write.bind(writer) : ShaderFactory._packFuncMap.mat3x4
+      };
+    });
+    const headerFields: NonNullable<InstanceBufferLayout["headerFields"]> = [];
+    function addCameraMatrix(name: string, offset: number): void {
+      if (offset < 0) return;
+      // The same public name can be authored in a strict Scene block, possibly in the opposite stage.
+      const inScene = ({ site }: IShaderUniformSelection): boolean =>
+        site.kind === "explicitMatrix" && site.structName === "Scene" && site.name === name;
+      headerFields.push({
+        property: ShaderProperty.getByName(name),
+        offsetInElements: offset / 4,
+        sceneOnly: vertexSites.some(inScene) || fragmentSites.some(inScene)
+      });
+    }
+    addCameraMatrix("camera_ViewMat", layout.viewOffset);
+    addCameraMatrix("camera_VPMat", layout.viewProjectionOffset);
+    return {
+      bindingName: layout.bindingName,
+      instanceFields,
+      structSize: layout.structSize,
+      instanceMaxCount: layout.instanceMaxCount,
+      headerBytes: layout.headerBytes,
+      headerFields
+    };
   }
 
   /**
@@ -383,6 +430,7 @@ export interface InstanceFieldInfo {
   /** offset / 4, precomputed to avoid repeated division in upload loop */
   offsetInElements: number;
   useIntView: boolean;
+  worldTransform?: boolean;
   pack: InstancePackFunc;
 }
 
@@ -390,9 +438,12 @@ export interface InstanceFieldInfo {
  * @internal
  */
 export interface InstanceBufferLayout {
+  bindingName?: string;
   instanceFields: InstanceFieldInfo[];
   instanceMaxCount: number;
   structSize: number;
+  headerBytes?: number;
+  headerFields?: { property: ShaderProperty; offsetInElements: number; sceneOnly: boolean }[];
 }
 
 type InstancePackFunc = (view: Float32Array | Int32Array, offset: number, value: any) => void;

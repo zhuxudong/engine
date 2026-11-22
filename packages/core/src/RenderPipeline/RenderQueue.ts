@@ -2,7 +2,6 @@ import { SpriteMaskInteraction } from "../2d/enums/SpriteMaskInteraction";
 import { BasicResources, RenderStateElementMap } from "../BasicResources";
 import { Utils } from "../Utils";
 import { RenderQueueType, Shader } from "../shader";
-import { ConstantBufferBindingPoint } from "../shader/enums/ConstantBufferBindingPoint";
 import { ShaderMacroCollection } from "../shader/ShaderMacroCollection";
 import { BatcherManager } from "./BatcherManager";
 import { InstanceBuffer } from "./InstanceBuffer";
@@ -192,7 +191,10 @@ export class RenderQueue {
             program.uploadUnGroupTextures();
           }
         }
-        program.uploadSharedUniforms(sceneData, cameraData, rendererData, materialData, renderElementShaderData);
+        const layout = program._instanceLayout;
+        if (!isInstanced || layout) {
+          program.uploadSharedUniforms(sceneData, cameraData, rendererData, materialData, renderElementShaderData);
+        }
 
         // Apply render state
         renderState._applyStates(
@@ -205,7 +207,6 @@ export class RenderQueue {
         );
 
         // Draw
-        const layout = program._instanceLayout;
         if (isInstanced && layout) {
           const { primitive, subPrimitive, instancedRenderers } = curElement;
           const totalCount = instancedRenderers.length;
@@ -213,14 +214,26 @@ export class RenderQueue {
           const instanceBuffer = engine._batcherManager.instanceBuffer;
 
           instanceBuffer.setLayout(layout);
-          rhi.bindUniformBufferBase(ConstantBufferBindingPoint.RendererInstance, instanceBuffer.buffer._platformBuffer);
           for (let start = 0; start < totalCount; start += maxCount) {
             const count = Math.min(maxCount, totalCount - start);
-            instanceBuffer.upload(instancedRenderers, start, count);
+            instanceBuffer.upload(instancedRenderers, start, count, context, materialData, renderElementShaderData);
             primitive.instanceCount = count;
             rhi.drawPrimitive(primitive, subPrimitive, program);
           }
           primitive.instanceCount = 0;
+        } else if (isInstanced) {
+          // A single instance record may exceed the device's block size. The pass
+          // selected its ordinary variant; each renderer now needs its own uniforms.
+          const renderers = curElement.instancedRenderers;
+          for (let k = 0; k < renderers.length; ++k) {
+            const renderer = renderers[k];
+            renderer._updateTransformShaderData(context, false);
+            const data = renderer.shaderData;
+            program.uploadAll(program.rendererUniformBlock, data);
+            program.uploadSharedUniforms(sceneData, cameraData, data, materialData, renderElementShaderData);
+            rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
+            program._uploadRendererId = renderer.instanceId;
+          }
         } else {
           rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
         }

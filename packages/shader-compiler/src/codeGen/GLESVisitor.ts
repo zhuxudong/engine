@@ -1,4 +1,4 @@
-import type { IShaderInfo, IShaderUniformBlock } from "@galacean/engine-design";
+import type { IShaderInfo, IShaderInstancingNames, IShaderUniformBlock } from "@galacean/engine-design";
 import type { IPoolElement } from "@galacean/engine-core";
 import { BaseToken } from "@galacean/engine-shader-parser/internal";
 import { EShaderStage } from "@galacean/engine-shader-parser/internal";
@@ -40,6 +40,8 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
   private readonly _escapedDeclarations = new Map<BaseToken, string>();
   private _vertexOutputNames?: Record<string, string>;
   private _uniformBlocks?: Set<IShaderUniformBlock>;
+  private readonly _uniformStructs = new Set<ASTNode.StructSpecifier>();
+  private _uniformStruct?: ASTNode.StructSpecifier;
   private readonly _fragmentVaryingProps = new Set<StructProp>();
   private readonly _globalInputs = new Map<EShaderStage, VarSymbol[]>();
   private readonly _inputHelperBodies = new Map<TreeNode, string>();
@@ -110,8 +112,12 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       });
     }
     for (const precision of data.globalPrecisions) {
-      out.push({ text: precision.codeGen(this), index: precision.location.start.index });
+      out.push({ text: this._precisionSite(precision), index: precision.location.start.index });
     }
+  }
+
+  private _precisionSite(precision: ASTNode.PrecisionSpecifier): string {
+    return ShaderInstructionEncoder.uniformSite(precision.codeGen(this), "precision", "precision", "");
   }
 
   /**
@@ -158,6 +164,22 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       context.registerStructVar(variable, role, EShaderStage.FRAGMENT);
     });
     if (hasUnsafeIdentifier) this._collectEscapedDeclarations(node);
+
+    shaderData.symbolTable.forEach((symbol) => {
+      if (
+        symbol instanceof VarSymbol &&
+        symbol.isUniform &&
+        symbol.astNode instanceof ASTNode.VariableDeclaration &&
+        !context.getStructVarRole([symbol])
+      ) {
+        for (const struct of symbol.astNode.type.typeSpecifier.structDependencies) this._uniformStructs.add(struct);
+      }
+    });
+    for (const struct of this._uniformStructs) {
+      for (const member of struct.propList) {
+        for (const nested of member.typeInfo.structDeclarations) this._uniformStructs.add(nested);
+      }
+    }
 
     this._globalInputs.clear();
     for (const [stage, variables] of [
@@ -231,12 +253,26 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
         );
       }
       this._fragmentVaryingProps.clear();
-      const fragment = this._fragmentMain(coreInfo.fragmentEntry, shaderData, outerGlobalMacroDeclarations);
-      const vertex = this._vertexMain(coreInfo.vertexEntry, shaderData, outerGlobalMacroDeclarations);
+      let fragment = this._fragmentMain(coreInfo.fragmentEntry, shaderData, outerGlobalMacroDeclarations);
+      let vertex = this._vertexMain(coreInfo.vertexEntry, shaderData, outerGlobalMacroDeclarations);
+      // Preserve unsplit Text instructions for stages without loose declarations.
+      // These sites only describe the precision and shapes of those declarations.
+      // eslint-disable-next-line no-control-regex -- Match only declaration metadata emitted by ShaderInstructionEncoder.
+      const shapeSite = /\x01(?:constant|precision|structMember),[^\x01]*\x01([^\x01]*)\x01\/\x01/g;
+      if (!fragment.includes("\x01uniform,")) fragment = fragment.replace(shapeSite, "$1");
+      if (!vertex.includes("\x01uniform,")) vertex = vertex.replace(shapeSite, "$1");
+      // eslint-disable-next-line no-control-regex -- Numeric uniform declaration marker.
+      const numericSite = /\x01uniform,\w+,(?![iu]?sampler)/;
+      if (!numericSite.test(fragment)) {
+        const entry = ShaderInstructionEncoder.uniformSite("void main() {", "entry", "main", "void");
+        fragment = fragment.split(entry).join("void main() {");
+        if (!numericSite.test(vertex)) vertex = vertex.split(entry).join("void main() {");
+      }
       return {
         vertex,
         fragment,
         vertexOutputNames: this._vertexOutputNames,
+        uniformPlan: { vertex: [], fragment: [], instancing: this._instancingNames() },
         uniformBlocks:
           this._uniformBlocks &&
           Array.from(this._uniformBlocks, (layout) => ({ ...layout, bindingName: this._uniformBlockName(layout) }))
@@ -244,6 +280,8 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
     } finally {
       this._sourceIR = undefined;
       this._uniformBlocks = undefined;
+      this._uniformStructs.clear();
+      this._uniformStruct = undefined;
       this._outerMacroDeclarations = [];
       this._globalInputs.clear();
       this._declarationOwners.clear();
@@ -471,7 +509,12 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
   override visitStructSpecifier(node: ASTNode.StructSpecifier): string {
     const context = this.context;
     const role = context.getStructRole([node]);
-    if (!role) return super.visitStructSpecifier(node);
+    if (!role) {
+      this._uniformStruct = this._uniformStructs.has(node) ? node : undefined;
+      const text = super.visitStructSpecifier(node);
+      this._uniformStruct = undefined;
+      return text;
+    }
     const typeName = this._interfaceTypeName(node);
     const memberCode = (emit: (prop: StructProp) => string) => {
       const segments: ICodeSegment[] = node.macroExpressions.map((item) => ({
@@ -557,7 +600,23 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       for (const child of children)
         if (child instanceof TreeNode && typeof (child as ASTNode.ExpressionAstNode).type === "string") observe(child);
     }
-    return super.defaultCodeGen(children);
+    const text = super.defaultCodeGen(children);
+    if (
+      this._uniformStruct &&
+      parent instanceof ASTNode.StructDeclaration &&
+      children.length >= 3 &&
+      parent.props.length
+    ) {
+      const first = parent.props[0];
+      return ShaderInstructionEncoder.uniformSite(
+        text,
+        "structMember",
+        first.ident.lexeme,
+        first.typeInfo.typeLexeme,
+        this._uniformStruct.ident!.lexeme
+      );
+    }
+    return text;
   }
 
   private _observeWholeStruct(struct: ASTNode.StructSpecifier): void {
@@ -574,6 +633,17 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       return `${node.returnType.codeGen(this)} ${this.context.names.allocate("entry-main", "entry_main")}(`;
     }
     return super.visitFunctionHeader(node);
+  }
+
+  private _instancingNames(): IShaderInstancingNames {
+    const names = this.context.names;
+    return {
+      initialize: names.allocate("instance:initialize", "gs_initInstance"),
+      index: names.allocate("instance:index", "gs_instanceIndex"),
+      block: names.allocate("instance:block", "gs_InstanceBlock"),
+      struct: names.allocate("instance:struct", "gs_Instance"),
+      instance: names.allocate("instance:object", "gs_instanceBuffer")
+    };
   }
 
   override visitFunctionIdentifier(node: ASTNode.FunctionIdentifier): string {
@@ -615,7 +685,8 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       statement = `${this.fragmentColorOutput()} = ${call};`;
     } else statement = `${call};`;
     const inputs = this._initializeGlobalInputs();
-    return `${definition}\nvoid main() {\n${inputs.join("\n")}\n${parameters.join("\n")}\n${statement} }`;
+    const entry = ShaderInstructionEncoder.uniformSite("void main() {", "entry", "main", "void");
+    return `${definition}\n${entry}\n${inputs.join("\n")}\n${parameters.join("\n")}\n${statement} }`;
   }
 
   private _initializeGlobalInputs(): string[] {
@@ -755,9 +826,13 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
         name = this.context.names.allocate(`uniformBlock:${layout.name}.${name}`, `gs_${layout.name}_${name}`);
       }
       const precision = type === "bool" || type.startsWith("bvec") ? "" : "highp ";
-      return `  ${precision}${type} ${name}${arrayLength ? `[${arrayLength}]` : ""};`;
+      const text = `  ${precision}${type} ${name}${arrayLength ? `[${arrayLength}]` : ""};`;
+      return type === "mat4" && !arrayLength && (name === "camera_ViewMat" || name === "camera_VPMat")
+        ? ShaderInstructionEncoder.uniformSite(text, "explicitMatrix", name, type, layout.name)
+        : text;
     });
-    let text = `layout(std140) uniform ${this._uniformBlockName(layout)} {\n${fields.join("\n")}\n};`;
+    const bindingName = this._uniformBlockName(layout);
+    let text = `layout(std140) uniform ${bindingName} {\n${fields.join("\n")}\n};`;
     if (this._declarationOwners.size) {
       const owners = referenced.map((member) => this._declarationOwners.get(member)!);
       text =
@@ -1195,7 +1270,7 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
       const child = children[i];
       if (child instanceof ASTNode.PrecisionSpecifier) {
         out.push({
-          text: child.codeGen(this),
+          text: this._precisionSite(child),
           index: child.location.start.index
         });
       } else if (child instanceof ASTNode.FunctionDefinition) {
@@ -1277,6 +1352,14 @@ export abstract class GLESVisitor extends CodeGenVisitor implements ShaderBacken
   }
 
   private _declaration(text: string, node: TreeNode, activate = true): string {
+    if (text && node instanceof ASTNode.VariableDeclaration) {
+      const { identifier, typeInfo } = node.declarator;
+      if (text.startsWith("uniform ")) {
+        text = ShaderInstructionEncoder.uniformSite(text, "uniform", identifier.lexeme, typeInfo.typeLexeme);
+      } else if (node.declarator.isConst) {
+        text = ShaderInstructionEncoder.uniformSite(text, "constant", identifier.lexeme, typeInfo.typeLexeme);
+      }
+    }
     const initializer = text && this._inputHelperBodies.get(node);
     return ShaderInstructionEncoder.declaration(
       initializer ? `${text}\n${initializer}` : text,

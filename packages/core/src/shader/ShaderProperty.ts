@@ -35,6 +35,7 @@ export class ShaderProperty {
   static _getBuiltinGlobal(name: string, group: ShaderDataGroup.Camera | ShaderDataGroup.Scene): ShaderProperty {
     const property = ShaderProperty.getByName(name);
     property._builtinGlobalGroup = group;
+    property._requiresSharedInstanceValue = true;
     return property;
   }
 
@@ -44,6 +45,8 @@ export class ShaderProperty {
   _groups: ShaderDataGroup = ShaderDataGroup.None;
   /** @internal */
   _builtinGlobalGroup: ShaderDataGroup = ShaderDataGroup.None;
+  /** @internal A renderer override for this field remains shared by an entire instanced draw. */
+  _requiresSharedInstanceValue: boolean;
   /** @internal */
   _types: ShaderPropertyType = ShaderPropertyType.None;
 
@@ -62,6 +65,7 @@ export class ShaderProperty {
    */
   constructor(name: string) {
     this.name = name;
+    this._requiresSharedInstanceValue = name.includes(".") || name.includes("[");
     this._uniqueId = ShaderProperty._propertyNameCounter++;
   }
 

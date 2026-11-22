@@ -1,11 +1,11 @@
-import type { IShaderUniformBlock, IShaderUniformBlockMember } from "@galacean/engine-design";
-import type { Color, Matrix, Vector4 } from "@galacean/engine-math";
+import type { IShaderUniformBlock } from "@galacean/engine-design";
 import type { Engine } from "../Engine";
 import { Buffer } from "../graphic/Buffer";
 import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
 import { BufferUsage } from "../graphic/enums/BufferUsage";
 import { SetDataOptions } from "../graphic/enums/SetDataOptions";
-import { ShaderData, type ShaderPropertyValueType } from "./ShaderData";
+import { ShaderData } from "./ShaderData";
+import { Std140FieldWriter } from "./Std140FieldWriter";
 import { ShaderProperty } from "./ShaderProperty";
 import { ShaderDataGroup } from "./enums/ShaderDataGroup";
 
@@ -17,6 +17,7 @@ export class GlobalUniformBlock {
     // different layouts with the same block name, including the same total byte length.
     const key = JSON.stringify([
       layout.name,
+      binding,
       layout.byteLength,
       ...layout.members.map((m) => [m.name, m.type, m.offset, m.arrayLength, m.arrayStride, m.matrixStride])
     ]);
@@ -34,6 +35,8 @@ export class GlobalUniformBlock {
   private readonly _group: ShaderDataGroup;
   private readonly _staging: Uint32Array;
   private readonly _previous: Uint32Array;
+  private readonly _materialRanges?: { words: Uint32Array; offset: number }[];
+  private _nextMaterialRange = 0;
   private readonly _stride: number;
   private readonly _buffer: Buffer;
   private _offset = -1;
@@ -54,8 +57,27 @@ export class GlobalUniformBlock {
     const integers = new Int32Array(data);
     this._staging = new Uint32Array(data);
     this._previous = new Uint32Array(size / 4);
-    this._group = layout.name === "Scene" ? ShaderDataGroup.Scene : ShaderDataGroup.Camera;
-    this._fields = layout.members.map((member) => new UniformBlockField(member, floats, integers, this._group));
+    // Retain at most 1 KiB of extra packed values for small automatically grouped blocks.
+    if (layout.name === "Auto" && size <= 128) {
+      this._materialRanges = Array.from({ length: 8 }, () => ({ words: new Uint32Array(size / 4), offset: -1 }));
+    }
+    this._group =
+      layout.name === "Scene"
+        ? ShaderDataGroup.Scene
+        : layout.name === "Camera"
+          ? ShaderDataGroup.Camera
+          : ShaderDataGroup.None;
+    this._fields = layout.members.map(({ name, type, arrayLength, arrayStride, matrixStride, offset }) => {
+      const writer = new Std140FieldWriter(type, arrayLength, arrayStride, matrixStride);
+      const property = ShaderProperty.getByName(name);
+      return {
+        property,
+        overrideGroups: property._builtinGlobalGroup === this._group ? ~this._group : 0,
+        writer,
+        view: writer.useIntView ? integers : floats,
+        offset: offset / 4
+      };
+    });
     const alignment = rhi.uniformBufferOffsetAlignment;
     this._stride = Math.ceil(size / alignment) * alignment;
     const slots = Math.max(2, Math.floor(16384 / this._stride));
@@ -64,45 +86,33 @@ export class GlobalUniformBlock {
   }
 
   bind(
-    scene: ShaderData,
-    camera: ShaderData,
+    scene: ShaderData | undefined,
+    camera: ShaderData | undefined,
     renderer?: ShaderData,
     material?: ShaderData,
     element?: ShaderData
   ): void {
     const fields = this._fields;
-    const values = (this._group === ShaderDataGroup.Scene ? scene : camera)._propertyValueMap;
+    const values = (this._group === ShaderDataGroup.Scene ? scene : camera)?._propertyValueMap;
+    let groups = ShaderDataGroup.None;
     for (let i = 0; i < fields.length; ++i) {
       const field = fields[i];
       const property = field.property;
       const id = property._uniqueId;
+      groups |= property._groups;
       const value =
-        property._groups & field.overrideGroups
-          ? ShaderData._findValue(id, scene, camera, renderer, material, element)
-          : values[id];
-      field.write(value);
+        this._group === ShaderDataGroup.None || property._groups & field.overrideGroups
+          ? ShaderData._findValue(id, scene, camera, renderer, material, element, property._groups)
+          : values?.[id];
+      field.writer.write(field.view, field.offset, value);
     }
 
-    const staging = this._staging;
-    const buffer = this._buffer;
-    if (this._offset < 0 || buffer.isContentLost || !this._matchesPrevious()) {
-      let next = this._offset < 0 ? 0 : this._offset + this._stride;
-      let options = SetDataOptions.None;
-      if (next >= buffer.byteLength) {
-        // Orphan the old backing store before reusing offsets, including when an
-        // application calls Camera.render repeatedly without advancing engine time.
-        next = 0;
-        options = SetDataOptions.Discard;
-      }
-      buffer.setData(staging, next, 0, staging.length, options);
-      this._previous.set(staging);
-      this._offset = next;
-    }
+    const offset = this._getRange(groups === ShaderDataGroup.Material);
     this._engine._hardwareRenderer.bindUniformBufferRange(
       this._binding,
-      buffer._platformBuffer,
-      this._offset,
-      staging.byteLength
+      this._buffer._platformBuffer,
+      offset,
+      this._staging.byteLength
     );
   }
 
@@ -113,9 +123,42 @@ export class GlobalUniformBlock {
     }
   }
 
-  private _matchesPrevious(): boolean {
+  private _getRange(materialOnly: boolean): number {
+    const { _buffer: buffer, _staging: staging, _materialRanges: ranges, _offset: last } = this;
+    const contentLost = buffer.isContentLost;
+    if (!contentLost && last >= 0) {
+      if (this._matches(this._previous)) return last;
+      if (materialOnly && ranges) {
+        for (let i = 0; i < ranges.length; ++i) {
+          const range = ranges[i];
+          if (range.offset < 0) break;
+          if (this._matches(range.words)) return range.offset;
+        }
+      }
+    }
+
+    let next = last < 0 ? 0 : last + this._stride;
+    const discard = next >= buffer.byteLength;
+    if (discard) next = 0;
+    if ((discard || contentLost) && ranges) {
+      // All offsets refer to the old store, even when its contents match the current values.
+      for (let i = 0; i < ranges.length; ++i) ranges[i].offset = -1;
+      this._nextMaterialRange = 0;
+    }
+    buffer.setData(staging, next, 0, staging.length, discard ? SetDataOptions.Discard : SetDataOptions.None);
+    this._previous.set(staging);
+    this._offset = next;
+    if (materialOnly && ranges) {
+      const range = ranges[this._nextMaterialRange];
+      range.words.set(staging);
+      range.offset = next;
+      this._nextMaterialRange = (this._nextMaterialRange + 1) % ranges.length;
+    }
+    return next;
+  }
+
+  private _matches(previous: Uint32Array): boolean {
     const staging = this._staging;
-    const previous = this._previous;
     for (let i = 0; i < staging.length; ++i) {
       if (staging[i] !== previous[i]) return false;
     }
@@ -123,94 +166,11 @@ export class GlobalUniformBlock {
   }
 }
 
-/** Caches word offsets and ShaderData property IDs at link time. */
-class UniformBlockField {
-  private static readonly _components = [0, 0, 0, 0];
-  readonly property: ShaderProperty;
-  readonly overrideGroups: number;
-  private readonly _view: Float32Array | Int32Array;
-  private readonly _offset: number;
-  private readonly _arrayCount: number;
-  private readonly _arrayStride: number;
-  private readonly _columns: number;
-  private readonly _rows: number;
-  private readonly _matrixStride: number;
-  private readonly _contiguousLength: number;
-
-  constructor(member: IShaderUniformBlockMember, floats: Float32Array, integers: Int32Array, group: ShaderDataGroup) {
-    const { type } = member;
-    const matrix = /^mat([234])(?:x([234]))?$/.exec(type);
-    const vector = /^[iub]?vec([234])$/.exec(type);
-    if (!matrix && !vector && !/^(float|int|uint|bool)$/.test(type)) {
-      throw new Error(`Unsupported uniform block member type ${type}.`);
-    }
-    this.property = ShaderProperty.getByName(member.name);
-    this.overrideGroups = this.property._builtinGlobalGroup === group ? ~group : 0;
-    this._view = /^[iub]/.test(type) ? integers : floats;
-    this._offset = member.offset / 4;
-    this._arrayCount = member.arrayLength || 1;
-    this._arrayStride = member.arrayStride / 4;
-    this._matrixStride = member.matrixStride / 4;
-    this._columns = matrix ? Number(matrix[1]) : 1;
-    this._rows = matrix ? Number(matrix[2] || matrix[1]) : vector ? Number(vector[1]) : 1;
-    const components = this._columns * this._rows;
-    this._contiguousLength =
-      (!matrix || this._matrixStride === this._rows) && (!member.arrayLength || this._arrayStride === components)
-        ? components * this._arrayCount
-        : 0;
-  }
-
-  write(value: ShaderPropertyValueType | undefined): void {
-    if (typeof value === "number") {
-      this._writeVector(value, 0, 0, 0);
-    } else if (value && "x" in value) {
-      const v = value as Vector4;
-      this._writeVector(v.x, v.y, v.z ?? 0, v.w ?? 0);
-    } else if (value && "r" in value) {
-      const color = value as Color;
-      this._writeVector(color.r, color.g, color.b, color.a);
-    } else {
-      // Matrix.elements and ShaderData arrays contain tightly packed column-major values.
-      const source =
-        value && "elements" in value ? (value as Matrix).elements : ArrayBuffer.isView(value) ? value : null;
-      this._writeArray(source);
-    }
-  }
-
-  private _writeVector(x: number, y: number, z: number, w: number): void {
-    if (this._arrayStride === 0 && this._columns === 1) {
-      const view = this._view;
-      const offset = this._offset;
-      view[offset] = x;
-      if (this._rows > 1) view[offset + 1] = y;
-      if (this._rows > 2) view[offset + 2] = z;
-      if (this._rows > 3) view[offset + 3] = w;
-      return;
-    }
-    const components = UniformBlockField._components;
-    components[0] = x;
-    components[1] = y;
-    components[2] = z;
-    components[3] = w;
-    this._writeArray(components);
-  }
-
-  private _writeArray(source: ArrayLike<number> | null): void {
-    const view = this._view;
-    const offset = this._offset;
-    if (source && source.length === this._contiguousLength && source.length > 0) {
-      view.set(source, offset);
-      return;
-    }
-    let index = 0;
-    for (let element = 0; element < this._arrayCount; ++element) {
-      const base = offset + element * this._arrayStride;
-      for (let col = 0; col < this._columns; ++col) {
-        const column = base + col * this._matrixStride;
-        for (let row = 0; row < this._rows; ++row) {
-          view[column + row] = source?.[index++] ?? 0;
-        }
-      }
-    }
-  }
+/** Resolved once at program link. */
+interface UniformBlockField {
+  property: ShaderProperty;
+  overrideGroups: number;
+  writer: Std140FieldWriter;
+  view: Float32Array | Int32Array;
+  offset: number;
 }

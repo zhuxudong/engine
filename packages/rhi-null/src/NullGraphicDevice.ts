@@ -14,6 +14,10 @@ import { NullTexture2D, NullTexture2DArray, NullTextureCube } from "./NullTextur
 export class NullGraphicDevice implements IHardwareRenderer {
   readonly supportsRendering = false;
   readonly maxUniformBlockSize = 0;
+  readonly maxUniformBufferBindings = 0;
+  readonly maxVertexUniformBlocks = 0;
+  readonly maxFragmentUniformBlocks = 0;
+  readonly resolveShaderConstant = (): undefined => undefined;
   readonly uniformBufferOffsetAlignment = 1;
   readonly _options = {};
   readonly capability = {

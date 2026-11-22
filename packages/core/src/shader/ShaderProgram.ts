@@ -1,4 +1,4 @@
-import type { IShaderUniformBlock } from "@galacean/engine-design";
+import type { IShaderUniformBlock, IShaderUniformVariable } from "@galacean/engine-design";
 import type { IHardwareRenderer, IPlatformShaderProgram } from "../renderingHardwareInterface";
 import { Vector2, Vector3, Vector4 } from "@galacean/engine-math";
 import { Engine } from "../Engine";
@@ -20,6 +20,7 @@ import { InstanceBufferLayout, ShaderFactory } from "./ShaderFactory";
  */
 export class ShaderProgram implements IPlatformShaderProgram {
   private static _counter: number = 0;
+  private static _legacyUniformTypes?: Record<number, string>;
 
   private static _addLineNum(str: string) {
     const lines = str.split("\n");
@@ -71,8 +72,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
   private _glProgram: WebGLProgram | null;
   private _activeTextureUint: number = 0;
   private _groupConflictVersion: number = 0;
-  private _sceneBlock?: GlobalUniformBlock;
-  private _cameraBlock?: GlobalUniformBlock;
+  private _uniformBlocks?: GlobalUniformBlock[];
 
   /**
    * Whether this shader program is valid.
@@ -86,7 +86,9 @@ export class ShaderProgram implements IPlatformShaderProgram {
     vertexSource: string,
     fragmentSource: string,
     transformFeedbackVaryings?: string[],
-    uniformBlocks?: readonly IShaderUniformBlock[]
+    uniformBlocks?: readonly IShaderUniformBlock[],
+    instanceBindingName?: string,
+    looseUniforms?: readonly IShaderUniformVariable[]
   ) {
     this._engine = engine;
     this._gl = engine._hardwareRenderer.gl;
@@ -96,7 +98,14 @@ export class ShaderProgram implements IPlatformShaderProgram {
       this._isValid = true;
       try {
         if (uniformBlocks) this._bindGlobalBlockLayouts(uniformBlocks);
-        this._recordLocation();
+        this._recordLocation(looseUniforms);
+        if (instanceBindingName) {
+          engine._hardwareRenderer.tryBindUniformBlock(
+            this._glProgram,
+            instanceBindingName,
+            ConstantBufferBindingPoint.RendererInstance
+          );
+        }
       } catch (error) {
         this.destroy();
         throw error;
@@ -161,8 +170,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
     materialData?: ShaderData,
     renderElementData?: ShaderData
   ): void {
-    this._sceneBlock?.bind(sceneData, cameraData, rendererData, materialData, renderElementData);
-    this._cameraBlock?.bind(sceneData, cameraData, rendererData, materialData, renderElementData);
+    this.bindUniformBlocks(sceneData, cameraData, rendererData, materialData, renderElementData);
     const { constUniforms, textureUniforms } = this.multiGroupUniformBlock;
     for (let i = 0, n = constUniforms.length; i < n; i++) {
       const uniform = constUniforms[i];
@@ -187,6 +195,20 @@ export class ShaderProgram implements IPlatformShaderProgram {
         renderElementData
       );
       this._uploadTexture(uniform, value);
+    }
+  }
+
+  /** Bind the compiler-selected ranges for a draw or a renderer-only transform-feedback step. */
+  bindUniformBlocks(
+    scene: ShaderData | undefined,
+    camera: ShaderData | undefined,
+    renderer?: ShaderData,
+    material?: ShaderData,
+    element?: ShaderData
+  ): void {
+    const blocks = this._uniformBlocks;
+    if (blocks) {
+      for (let i = 0; i < blocks.length; ++i) blocks[i].bind(scene, camera, renderer, material, element);
     }
   }
 
@@ -239,9 +261,10 @@ export class ShaderProgram implements IPlatformShaderProgram {
    * Destroy this shader program.
    */
   destroy(): void {
-    this._sceneBlock?.release();
-    this._cameraBlock?.release();
-    this._sceneBlock = this._cameraBlock = undefined;
+    if (this._uniformBlocks) {
+      for (const block of this._uniformBlocks) block.release();
+      this._uniformBlocks = undefined;
+    }
     const gl = this._gl;
     this._glProgram && gl.deleteProgram(this._glProgram);
   }
@@ -385,21 +408,18 @@ export class ShaderProgram implements IPlatformShaderProgram {
   /**
    * record the location of uniform/attribute.
    */
-  private _recordLocation(): void {
+  private _recordLocation(looseUniforms?: readonly IShaderUniformVariable[]): void {
     const gl = this._gl;
     const program = this._glProgram!;
-    const uniformInfos = this._getUniformInfos();
+    const uniformInfos = looseUniforms ?? this._getUniformInfos();
     const attributeInfos = this._getAttributeInfos();
     const basicResources = this._engine._basicResources;
 
-    uniformInfos.forEach(({ name, size, type }) => {
-      let isArray = false;
+    uniformInfos.forEach(({ name, arrayLength, type }) => {
+      // Numeric loose arrays can defer a GLSL-only constant bound to the driver.
+      const isArray = arrayLength !== 0;
+      const size = arrayLength;
       let isTexture = false;
-
-      if (name.indexOf("[0]") > 0) {
-        name = name.substr(0, name.length - 3);
-        isArray = true;
-      }
 
       const location = gl.getUniformLocation(program, name);
       // UBO members have no individual location, skip them
@@ -412,7 +432,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
       shaderUniform.location = location;
 
       switch (type) {
-        case gl.FLOAT:
+        case "float":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload1fv;
           } else {
@@ -420,7 +440,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = 0;
           }
           break;
-        case gl.FLOAT_VEC2:
+        case "vec2":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload2fv;
           } else {
@@ -428,7 +448,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector2(0, 0);
           }
           break;
-        case gl.FLOAT_VEC3:
+        case "vec3":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload3fv;
           } else {
@@ -436,7 +456,7 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector3(0, 0, 0);
           }
           break;
-        case gl.FLOAT_VEC4:
+        case "vec4":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload4fv;
           } else {
@@ -444,8 +464,8 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector4(0, 0, 0, 0);
           }
           break;
-        case gl.BOOL:
-        case gl.INT:
+        case "bool":
+        case "int":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload1iv;
           } else {
@@ -453,8 +473,8 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = 0;
           }
           break;
-        case gl.BOOL_VEC2:
-        case gl.INT_VEC2:
+        case "bvec2":
+        case "ivec2":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload2iv;
           } else {
@@ -462,8 +482,8 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector2(0, 0);
           }
           break;
-        case gl.BOOL_VEC3:
-        case gl.INT_VEC3:
+        case "bvec3":
+        case "ivec3":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload3iv;
           } else {
@@ -471,8 +491,8 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector3(0, 0, 0);
           }
           break;
-        case gl.BOOL_VEC4:
-        case gl.INT_VEC4:
+        case "bvec4":
+        case "ivec4":
           if (isArray) {
             shaderUniform.applyFunc = shaderUniform.upload4iv;
           } else {
@@ -480,53 +500,53 @@ export class ShaderProgram implements IPlatformShaderProgram {
             shaderUniform.cacheValue = new Vector4(0, 0, 0);
           }
           break;
-        case gl.FLOAT_MAT2:
+        case "mat2":
           shaderUniform.applyFunc = shaderUniform.uploadMat2;
           break;
-        case gl.FLOAT_MAT3:
+        case "mat3":
           shaderUniform.applyFunc = shaderUniform.uploadMat3;
           break;
-        case gl.FLOAT_MAT4:
+        case "mat4":
           shaderUniform.applyFunc = isArray ? shaderUniform.uploadMat4v : shaderUniform.uploadMat4;
           break;
-        case gl.FLOAT_MAT2x3:
+        case "mat2x3":
           shaderUniform.applyFunc = shaderUniform.uploadMat2x3;
           break;
-        case gl.FLOAT_MAT2x4:
+        case "mat2x4":
           shaderUniform.applyFunc = shaderUniform.uploadMat2x4;
           break;
-        case gl.FLOAT_MAT3x2:
+        case "mat3x2":
           shaderUniform.applyFunc = shaderUniform.uploadMat3x2;
           break;
-        case gl.FLOAT_MAT3x4:
+        case "mat3x4":
           shaderUniform.applyFunc = shaderUniform.uploadMat3x4;
           break;
-        case gl.FLOAT_MAT4x2:
+        case "mat4x2":
           shaderUniform.applyFunc = shaderUniform.uploadMat4x2;
           break;
-        case gl.FLOAT_MAT4x3:
+        case "mat4x3":
           shaderUniform.applyFunc = shaderUniform.uploadMat4x3;
           break;
-        case gl.SAMPLER_2D:
-        case gl.SAMPLER_CUBE:
-        case gl.UNSIGNED_INT_SAMPLER_2D:
-        case gl.SAMPLER_2D_ARRAY:
-        case gl.SAMPLER_2D_SHADOW:
+        case "sampler2D":
+        case "samplerCube":
+        case "usampler2D":
+        case "sampler2DArray":
+        case "sampler2DShadow":
           let defaultTexture: Texture;
           switch (type) {
-            case gl.SAMPLER_2D:
+            case "sampler2D":
               defaultTexture = basicResources.whiteTexture2D;
               break;
-            case gl.SAMPLER_CUBE:
+            case "samplerCube":
               defaultTexture = basicResources.whiteTextureCube;
               break;
-            case gl.UNSIGNED_INT_SAMPLER_2D:
+            case "usampler2D":
               defaultTexture = basicResources.uintWhiteTexture2D;
               break;
-            case gl.SAMPLER_2D_ARRAY:
+            case "sampler2DArray":
               defaultTexture = basicResources.whiteTexture2DArray;
               break;
-            case gl.SAMPLER_2D_SHADOW:
+            case "sampler2DShadow":
               defaultTexture = this._engine._depthTexture2D;
               shaderUniform.textureUseCompareMode = true;
               break;
@@ -569,7 +589,9 @@ export class ShaderProgram implements IPlatformShaderProgram {
       this.attributeLocation[name] = gl.getAttribLocation(program, name);
     });
 
-    // Record uniform block indices and bind binding points
+    // Compiled variants already assigned every block from their layout, including instancing.
+    if (looseUniforms) return;
+    // Record historical uniform block indices and bind legacy binding points.
     const bindingMap = ShaderFactory.uniformBlockBindingMap;
     const blockCount = gl.getProgramParameter(program, gl.ACTIVE_UNIFORM_BLOCKS) ?? 0;
     for (let i = 0; i < blockCount; i++) {
@@ -584,31 +606,60 @@ export class ShaderProgram implements IPlatformShaderProgram {
 
   private _bindGlobalBlockLayouts(layouts: readonly IShaderUniformBlock[]): void {
     const rhi = this._engine._hardwareRenderer;
+    let nextAutoBinding = ConstantBufferBindingPoint.Auto;
+    const used = new Set<number>();
     for (const layout of layouts) {
-      const binding = ConstantBufferBindingPoint[layout.name];
+      const binding = layout.name === "Auto" ? nextAutoBinding++ : ConstantBufferBindingPoint[layout.name];
       if (!rhi.tryBindUniformBlock(this._glProgram!, layout.bindingName ?? layout.name, binding)) continue;
-      if (layout.name === "Scene" ? this._sceneBlock : this._cameraBlock) {
+      if (used.has(binding)) {
         throw new Error(`Duplicate global uniform block '${layout.name}'.`);
       }
-      const shared = GlobalUniformBlock.acquire(this._engine, layout, binding);
-      if (layout.name === "Scene") this._sceneBlock = shared;
-      else this._cameraBlock = shared;
+      used.add(binding);
+      (this._uniformBlocks ??= []).push(GlobalUniformBlock.acquire(this._engine, layout, binding));
     }
   }
 
-  private _getUniformInfos(): WebGLActiveInfo[] {
+  private _getUniformInfos(): IShaderUniformVariable[] {
     const gl = this._gl;
     const program = this._glProgram!;
-    // uniformCount is `null` when context lost.
-    const uniformCount = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) ?? 0;
-
-    const uniformInfos = new Array<WebGLActiveInfo>(uniformCount);
-    for (let i = 0; i < uniformCount; ++i) {
-      const info = gl.getActiveUniform(program, i)!;
-      uniformInfos[i] = info;
+    // Only historical assets require driver enumeration. Their types are converted
+    // once to the same representation as compiler-reflected sampler and loose fields.
+    const types = (ShaderProgram._legacyUniformTypes ??= {
+      [gl.FLOAT]: "float",
+      [gl.FLOAT_VEC2]: "vec2",
+      [gl.FLOAT_VEC3]: "vec3",
+      [gl.FLOAT_VEC4]: "vec4",
+      [gl.BOOL]: "bool",
+      [gl.INT]: "int",
+      [gl.BOOL_VEC2]: "bvec2",
+      [gl.INT_VEC2]: "ivec2",
+      [gl.BOOL_VEC3]: "bvec3",
+      [gl.INT_VEC3]: "ivec3",
+      [gl.BOOL_VEC4]: "bvec4",
+      [gl.INT_VEC4]: "ivec4",
+      [gl.FLOAT_MAT2]: "mat2",
+      [gl.FLOAT_MAT3]: "mat3",
+      [gl.FLOAT_MAT4]: "mat4",
+      [gl.FLOAT_MAT2x3]: "mat2x3",
+      [gl.FLOAT_MAT2x4]: "mat2x4",
+      [gl.FLOAT_MAT3x2]: "mat3x2",
+      [gl.FLOAT_MAT3x4]: "mat3x4",
+      [gl.FLOAT_MAT4x2]: "mat4x2",
+      [gl.FLOAT_MAT4x3]: "mat4x3",
+      [gl.SAMPLER_2D]: "sampler2D",
+      [gl.SAMPLER_CUBE]: "samplerCube",
+      [gl.UNSIGNED_INT_SAMPLER_2D]: "usampler2D",
+      [gl.SAMPLER_2D_ARRAY]: "sampler2DArray",
+      [gl.SAMPLER_2D_SHADOW]: "sampler2DShadow"
+    });
+    const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) ?? 0;
+    const infos: IShaderUniformVariable[] = [];
+    for (let i = 0; i < count; ++i) {
+      const { name, size, type } = gl.getActiveUniform(program, i)!;
+      const isArray = name.endsWith("[0]");
+      infos.push({ name: isArray ? name.slice(0, -3) : name, type: types[type], arrayLength: isArray ? size : 0 });
     }
-
-    return uniformInfos;
+    return infos;
   }
 
   private _getAttributeInfos(): WebGLActiveInfo[] {

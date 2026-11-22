@@ -92,8 +92,16 @@ describe("explicit uniform blocks", () => {
       const gl = engine._hardwareRenderer.gl;
       const native: WebGLProgram = gl.getParameter(gl.CURRENT_PROGRAM);
       expect(gl.getProgramParameter(native, gl.LINK_STATUS)).toBe(true);
+      const autoLayout = asset.subShaders[0].passes[0]
+        ["_compileShaderSource"](engine, new ShaderMacroCollection(), false)
+        .uniformBlocks!.filter((entry) => entry.name === "Auto");
       for (const name of ["camera_Up", "scene_SunlightColor", "gs_Camera", "Scene"]) {
-        expect(gl.getUniformLocation(native, name), name).not.toBeNull();
+        const owner = autoLayout.find((block) => block.members.some((field) => field.name === name));
+        expect(owner, name).toBeDefined();
+        const [index] = gl.getUniformIndices(native, [name])!;
+        expect(index, name).not.toBe(gl.INVALID_INDEX);
+        const [block] = gl.getActiveUniforms(native, [index], gl.UNIFORM_BLOCK_INDEX);
+        expect(block, name).toBe(gl.getUniformBlockIndex(native, owner!.bindingName!));
       }
       const blocks = compiled.subShaders[0].passes[0].uniformBlocks!;
       expect(blocks.map((block) => block.name).sort()).toEqual(["Camera", "Scene"]);

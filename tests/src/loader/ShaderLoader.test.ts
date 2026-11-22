@@ -30,14 +30,21 @@ afterEach(() => {
   engine.destroy();
 });
 
-it("renders a pre-UBO shaderc with its original camera uniform", async () => {
-  // The fixture was compiled with the dev/2.0 compiler at 3ea2e78f2.
-  const url = new URL("/fixtures/shader-loader/legacy-global-uniform.shaderc", location.origin).href;
+// Frozen compiler outputs from dev/2.0 at 3ea2e78f2 and from the explicit-block compiler at 5b0ead9cc.
+it.each([
+  ["legacy-global-uniform", "camera_LegacyTint"],
+  ["legacy-explicit-uniform", "historicalTint"]
+])("draws single and instanced meshes from historical %s.shaderc", async (fixture, property) => {
+  const parse = vi.spyOn(ShaderCompiler.prototype, "_parseShaderPass");
+  const url = new URL(`/fixtures/shader-loader/${fixture}.shaderc`, location.origin).href;
   const shader = await engine.resourceManager.load<Shader>({ url, type: AssetType.Shader });
   const scene = engine.sceneManager.activeScene;
   const camera = scene.createRootEntity().addComponent(Camera);
   camera.entity.transform.setPosition(0, 0, 3);
-  camera.shaderData.setVector4("camera_LegacyTint", new Vector4(1, 0, 1, 1));
+  camera.isOrthographic = true;
+  camera.orthographicSize = 1;
+  const data = fixture === "legacy-global-uniform" ? camera.shaderData : scene.shaderData;
+  data.setVector4(property, new Vector4(1, 0, 1, 1));
   const color = new Texture2D(engine, 16, 16, undefined, false);
   camera.renderTarget = new RenderTarget(engine, 16, 16, color);
   const renderer = scene.createRootEntity().addComponent(MeshRenderer);
@@ -47,6 +54,19 @@ it("renders a pre-UBO shaderc with its original camera uniform", async () => {
   const pixel = new Uint8Array(4);
   color.getPixelBuffer(8, 8, 1, 1, pixel);
   expect(Array.from(pixel)).toEqual([255, 0, 255, 255]);
+  renderer.entity.transform.setPosition(-0.55, 0, 0);
+  const second = scene.createRootEntity().addComponent(MeshRenderer);
+  second.entity.transform.setPosition(0.55, 0, 0);
+  second.mesh = renderer.mesh;
+  second.setMaterial(renderer.getMaterial());
+  const draws = vi.spyOn(engine._hardwareRenderer.gl, "drawElementsInstanced");
+  camera.render();
+  expect(draws.mock.calls.some((call) => call[4] === 2)).toBe(true);
+  for (const x of [4, 12]) {
+    color.getPixelBuffer(x, 8, 1, 1, pixel);
+    expect(Array.from(pixel)).toEqual([255, 0, 255, 255]);
+  }
+  expect(parse).not.toHaveBeenCalled();
 });
 
 describe("ShaderLoader source locations", () => {

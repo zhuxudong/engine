@@ -86,6 +86,58 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   readonly supportsRendering = true;
   maxUniformBlockSize: number;
+  maxUniformBufferBindings: number;
+  maxVertexUniformBlocks: number;
+  maxFragmentUniformBlocks: number;
+  private _shaderConstantValues: Record<string, number> = Object.create(null);
+  /** GLSL ES 3.00 §7.3. Read only the device limits referenced by a specialized array declaration. */
+  readonly resolveShaderConstant = (name: string): number | undefined => {
+    const previous = this._shaderConstantValues[name];
+    if (previous !== undefined) return previous;
+    const gl = this._gl;
+    let token: number;
+    let divisor = 1;
+    switch (name) {
+      case "gl_MaxVertexAttribs":
+        token = gl.MAX_VERTEX_ATTRIBS;
+        break;
+      case "gl_MaxVertexUniformVectors":
+        token = gl.MAX_VERTEX_UNIFORM_VECTORS;
+        break;
+      case "gl_MaxVertexOutputVectors":
+        token = gl.MAX_VERTEX_OUTPUT_COMPONENTS;
+        divisor = 4;
+        break;
+      case "gl_MaxFragmentInputVectors":
+        token = gl.MAX_FRAGMENT_INPUT_COMPONENTS;
+        divisor = 4;
+        break;
+      case "gl_MaxVertexTextureImageUnits":
+        token = gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
+        break;
+      case "gl_MaxCombinedTextureImageUnits":
+        token = gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+        break;
+      case "gl_MaxTextureImageUnits":
+        token = gl.MAX_TEXTURE_IMAGE_UNITS;
+        break;
+      case "gl_MaxFragmentUniformVectors":
+        token = gl.MAX_FRAGMENT_UNIFORM_VECTORS;
+        break;
+      case "gl_MaxDrawBuffers":
+        token = gl.MAX_DRAW_BUFFERS;
+        break;
+      case "gl_MinProgramTexelOffset":
+        token = gl.MIN_PROGRAM_TEXEL_OFFSET;
+        break;
+      case "gl_MaxProgramTexelOffset":
+        token = gl.MAX_PROGRAM_TEXEL_OFFSET;
+        break;
+      default:
+        return undefined;
+    }
+    return (this._shaderConstantValues[name] = Math.floor(gl.getParameter(token) / divisor));
+  };
   uniformBufferOffsetAlignment: number;
 
   /** @internal */
@@ -630,6 +682,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   protected _initGLState(gl: WebGL2RenderingContext): void {
+    this._shaderConstantValues = Object.create(null);
     this._activeTextureID = gl.TEXTURE0;
     this._renderStates = new GLRenderStates(gl);
     this._extensions = new GLExtensions(this);
@@ -642,8 +695,10 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
       this._renderer = gl.getParameter(debugRenderInfo.UNMASKED_RENDERER_WEBGL);
     }
     this.maxUniformBlockSize = gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE);
+    this.maxVertexUniformBlocks = gl.getParameter(gl.MAX_VERTEX_UNIFORM_BLOCKS);
+    this.maxFragmentUniformBlocks = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_BLOCKS);
     this.uniformBufferOffsetAlignment = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT);
-    const bindings = gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS);
+    const bindings = (this.maxUniformBufferBindings = gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS));
     // Indexed bindings belong to the native context. A second device can wrap the same canvas.
     let ranges = WebGLGraphicDevice._rangesByContext.get(gl);
     if (!ranges) {

@@ -1,4 +1,11 @@
-import type { IShaderUniformBlock, ShaderInstruction } from "@galacean/engine-design";
+import {
+  finalizeShaderUniforms,
+  type IShaderUniformBlock,
+  type IShaderUniformPlan,
+  type IShaderUniformSelection,
+  type IShaderUniformVariable,
+  type ShaderInstruction
+} from "@galacean/engine-design";
 import { Engine } from "../Engine";
 import { InstanceBuffer } from "../RenderPipeline/InstanceBuffer";
 import { PipelineStage } from "../RenderPipeline/enums/PipelineStage";
@@ -44,6 +51,7 @@ export class ShaderPass extends ShaderPart {
 
   private readonly _vertexOutputNames?: Readonly<Record<string, string>>;
   private readonly _uniformBlocks?: readonly IShaderUniformBlock[];
+  private readonly _uniformPlan?: IShaderUniformPlan;
 
   /**
    * Create a shader pass from precompiled instructions.
@@ -54,6 +62,7 @@ export class ShaderPass extends ShaderPart {
    * @param tags - Tags
    * @param vertexOutputNames - Source output names mapped to generated GLSL names
    * @param uniformBlocks - Explicit global uniform block layouts from the compiler
+   * @param uniformPlan - Typed sites in the instruction streams used to specialize this pass
    */
   constructor(
     name: string,
@@ -62,7 +71,8 @@ export class ShaderPass extends ShaderPart {
     _platformTarget: ShaderLanguage,
     tags?: Record<string, number | string | boolean>,
     vertexOutputNames?: Readonly<Record<string, string>>,
-    uniformBlocks?: readonly IShaderUniformBlock[]
+    uniformBlocks?: readonly IShaderUniformBlock[],
+    uniformPlan?: IShaderUniformPlan
   ) {
     super();
     this._shaderPassId = ShaderPass._shaderPassCounter++;
@@ -72,6 +82,7 @@ export class ShaderPass extends ShaderPart {
     this._fragmentShaderInstructions = fragmentShaderInstructions;
     this._vertexOutputNames = vertexOutputNames;
     this._uniformBlocks = uniformBlocks;
+    this._uniformPlan = uniformPlan;
 
     const mergedTags = { pipelineStage: PipelineStage.Forward, ...tags };
     for (const key in mergedTags) {
@@ -127,13 +138,17 @@ export class ShaderPass extends ShaderPart {
       );
     }
     const isGPUInstance = macroCollection.isEnable(InstanceBuffer.gpuInstanceMacro);
-    const { vertexSource, fragmentSource, instanceLayout } = this._compileShaderSource(
+    const variant = this._compileShaderSource(engine, macroCollection, isGPUInstance);
+    const program = new ShaderProgram(
       engine,
-      macroCollection,
-      isGPUInstance
+      variant.vertexSource,
+      variant.fragmentSource,
+      feedbackVaryings,
+      variant.uniformBlocks,
+      variant.instanceBindingName,
+      variant.looseUniforms
     );
-    const program = new ShaderProgram(engine, vertexSource, fragmentSource, feedbackVaryings, this._uniformBlocks);
-    program._instanceLayout = instanceLayout;
+    program._instanceLayout = variant.instanceLayout;
     return program;
   }
 
@@ -141,7 +156,14 @@ export class ShaderPass extends ShaderPart {
     engine: Engine,
     macroCollection: ShaderMacroCollection,
     isGPUInstance: boolean
-  ): { vertexSource: string; fragmentSource: string; instanceLayout: InstanceBufferLayout | null } {
+  ): {
+    vertexSource: string;
+    fragmentSource: string;
+    instanceLayout: InstanceBufferLayout | null;
+    uniformBlocks?: readonly IShaderUniformBlock[];
+    instanceBindingName?: string;
+    looseUniforms?: readonly IShaderUniformVariable[];
+  } {
     const shaderMacroList = ShaderPass._shaderMacroList;
     shaderMacroList.length = 0;
     ShaderMacro._getMacrosElements(macroCollection, shaderMacroList);
@@ -155,16 +177,56 @@ export class ShaderPass extends ShaderPart {
       const macro = shaderMacroList[i];
       macroMap.set(macro.name, macro.value ?? "");
     }
+    if (!isGPUInstance) macroMap.delete(InstanceBuffer.gpuInstanceMacro.name);
     // GLSL ES 3.00 predefined macros (§3.3) evaluated ahead of driver preprocessing
     macroMap.set("GL_ES", "1");
     macroMap.set("GL_FRAGMENT_PRECISION_HIGH", "1");
     macroMap.set("__VERSION__", "300");
 
-    let vertexSource = ShaderMacroProcessor.evaluate(this._vertexShaderInstructions, macroMap);
-    let fragmentSource = ShaderMacroProcessor.evaluate(this._fragmentShaderInstructions, macroMap);
-
+    const plan = this._uniformPlan;
+    const instancing = isGPUInstance ? plan?.instancing : undefined;
+    const vertexSites: IShaderUniformSelection[] | undefined = plan ? [] : undefined;
+    const fragmentSites: IShaderUniformSelection[] | undefined = plan ? [] : undefined;
+    let vertexSource = ShaderMacroProcessor.evaluate(
+      this._vertexShaderInstructions,
+      macroMap,
+      plan?.vertex,
+      vertexSites
+    );
+    let fragmentSource = ShaderMacroProcessor.evaluate(
+      this._fragmentShaderInstructions,
+      macroMap,
+      plan?.fragment,
+      fragmentSites
+    );
+    let uniformBlocks = this._uniformBlocks;
+    let instanceBindingName: string | undefined;
+    let looseUniforms: readonly IShaderUniformVariable[] | undefined;
     let instanceLayout: InstanceBufferLayout | null = null;
-    if (isGPUInstance) {
+    if (plan) {
+      const device = engine._hardwareRenderer;
+      const variant = finalizeShaderUniforms(vertexSource, fragmentSource, vertexSites!, fragmentSites!, {
+        maxBlockBytes: device.maxUniformBlockSize,
+        maxBindings: device.maxUniformBufferBindings,
+        maxVertexBlocks: device.maxVertexUniformBlocks,
+        maxFragmentBlocks: device.maxFragmentUniformBlocks,
+        explicitBlocks: this._uniformBlocks?.length ?? 0,
+        resolveConstant: device.resolveShaderConstant,
+        instancing
+      });
+      if (variant.instanceOverflow && isGPUInstance) {
+        return this._compileShaderSource(engine, macroCollection, false);
+      }
+      vertexSource = variant.vertexSource;
+      fragmentSource = variant.fragmentSource;
+      looseUniforms = variant.looseUniforms;
+      if (variant.uniformBlocks.length) uniformBlocks = [...(uniformBlocks ?? []), ...variant.uniformBlocks];
+      if (variant.instanceLayout) {
+        instanceLayout = ShaderFactory.createInstanceLayout(variant.instanceLayout, vertexSites!, fragmentSites!);
+        instanceBindingName = variant.instanceLayout.bindingName;
+      }
+    } else if (isGPUInstance) {
+      // Historical .shaderc contains the original instructions without compiler declaration metadata.
       const injected = ShaderFactory.injectInstanceUBO(engine, vertexSource, fragmentSource);
       vertexSource = injected.vertexSource;
       fragmentSource = injected.fragmentSource;
@@ -181,7 +243,10 @@ export class ShaderPass extends ShaderPart {
         ${precisionStr}
         ${fragmentSource}
       `,
-      instanceLayout
+      instanceLayout,
+      uniformBlocks,
+      instanceBindingName,
+      looseUniforms
     };
   }
 }

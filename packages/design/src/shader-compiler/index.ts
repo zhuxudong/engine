@@ -14,6 +14,14 @@ export type {
 } from "./ICondition";
 export * from "./PreprocessorExpression";
 export * from "./ShaderIncludePath";
+export type {
+  IShaderUniformPlan,
+  IShaderUniformSite,
+  IShaderUniformSelection,
+  IShaderUniformVariable
+} from "./IShaderUniformPlan";
+export * from "./ShaderInstancing";
+export * from "./ShaderUniformVariant";
 export type { IPrecompiledShader, IPrecompiledSubShader, IPrecompiledPass } from "./IPrecompiledShader";
 export type {
   IShaderProgramSource as IShaderInfo,

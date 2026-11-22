@@ -63,6 +63,12 @@ Each pass supports one layout per group across both stages, includes and macro v
 
 Engine uniforms migrated from public shader includes keep their existing override order. For example, setting `camera_Position` on a material still overrides the camera's value for that draw. A custom member of an explicit `Camera` block reads from `camera.shaderData`.
 
+The compiler also describes ordinary uniform declarations in the pass's optional `uniformPlan`. When the engine links a variant, it uses the declarations selected by that variant's macros and inheritance to pack numeric values into std140 blocks. A loose property can be set on any existing `ShaderData` owner. Lookup follows the existing priority of render element, renderer, material, camera, then scene. Samplers keep their texture bindings. Struct members retain their property paths, such as `scene_EnvMapLight.diffuse`.
+
+Historical `.shaderc` files load directly from their original instruction streams. A pass without `uniformPlan` uses the bindings and instancing path from that format. The numeric instruction opcodes are shared across these formats.
+
+Numeric arrays whose size exceeds the device's block limit can keep a typed loose binding. When the compiler cannot establish a representable array bound for a sampler or an array of structs across variants, it emits that pass in the original instruction format. This preserves authored GLSL expressions and texture bindings for those assets.
+
 ## Precompile
 
 Import `ShaderPrecompiler` from `@galacean/engine-shader-compiler/precompile` to generate `.shaderc` data in memory. The CLI writes this data to files.

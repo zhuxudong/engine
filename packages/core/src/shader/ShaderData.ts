@@ -22,8 +22,24 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
     camera: ShaderData | undefined,
     renderer?: ShaderData,
     material?: ShaderData,
-    element?: ShaderData
+    element?: ShaderData,
+    groups?: ShaderDataGroup
   ): ShaderPropertyValueType | undefined {
+    // A property assigned to just one owner can bypass the other four lookups.
+    switch (groups) {
+      case ShaderDataGroup.None:
+        return undefined;
+      case ShaderDataGroup.Scene:
+        return scene?._propertyValueMap[id];
+      case ShaderDataGroup.Camera:
+        return camera?._propertyValueMap[id];
+      case ShaderDataGroup.Renderer:
+        return renderer?._propertyValueMap[id];
+      case ShaderDataGroup.Material:
+        return material?._propertyValueMap[id];
+      case ShaderDataGroup.RenderElement:
+        return element?._propertyValueMap[id];
+    }
     return (
       element?._propertyValueMap[id] ??
       renderer?._propertyValueMap[id] ??
@@ -641,7 +657,8 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
     Object.assign(target._macroMap, this._macroMap);
     const sourceFields = this._batchSharedFields;
     const targetFields = target._batchSharedFields;
-    const fieldCount = sourceFields.length;
+    const crossesGroups = this._group !== target._group;
+    const fieldCount = crossesGroups ? 0 : sourceFields.length;
     targetFields.length = fieldCount;
     for (let i = 0; i < fieldCount; i++) {
       targetFields[i] = sourceFields[i];
@@ -657,6 +674,20 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
     for (let i = 0, n = keys.length; i < n; i++) {
       const k = keys[i];
       const property = <ShaderPropertyValueType>propertyValueMap[k];
+      if (crossesGroups) {
+        const descriptor = ShaderProperty._propertyIdMap[k];
+        descriptor._addGroup(target._group);
+        if (
+          target._group === ShaderDataGroup.Renderer &&
+          property != null &&
+          (descriptor._requiresSharedInstanceValue ||
+            ArrayBuffer.isView(property) ||
+            property instanceof Texture ||
+            Array.isArray(property))
+        ) {
+          targetFields.push(descriptor._uniqueId);
+        }
+      }
       if (property != null) {
         if (typeof property === "number") {
           targetPropertyValueMap[k] = property;
@@ -713,7 +744,7 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
 
     const propertyValueMap = this._propertyValueMap;
     const lastValue = propertyValueMap[id] as T;
-    this._updateRendererBatchSharedFields(id, type, value);
+    this._updateRendererBatchSharedFields(property, type, value);
     propertyValueMap[id] = value;
     return lastValue;
   }
@@ -784,10 +815,18 @@ export class ShaderData extends DataObject implements IReferable, IClone, IClone
     }
   }
 
-  private _updateRendererBatchSharedFields(id: number, type: ShaderPropertyType, value: ShaderPropertyValueType): void {
-    if (this._group !== ShaderDataGroup.Renderer || (type & ShaderData._batchSharedTypeMask) === 0) {
+  private _updateRendererBatchSharedFields(
+    property: ShaderProperty,
+    type: ShaderPropertyType,
+    value: ShaderPropertyValueType
+  ): void {
+    if (
+      this._group !== ShaderDataGroup.Renderer ||
+      (!property._requiresSharedInstanceValue && (type & ShaderData._batchSharedTypeMask) === 0)
+    ) {
       return;
     }
+    const id = property._uniqueId;
     const oldHas = this._propertyValueMap[id] != null;
     const newHas = value != null;
     if (oldHas === newHas) {

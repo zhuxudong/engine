@@ -85,8 +85,23 @@ function generateShaderProgram(
   }
   const result = GLESBackend.generate(ir, coreInfo, backend);
   if (result) {
-    result.vertexShaderInstructions = ShaderInstructionEncoder.parse(result.vertex, preprocessorExpressions);
-    result.fragmentShaderInstructions = ShaderInstructionEncoder.parse(result.fragment, preprocessorExpressions);
+    result.vertexShaderInstructions = ShaderInstructionEncoder.parse(
+      result.vertex,
+      preprocessorExpressions,
+      result.uniformPlan?.vertex
+    );
+    result.fragmentShaderInstructions = ShaderInstructionEncoder.parse(
+      result.fragment,
+      preprocessorExpressions,
+      result.uniformPlan?.fragment
+    );
+    if (
+      result.uniformPlan &&
+      (!ShaderInstructionEncoder.supportsUniformPlan(result.vertexShaderInstructions, result.uniformPlan.vertex) ||
+        !ShaderInstructionEncoder.supportsUniformPlan(result.fragmentShaderInstructions, result.uniformPlan.fragment))
+    ) {
+      delete result.uniformPlan;
+    }
     result.vertex = ShaderInstructionEncoder.source(result.vertex);
     result.fragment = ShaderInstructionEncoder.source(result.fragment);
   }

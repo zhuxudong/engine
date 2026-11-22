@@ -21,6 +21,11 @@ export interface IHardwareRenderer {
   /** WebGL access requires a graphics-capable backend. */
   readonly gl: WebGL2RenderingContext;
   readonly maxUniformBlockSize: number;
+  readonly maxUniformBufferBindings: number;
+  readonly maxVertexUniformBlocks: number;
+  readonly maxFragmentUniformBlocks: number;
+  /** Resolve a language-defined device limit used in a shader constant expression. */
+  readonly resolveShaderConstant: (name: string) => number | undefined;
   /** Required byte alignment of a uniform buffer range's starting offset. */
   readonly uniformBufferOffsetAlignment: number;
   /** Whether this device can execute rendering commands. */
