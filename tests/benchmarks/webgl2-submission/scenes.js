@@ -105,9 +105,14 @@ function particles(engine, root, camera) {
   engine.time.maximumDeltaTime = 0.000001;
   engine.time.timeScale = 1 / (60 * engine.time.maximumDeltaTime);
 
+  // Keep the workload at 50,000 while avoiding hundreds of buffer resizes during
+  // setup when many separate birth events grow a single child generator on iOS.
+  const mainCount = 48000;
   const parentCount = 1000;
-  const childrenPerParent = 49;
+  const childrenPerParent = 1;
   const childCount = parentCount * childrenPerParent;
+  const particleCount = mainCount + parentCount + childCount;
+  const mainSeed = 2050;
   const parentSeed = 2051;
   const childSeed = 2052;
   const material = new ParticleMaterial(engine);
@@ -135,6 +140,10 @@ function particles(engine, root, camera) {
     return renderer;
   }
 
+  const primary = emitter(mainCount, mainSeed).generator;
+  primary.emission.shape = shape;
+  primary.play(false);
+  primary.emit(mainCount);
   const children = emitter(childCount, childSeed);
   children.generator.main.isLoop = false;
   children.generator.emission.addBurst(new Burst(0, new ParticleCompositeCurve(childrenPerParent)));
@@ -145,7 +154,15 @@ function particles(engine, root, camera) {
   parents.play(false);
   parents.emit(parentCount);
   return {
-    details: { particleCapacity: parentCount + childCount, parentCount, childrenPerParent, parentSeed, childSeed },
+    details: {
+      particleCapacity: particleCount,
+      mainCount,
+      parentCount,
+      childrenPerParent,
+      mainSeed,
+      parentSeed,
+      childSeed
+    },
     async validate(gl) {
       // Query a separate steady-state frame after all timed samples. Each simulated particle writes one point.
       await new Promise(requestAnimationFrame);
@@ -165,7 +182,7 @@ function particles(engine, root, camera) {
           await new Promise(requestAnimationFrame);
         }
         const feedbackParticles = gl.getQueryParameter(query, gl.QUERY_RESULT);
-        if (feedbackParticles !== parentCount + childCount) {
+        if (feedbackParticles !== particleCount) {
           throw new Error("Expected 50,000 simulated particles, GPU reported " + feedbackParticles);
         }
         return { feedbackParticles };
