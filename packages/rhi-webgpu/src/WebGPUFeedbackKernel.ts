@@ -1,3 +1,5 @@
+import type { IWebGPUShaderAttribute } from "@galacean/engine-design";
+import { WebGPUPrimitive } from "./WebGPUPrimitive";
 import type {
   IPlatformFeedbackCompute,
   IPlatformShaderProgram,
@@ -209,6 +211,34 @@ export class WebGPUFeedbackKernel implements IPlatformFeedbackCompute {
   }
 }
 
+/** Decode the same vertex buffer bytes that a native vertex fetch would present to the shader. */
+function feedbackInput(
+  input: IWebGPUShaderAttribute,
+  element: VertexElement,
+  binding: number,
+  stride: number,
+  slot: string
+): string {
+  const format = WebGPUPrimitive._vertexFormat(element.format);
+  const [, kind, bitWidth, count] = /^(float|sint|uint|snorm|unorm)(8|16|32)(?:x(\d))?$/.exec(format)!;
+  const bits = Number(bitWidth);
+  const signed = kind === "sint" || kind === "snorm";
+  const scalar = input.type === "float" ? "f32" : input.type === "uint" ? "u32" : "i32";
+  const channels = Array.from({ length: input.components }, (_, i) => {
+    if (i >= Number(count ?? 1)) return scalar + (i === 3 ? "(1)" : "(0)");
+    const offset = element.offset + (i * bits) / 8;
+    const address = `((${slot}) * ${stride}u + ${offset}u)`;
+    const word = `gs_input${binding}[${address} >> 2u]`;
+    if (kind === "float") return `${scalar}(bitcast<f32>(${word}))`;
+    const raw = signed ? `bitcast<i32>(${word})` : word;
+    const value = bits === 32 ? raw : `extractBits(${raw}, (${address} & 3u) * 8u, ${bits}u)`;
+    if (kind === "snorm") return `max(f32(${value}) / ${2 ** (bits - 1) - 1}.0, -1.0)`;
+    if (kind === "unorm") return `f32(${value}) / ${2 ** bits - 1}.0`;
+    return `${scalar}(${value})`;
+  });
+  return channels.length === 1 ? channels[0] : `vec${channels.length}<${scalar}>(${channels.join(", ")})`;
+}
+
 /** Reuse the compiled simulation, including its exact macros and arithmetic. Only its stage IO changes. */
 function feedbackShader(
   program: WebGPUShaderProgram,
@@ -229,7 +259,8 @@ function feedbackShader(
   const outputStruct = new RegExp("struct\\s+" + signature[2] + "\\s*\\{([^}]*)\\}").exec(vertexSource);
   if (!outputStruct) throw new Error("Particle feedback vertex output structure is absent.");
   const fields = new Map<number, string>();
-  for (const m of outputStruct[1].matchAll(/@location\((\d+)\)\s+(\w+)\s*:/g)) fields.set(Number(m[1]), m[2]);
+  for (const m of outputStruct[1].matchAll(/@location\((\d+)\)\s+(?:@\w+\([^)]*\)\s+)*(\w+)\s*:/g))
+    fields.set(Number(m[1]), m[2]);
   const values: string[] = [];
   for (const arg of signature[1].trim() ? signature[1].split(",") : []) {
     const location = /@location\((\d+)\)/.exec(arg);
@@ -242,18 +273,14 @@ function feedbackShader(
     if (!input) throw new Error("Missing particle vertex input at " + location[1]);
     const state = stateElements.find((element) => element.attribute === input.name);
     const element = state ?? elements.find((element) => element.attribute === input.name);
-    if (!element || input.type !== "float") throw new Error("Missing floating point particle attribute " + input.name);
+    if (!element) throw new Error("Missing feedback vertex element " + input.name);
     const binding = state ? 0 : element.bindingIndex + 1;
     const stride = state ? readStride : inputs[element.bindingIndex].stride;
-    const words = Array.from(
-      { length: input.components },
-      (_, i) => `gs_input${binding}[slot * ${stride / 4}u + ${element.offset / 4 + i}u]`
-    );
-    values.push(words.length > 1 ? `vec${words.length}f(${words.join(", ")})` : words[0]);
+    values.push(feedbackInput(input, element, binding, stride, "slot"));
   }
   const declarations = Array.from(
     { length: inputs.length + 1 },
-    (_, i) => `@group(3) @binding(${i}) var<storage, read> gs_input${i}: array<f32>;`
+    (_, i) => `@group(3) @binding(${i}) var<storage, read> gs_input${i}: array<u32>;`
   );
   const stores: string[] = [];
   let word = 0;
@@ -263,13 +290,13 @@ function feedbackShader(
     if (!output || !field) throw new Error("Missing reflected particle output " + name);
     for (let i = 0; i < output.components; i++) {
       const component = output.components === 1 ? "" : "[" + i + "]";
-      stores.push(`gs_output[slot * ${writeStride / 4}u + ${word++}u] = result.${field}${component};`);
+      stores.push(`gs_output[slot * ${writeStride / 4}u + ${word++}u] = bitcast<u32>(result.${field}${component});`);
     }
   }
   if (word * 4 !== writeStride) throw new Error("Particle feedback output size and destination stride differ.");
   return `${vertexSource.replace(/@vertex\b|@(?:location|builtin|interpolate|invariant)\([^)]*\)/g, "")}
     ${declarations.join("\n")}
-    @group(3) @binding(${inputs.length + 1}) var<storage, read_write> gs_output: array<f32>;
+    @group(3) @binding(${inputs.length + 1}) var<storage, read_write> gs_output: array<u32>;
     @group(3) @binding(${inputs.length + 2}) var<uniform> gs_range: vec4u;
     @compute @workgroup_size(${workgroupSize}) fn feedbackStep(@builtin(global_invocation_id) id: vec3u) {
       if (id.x >= gs_range.y) { return; }

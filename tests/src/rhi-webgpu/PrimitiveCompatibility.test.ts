@@ -14,6 +14,8 @@ import {
   UnlitMaterial,
   Vector3,
   VertexBufferBinding,
+  VertexElement,
+  VertexElementFormat,
   WebGPUEngine,
   WebGPUGraphicDevice
 } from "@galacean/engine-webgpu";
@@ -110,6 +112,53 @@ describe.skipIf(!navigator.gpu)("WebGPU compatibility inputs", () => {
     await texture.makePixelBufferReadable();
     texture.getPixelBuffer(1, 0, 1, 1, output);
     expect([...output.subarray(0, 4)]).toEqual([41, 42, 43, 44]);
+  });
+
+  it("preserves packed unsigned and normalized signed vertex inputs during feedback", async () => {
+    const program = hardware.createPlatformShaderProgram(engine, {
+      vertexSource: `struct Result { @builtin(position) pos: vec4f, @location(0) value: vec4f }
+        @vertex fn main(@location(0) bytes: vec4u, @location(1) norm: vec2f) -> Result {
+          return Result(vec4f(0.0), vec4f(f32(bytes.x), f32(bytes.w), norm.x, norm.y));
+        }`,
+      fragmentSource: "@fragment fn main() {}",
+      feedbackVaryings: ["value"],
+      reflection: {
+        uniformBlocks: [],
+        textures: [],
+        fragmentOutputs: [],
+        vertexInputs: [
+          { name: "bytes", location: 0, type: "uint", components: 4 },
+          { name: "norm", location: 1, type: "float", components: 2 }
+        ],
+        vertexOutputs: [{ name: "value", location: 0, type: "float", components: 4 }]
+      }
+    });
+    const bytes = new Uint8Array([253, 2, 3, 129, 0, 128, 255, 127]);
+    const input = new VertexBufferBinding(new Buffer(engine, BufferBindFlag.VertexBuffer, bytes), 8);
+    const output = new VertexBufferBinding(new Buffer(engine, BufferBindFlag.VertexBuffer, 16), 16);
+    const kernel = hardware.createFeedbackCompute();
+    try {
+      kernel.bind(
+        program,
+        input,
+        output,
+        [
+          new VertexElement("bytes", 0, VertexElementFormat.UByte4),
+          new VertexElement("norm", 4, VertexElementFormat.NormalizedShort2)
+        ],
+        [],
+        []
+      );
+      kernel.dispatch(0, 1);
+      const values = new Float32Array(4);
+      await output.buffer.getDataAsync(values);
+      expect([...values]).toEqual([253, 129, -1, 1]);
+    } finally {
+      kernel.destroy();
+      input.buffer.destroy();
+      output.buffer.destroy();
+      program.destroy();
+    }
   });
 
   it("dispatches a feedback vertex function with no input parameters", async () => {
