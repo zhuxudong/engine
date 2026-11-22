@@ -3,6 +3,7 @@ import type { Engine } from "../Engine";
 import { Buffer } from "../graphic/Buffer";
 import { BufferBindFlag } from "../graphic/enums/BufferBindFlag";
 import { BufferUsage } from "../graphic/enums/BufferUsage";
+import type { IPlatformBuffer } from "../renderingHardwareInterface/IPlatformBuffer";
 import { ShaderData } from "./ShaderData";
 import { RendererUniformCache } from "./RendererUniformCache";
 import { RendererUniformKey } from "./RendererUniformKey";
@@ -43,6 +44,12 @@ export class GlobalUniformBlock {
   private _rendererRanges?: RendererUniformCache;
   private readonly _stride: number;
   private readonly _buffer: Buffer;
+  private readonly _largeMatrixArray?: {
+    field: UniformBlockField;
+    end: number;
+    platform?: IPlatformBuffer;
+    revision?: number;
+  };
   private _offset = -1;
 
   private constructor(
@@ -90,6 +97,24 @@ export class GlobalUniformBlock {
     const slots = Math.max(2, Math.floor(16384 / this._stride));
     this._buffer = new Buffer(_engine, BufferBindFlag.ConstantBuffer, this._stride * slots, BufferUsage.Dynamic);
     this._buffer.isGCIgnored = true;
+    if (layout.name === "Auto" && this._buffer._platformBuffer.writeUniformArrayRange) {
+      // A short packed mat4[] owns a known-zero suffix. Other fields may follow it in the same block.
+      let largest = 0;
+      for (let i = 0; i < layout.members.length; i++) {
+        const member = layout.members[i];
+        if (
+          member.type === "mat4" &&
+          member.arrayStride === 64 &&
+          member.matrixStride === 16 &&
+          member.arrayLength >= 128 &&
+          member.arrayLength > largest
+        ) {
+          largest = member.arrayLength;
+          const field = this._fields[i];
+          this._largeMatrixArray = { field, end: field.offset + largest * 16 };
+        }
+      }
+    }
   }
 
   bind(
@@ -135,7 +160,23 @@ export class GlobalUniformBlock {
       ));
       if (ranges.bind(owner, this._staging, key)) return;
     }
-    this._bindRange(groups === ShaderDataGroup.Material);
+    const array = this._largeMatrixArray;
+    let zeroStart = 0;
+    if (array) {
+      const { property, offset } = array.field;
+      const value = ShaderData._findValue(
+        property._uniqueId,
+        scene,
+        camera,
+        renderer,
+        material,
+        element,
+        property._groups
+      );
+      zeroStart =
+        value == null ? offset : value instanceof Float32Array ? Math.min(offset + value.length, array.end) : array.end;
+    }
+    this._bindRange(groups === ShaderDataGroup.Material, zeroStart);
   }
 
   release(): void {
@@ -146,10 +187,16 @@ export class GlobalUniformBlock {
     }
   }
 
-  private _bindRange(materialOnly: boolean): void {
+  private _bindRange(materialOnly: boolean, zeroStart: number): void {
     const { _buffer: buffer, _staging: staging, _materialRanges: ranges, _offset: last } = this;
     const contentLost = buffer.isContentLost;
-    if (!contentLost && last >= 0) {
+    const array = this._largeMatrixArray;
+    if (
+      !contentLost &&
+      last >= 0 &&
+      (!array ||
+        (array.platform === buffer._platformBuffer && array.revision === array.platform.uniformContentRevision))
+    ) {
       if (this._matches(this._previous)) {
         buffer._bindUniformRange(this._binding, last, staging.byteLength);
         return;
@@ -182,7 +229,11 @@ export class GlobalUniformBlock {
       for (let i = 0; i < ranges.length; ++i) ranges[i].offset = -1;
       this._nextMaterialRange = 0;
     }
-    buffer._bindUniformRange(this._binding, next, staging.byteLength, staging, discard);
+    buffer._bindUniformRange(this._binding, next, staging.byteLength, staging, discard, zeroStart, array?.end);
+    if (array) {
+      array.platform = buffer._platformBuffer;
+      array.revision = array.platform.uniformContentRevision;
+    }
     this._previous.set(staging);
     this._offset = next;
     if (materialOnly && ranges) {

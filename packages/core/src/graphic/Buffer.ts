@@ -219,8 +219,23 @@ export class Buffer extends GraphicsResource {
   }
 
   /** @internal Bind a uniform range and optionally upload the complete contents of that slice. */
-  _bindUniformRange(binding: number, offset: number, size: number, data?: ArrayBufferView, discard?: boolean): void {
-    this._engine._hardwareRenderer.bindUniformBufferRange(binding, this._platformBuffer, offset, size, data, discard);
+  _bindUniformRange(
+    binding: number,
+    offset: number,
+    size: number,
+    data?: ArrayBufferView,
+    discard?: boolean,
+    zeroStart = 0,
+    zeroEnd = 0
+  ): void {
+    const rhi = this._engine._hardwareRenderer;
+    const platform = this._platformBuffer;
+    if (zeroEnd && platform.writeUniformArrayRange && data instanceof Uint32Array && !discard) {
+      platform.writeUniformArrayRange(offset, data, zeroStart, zeroEnd);
+      rhi.bindUniformBufferRange(binding, platform, offset, size);
+    } else {
+      rhi.bindUniformBufferRange(binding, platform, offset, size, data, discard);
+    }
     if (data) this._onDataUploaded(data, offset, 0, undefined, discard);
   }
 

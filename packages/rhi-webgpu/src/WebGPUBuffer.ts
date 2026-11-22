@@ -7,6 +7,10 @@ export class WebGPUBuffer implements IPlatformBuffer {
   _contentVersion = 0;
   shaderWriteRevision = 0;
 
+  get uniformContentRevision(): number {
+    return this._contentVersion;
+  }
+
   _markShaderWrite(): void {
     ++this._contentVersion;
     ++this.shaderWriteRevision;
@@ -22,6 +26,12 @@ export class WebGPUBuffer implements IPlatformBuffer {
   private _expandedIndices?: GPUBuffer;
   private _expandedVersion = -1;
   private _spares?: { buffer: GPUBuffer; submission: number }[];
+  private _uniformArrays?: {
+    words: number;
+    zeroEnd: number;
+    version: number;
+    starts: WeakMap<GPUBuffer, Uint32Array>;
+  };
 
   constructor(
     private readonly _device: WebGPUGraphicDevice,
@@ -52,6 +62,60 @@ export class WebGPUBuffer implements IPlatformBuffer {
       this._rotateBacking();
       this._serial = -1;
     }
+  }
+
+  writeUniformArrayRange(offset: number, data: Uint32Array, zeroStart: number, zeroEnd: number): void {
+    const alignment = this._device.uniformBufferOffsetAlignment;
+    const stride = Math.ceil(data.byteLength / alignment) * alignment;
+    const slot = offset / stride;
+    if (
+      offset < 0 ||
+      !Number.isInteger(slot) ||
+      offset + data.byteLength > this.byteLength ||
+      zeroStart < 0 ||
+      zeroEnd < zeroStart ||
+      zeroEnd > data.length
+    ) {
+      throw new RangeError("Invalid uniform array slot or zero range.");
+    }
+    if (
+      this._serial === this._device.submissionSerial &&
+      this._usedStart < offset + data.byteLength &&
+      offset < this._usedEnd
+    ) {
+      // A caller that reuses a live slot needs an ordered copy after the earlier draw.
+      this.setData(this.byteLength, data, offset);
+      return;
+    }
+    let cache = this._uniformArrays;
+    if (!cache || cache.words !== data.length || cache.zeroEnd !== zeroEnd || cache.version !== this._contentVersion) {
+      // Other CPU/GPU buffer writes invalidate prior observations, including rotated backings.
+      this._uniformArrays = cache = {
+        words: data.length,
+        zeroEnd,
+        version: this._contentVersion,
+        starts: new WeakMap()
+      };
+    }
+    const buffer = this._gpuBuffer;
+    let starts = cache.starts.get(buffer);
+    if (!starts) {
+      starts = new Uint32Array(Math.ceil(this.byteLength / stride));
+      cache.starts.set(buffer, starts);
+    }
+    // Zero denotes an unobserved physical slot. Record the confirmed zero start plus one after a successful write.
+    const known = starts[slot];
+    const prefix = known ? Math.max(zeroStart, known - 1) : zeroEnd;
+    const queue = this._device.device.queue;
+    starts[slot] = 0;
+    if (zeroEnd - prefix < 256) {
+      queue.writeBuffer(buffer, offset, data);
+    } else {
+      if (prefix) queue.writeBuffer(buffer, offset, data, 0, prefix);
+      if (zeroEnd < data.length) queue.writeBuffer(buffer, offset + 4 * zeroEnd, data, zeroEnd, data.length - zeroEnd);
+    }
+    starts[slot] = zeroStart + 1;
+    cache.version = ++this._contentVersion;
   }
 
   writeInstanceData(data: Float32Array, activeWords: number, bindingSize: number): number {
