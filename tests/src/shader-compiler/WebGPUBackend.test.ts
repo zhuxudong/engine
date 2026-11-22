@@ -104,6 +104,53 @@ it("preserves public leaf and array names when separating opaque struct resource
 });
 
 describe.skipIf(!navigator.gpu)("Native WGSL compatibility", () => {
+  it("writes back named and indexed vector output arguments at the call site", async () => {
+    const vertex = "void main(){int i=gl_VertexID; gl_Position=vec4(vec2((i<<1)&2,i&2)*2.0-1.0,0.0,1.0);}";
+    const fragment = `out vec4 color;
+      float adjust(inout float x, out float y) { x += 0.25; y = 0.75; return x; }
+      void swapPair(inout vec2 p) { p = p.yx; }
+      void nested(inout vec4 value, int i) {
+        if (i == 0) { value.w = adjust(value.x, value.y); }
+        else { value.w = adjust(value[2*i], value.y); }
+        swapPair(value.zw);
+      }
+      void main() {
+        int index = int(gl_FragCoord.x);
+        vec4 values[2];
+        values[index] = vec4(0.25, 0.0, 0.0, 1.0);
+        nested(values[index], index);
+        color = values[index];
+      }`;
+    const program = compiler.compileWebGPUVariant(vertex, fragment);
+    const device = await (await navigator.gpu.requestAdapter())!.requestDevice();
+    try {
+      const pipeline = await device.createRenderPipelineAsync({
+        layout: "auto",
+        vertex: { module: device.createShaderModule({ code: program.vertex }) },
+        fragment: { module: device.createShaderModule({ code: program.fragment }), targets: [{ format: "rgba8unorm" }] }
+      });
+      const target = device.createTexture({
+        size: [2, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+      });
+      const read = device.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const encoder = device.createCommandEncoder();
+      const draw = encoder.beginRenderPass({
+        colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }]
+      });
+      draw.setPipeline(pipeline);
+      draw.draw(3);
+      draw.end();
+      encoder.copyTextureToBuffer({ texture: target }, { buffer: read }, [2, 1]);
+      device.queue.submit([encoder.finish()]);
+      await read.mapAsync(GPUMapMode.READ);
+      expect(Array.from(new Uint8Array(read.getMappedRange()))).toEqual([128, 191, 128, 0, 64, 191, 64, 64]);
+    } finally {
+      device.destroy();
+    }
+  });
+
   it("reads indexed and whole std140 arrays with their original byte strides", async () => {
     const device = await (await navigator.gpu.requestAdapter())!.requestDevice();
     try {

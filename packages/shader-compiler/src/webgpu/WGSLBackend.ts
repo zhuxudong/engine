@@ -19,6 +19,7 @@ import {
   type Declaration
 } from "./StageInterface";
 import { poolSamplerBindings, removeUnusedSamplers } from "./SamplerBindings";
+import { lowerOutputArguments } from "./OutputArguments";
 import { flattenUniformResources, recoverUniforms } from "./UniformDeclarations";
 import { describeTextureBindings, fitTextureBindings } from "./TextureBindings";
 
@@ -339,7 +340,7 @@ export class WGSLBackend implements Pick<IWebGPUShaderCompiler, "compileWebGPUVa
       if (!compatible) return this._generate(t, stage, globals, reflection, locations, false);
       module = compatible;
     }
-    return "diagnostic(off, derivative_uniformity);\n" + module;
+    return "diagnostic(off, derivative_uniformity);\n" + lowerOutputArguments(module);
   }
   private _shaderInputType(a: IWebGPUShaderAttribute): string {
     return a.components === 1
