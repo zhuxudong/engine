@@ -126,7 +126,7 @@ export class RenderQueue {
           }
         }
 
-        const program = shaderPass._getShaderProgram(engine, compileMacros);
+        const program = shaderPass._getShaderProgram(engine, compileMacros, undefined, curElement.primitive, rendererData, materialData, renderElementShaderData);
         if (!program.isValid) {
           continue;
         }
@@ -218,7 +218,7 @@ export class RenderQueue {
             const count = Math.min(maxCount, totalCount - start);
             instanceBuffer.upload(instancedRenderers, start, count, context, materialData, renderElementShaderData);
             primitive.instanceCount = count;
-            rhi.drawPrimitive(primitive, subPrimitive, program);
+            rhi.drawPrimitive(primitive, subPrimitive, program._platformProgram);
           }
           primitive.instanceCount = 0;
         } else if (isInstanced) {
@@ -231,11 +231,11 @@ export class RenderQueue {
             const data = renderer.shaderData;
             program.uploadAll(program.rendererUniformBlock, data);
             program.uploadSharedUniforms(sceneData, cameraData, data, materialData, renderElementShaderData);
-            rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
+            rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program._platformProgram);
             program._uploadRendererId = renderer.instanceId;
           }
         } else {
-          rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program);
+          rhi.drawPrimitive(curElement.primitive, curElement.subPrimitive, program._platformProgram);
         }
       }
     }

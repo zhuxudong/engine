@@ -131,21 +131,19 @@ function config({ location, pkgJson }) {
         plugins: curPlugins
       };
     },
-    sources: () => {
-      // Build the "sources" subpath entry for @galacean/engine-shader.
-      // Exports raw .shader source strings (for editor use).
-      const sourcesInput = path.join(location, "src", "sources.ts");
+    shaderSubpath: (name) => {
+      const sourcesInput = path.join(location, "src", name + ".ts");
       return {
         input: sourcesInput,
         external: isExternal,
         output: [
           {
-            file: path.join(location, "dist", "sources.module.js"),
+            file: path.join(location, "dist", name + ".module.js"),
             format: "es",
             sourcemap: true
           },
           {
-            file: path.join(location, "dist", "sources.main.js"),
+            file: path.join(location, "dist", name + ".main.js"),
             format: "commonjs",
             sourcemap: true
           }
@@ -309,7 +307,7 @@ function getModule() {
   // Build shader package "sources" subpath entry (raw .shader strings for editor)
   const shaderPkg = pkgs.find((pkg) => pkg.pkgJson.name === "@galacean/engine-shader");
   if (shaderPkg) {
-    result.push(makeRollupConfig({ ...shaderPkg, type: "sources" }));
+    for (const name of ["sources", "webgpu"]) result.push(config(shaderPkg).shaderSubpath(name));
   }
 
   const analyzerPkg = pkgs.find((pkg) => pkg.pkgJson.name === "@galacean/engine-shader-analyzer");

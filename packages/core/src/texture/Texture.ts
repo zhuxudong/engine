@@ -9,11 +9,33 @@ import { TextureFormat } from "./enums/TextureFormat";
 import { TextureUsage } from "./enums/TextureUsage";
 import { TextureWrapMode } from "./enums/TextureWrapMode";
 
+type TextureReadRegion = [x: number, y: number, width: number, height: number, mipLevel: number, out: ArrayBufferView];
+export type TextureReadArguments =
+  | [out: ArrayBufferView]
+  | [mipLevel: number, out: ArrayBufferView]
+  | [x: number, y: number, width: number, height: number, out: ArrayBufferView]
+  | TextureReadRegion;
+
 /**
  * Base class for textures, holding format, base dimensions, mipmap count, and sampler state.
  */
 export abstract class Texture extends GraphicsResource {
   name: string;
+
+  protected _readRegion(args: TextureReadArguments): TextureReadRegion {
+    switch (args.length) {
+      case 1:
+        return [0, 0, this._width, this._height, 0, args[0]];
+      case 2: {
+        const [level, out] = args;
+        return [0, 0, Math.max(1, this._width >> level), Math.max(1, this._height >> level), level, out];
+      }
+      case 5:
+        return [args[0], args[1], args[2], args[3], 0, args[4]];
+      case 6:
+        return args;
+    }
+  }
 
   /** @internal */
   _platformTexture: IPlatformTexture;
@@ -36,7 +58,6 @@ export abstract class Texture extends GraphicsResource {
   private _filterMode: TextureFilterMode;
   private _anisoLevel: number = 1;
   private _depthCompareFunction: TextureDepthCompareFunction;
-  private _useDepthCompareMode: boolean = false;
 
   /**
    * Whether texels are stored in sRGB rather than linear color space.
@@ -214,16 +235,6 @@ export abstract class Texture extends GraphicsResource {
   /**
    * @internal
    */
-  _setUseDepthCompareMode(value: boolean): void {
-    if (this._useDepthCompareMode !== value) {
-      this._platformTexture.setUseDepthCompareMode(value);
-      this._useDepthCompareMode = value;
-    }
-  }
-
-  /**
-   * @internal
-   */
   override _rebuild(): void {
     const platformTexture = this._platformTexture;
     platformTexture.wrapModeU = this._wrapModeU;
@@ -231,7 +242,6 @@ export abstract class Texture extends GraphicsResource {
     platformTexture.filterMode = this._filterMode;
     platformTexture.anisoLevel = this._anisoLevel;
     platformTexture.depthCompareFunction = this._depthCompareFunction;
-    platformTexture.setUseDepthCompareMode(this._useDepthCompareMode);
   }
 
   /**

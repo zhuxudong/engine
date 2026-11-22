@@ -137,6 +137,15 @@ mat3 _normalMatFromModel(mat3 m) {
     };
   })();
 
+  /** @internal Both engine flavors may bootstrap the same shared include library. */
+  static _registerBuiltinIncludes(library: readonly { path: string; source: string }[]): void {
+    for (const { path, source } of library) {
+      if (ShaderFactory.includeMap[normalizeShaderIncludeKey(path)] !== source) {
+        ShaderFactory.registerInclude(path, source);
+      }
+    }
+  }
+
   /**
    * Register a chunk source so `#include` resolves it.
    * @param includeName - The path key referenced in `#include "..."`.

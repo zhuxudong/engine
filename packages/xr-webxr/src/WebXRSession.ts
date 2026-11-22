@@ -110,9 +110,7 @@ export class WebXRSession implements IXRSession {
 
   onUpdate(): void {
     const { _rhi: rhi, _platformLayer: layer } = this;
-    rhi._mainFrameBuffer = layer.framebuffer;
-    rhi._mainFrameWidth = layer.framebufferWidth;
-    rhi._mainFrameHeight = layer.framebufferHeight;
+    rhi.setExternalFramebuffer(layer.framebuffer, layer.framebufferWidth, layer.framebufferHeight);
   }
 
   start(): void {}
@@ -168,9 +166,7 @@ export class WebXRSession implements IXRSession {
   }
 
   private _clearMainFrameBuffer(): void {
-    const rhi = this._rhi;
-    rhi._mainFrameBuffer = null;
-    rhi._mainFrameWidth = rhi._mainFrameHeight = 0;
+    this._rhi.setExternalFramebuffer(null, 0, 0);
   }
 
   private _onSessionEvent(inputSourceEvent: XRInputSourceEvent): void {

@@ -12,7 +12,17 @@ export interface IPlatformBuffer {
     options?: SetDataOptions
   ): void;
 
+  readonly supportsSynchronousReadback?: boolean;
+
   getData(data: ArrayBufferView, bufferByteOffset?: number, dataOffset?: number, dataLength?: number): void;
+
+  /** Native readback for asynchronous devices. */
+  getDataAsync?(
+    data: ArrayBufferView,
+    bufferByteOffset?: number,
+    dataOffset?: number,
+    dataLength?: number
+  ): Promise<void>;
 
   copyFromBuffer(srcBuffer: IPlatformBuffer, srcByteOffset: number, dstByteOffset: number, byteLength: number): void;
 

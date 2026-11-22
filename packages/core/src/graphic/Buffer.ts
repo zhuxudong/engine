@@ -20,6 +20,7 @@ export class Buffer extends GraphicsResource {
   private _byteLength: number;
   private _bufferUsage: BufferUsage;
   private _readable: boolean;
+  private _cpuDataValid = true;
   private _data: Uint8Array | null;
 
   /**
@@ -63,6 +64,11 @@ export class Buffer extends GraphicsResource {
     } else {
       throw "Buffer is not readable.";
     }
+  }
+
+  /** @internal Current CPU-side contents, if available without a GPU readback. */
+  get _readableData(): Uint8Array | null {
+    return this._readable && this._cpuDataValid ? this._data : null;
   }
 
   /**
@@ -201,16 +207,14 @@ export class Buffer extends GraphicsResource {
     dataLength?: number
   ): void {
     if (this._readable) {
-      const arrayBuffer = data.constructor === ArrayBuffer ? data : (<ArrayBufferView>data).buffer;
-
-      if (this._data!.buffer !== arrayBuffer) {
-        const byteSize = (<TypedArray>data).BYTES_PER_ELEMENT || 1; // TypeArray is BYTES_PER_ELEMENT, unTypeArray is 1
-        const dataByteLength = dataLength ? byteSize * dataLength : data.byteLength;
-        const isArrayBufferView = (<ArrayBufferView>data).byteOffset !== undefined;
-        const byteOffset = isArrayBufferView ? (<ArrayBufferView>data).byteOffset + dataOffset * byteSize : dataOffset;
-        const srcData = new Uint8Array(arrayBuffer, byteOffset, dataByteLength);
-        this._data!.set(srcData, bufferByteOffset);
-      }
+      const view = ArrayBuffer.isView(data) ? data : undefined;
+      const buffer = view ? view.buffer : (data as ArrayBuffer);
+      const bytes = (data as TypedArray).BYTES_PER_ELEMENT || 1;
+      const start = dataOffset * bytes;
+      const length = dataLength === undefined ? data.byteLength - start : dataLength * bytes;
+      if (bufferByteOffset === 0 && length === this._byteLength) this._cpuDataValid = true;
+      const src = new Uint8Array(buffer, (view?.byteOffset ?? 0) + start, length);
+      this._data!.set(src, bufferByteOffset);
     }
     this._isContentLost = false;
     this._dataUpdateManager.dispatch();
@@ -239,7 +243,31 @@ export class Buffer extends GraphicsResource {
   getData(data: ArrayBufferView, bufferByteOffset: number, dataOffset: number, dataLength: number): void;
 
   getData(data: ArrayBufferView, bufferByteOffset: number = 0, dataOffset: number = 0, dataLength?: number): void {
+    if (this._platformBuffer.supportsSynchronousReadback === false && this._readable && this._cpuDataValid) {
+      const bytes = (data as TypedArray).BYTES_PER_ELEMENT || 1;
+      const size = dataLength === undefined ? data.byteLength - dataOffset * bytes : dataLength * bytes;
+      if (
+        bufferByteOffset < 0 ||
+        dataOffset < 0 ||
+        size < 0 ||
+        bufferByteOffset + size > this._byteLength ||
+        dataOffset * bytes + size > data.byteLength
+      ) {
+        throw new RangeError("Buffer read exceeds the source or destination range.");
+      }
+      new Uint8Array(data.buffer, data.byteOffset + dataOffset * bytes, size).set(
+        this._data!.subarray(bufferByteOffset, bufferByteOffset + size)
+      );
+      return;
+    }
     this._platformBuffer.getData(data, bufferByteOffset, dataOffset, dataLength);
+  }
+
+  /** Read the GPU contents, including earlier writes in the current frame. */
+  async getDataAsync(data: ArrayBufferView, bufferByteOffset = 0, dataOffset = 0, dataLength?: number): Promise<void> {
+    const platform = this._platformBuffer;
+    if (platform.getDataAsync) return platform.getDataAsync(data, bufferByteOffset, dataOffset, dataLength);
+    platform.getData(data, bufferByteOffset, dataOffset, dataLength);
   }
 
   /**
@@ -251,6 +279,14 @@ export class Buffer extends GraphicsResource {
    */
   copyFromBuffer(srcBuffer: Buffer, srcByteOffset: number, dstByteOffset: number, byteLength: number): void {
     this._platformBuffer.copyFromBuffer(srcBuffer._platformBuffer, srcByteOffset, dstByteOffset, byteLength);
+    if (this._readable) {
+      if (srcBuffer._readable && srcBuffer._cpuDataValid) {
+        this._data!.set(srcBuffer._data!.subarray(srcByteOffset, srcByteOffset + byteLength), dstByteOffset);
+        if (dstByteOffset === 0 && byteLength === this._byteLength) this._cpuDataValid = true;
+      } else {
+        this._cpuDataValid = false;
+      }
+    }
   }
 
   /**

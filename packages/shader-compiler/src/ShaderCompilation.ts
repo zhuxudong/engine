@@ -1,5 +1,5 @@
 import { Logger, ShaderLanguage } from "@galacean/engine-core";
-import type { IRenderStates, IShaderSource } from "@galacean/engine-design";
+import type { IRenderStates, IShaderSource, IWebGPUShaderCompiler } from "@galacean/engine-design";
 import type { IShaderProgramSource } from "@galacean/engine-design/types/shader-compiler/IShaderProgramSource";
 import { Color } from "@galacean/engine-math";
 import {
@@ -46,7 +46,8 @@ export function generateParsedShaderPassData(
   vertexEntry: string,
   fragmentEntry: string,
   backend: ShaderLanguage,
-  coreInfo?: ShaderCoreInfo
+  coreInfo?: ShaderCoreInfo,
+  webgpu?: IWebGPUShaderCompiler
 ): IShaderProgramSource | undefined {
   if (parsed.blockingErrors.length) {
     for (const error of parsed.blockingErrors) Logger.error(error.toString());
@@ -54,7 +55,18 @@ export function generateParsedShaderPassData(
   }
   if (!parsed.ir) return undefined;
   const resolvedCoreInfo = coreInfo ?? ShaderCoreInfo.create(parsed.ir, vertexEntry, fragmentEntry);
-  return generateShaderProgram(parsed.ir, resolvedCoreInfo, backend, parsed.preprocessorExpressions);
+  if (backend === ShaderLanguage.WGSL && !webgpu) {
+    throw new Error("WGSL compilation requires a backend from createWebGPUShaderCompiler().");
+  }
+  const result = generateShaderProgram(parsed.ir, resolvedCoreInfo,
+    backend === ShaderLanguage.WGSL ? ShaderLanguage.GLSLES300 : backend, parsed.preprocessorExpressions);
+  if (result && backend === ShaderLanguage.WGSL) {
+    const wgsl = webgpu!.compileDefaultVariant(result);
+    result.wgsl = wgsl;
+    result.vertex = wgsl.vertex;
+    result.fragment = wgsl.fragment;
+  }
+  return result;
 }
 
 function generateShaderProgram(

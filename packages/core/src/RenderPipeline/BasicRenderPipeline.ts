@@ -58,7 +58,7 @@ export class BasicRenderPipeline {
   constructor(camera: Camera) {
     this._camera = camera;
     const { engine } = camera;
-    const shaders = Engine._builtinShaders;
+    const shaders = engine._builtinShaders;
     this._cullingResults = new CullingResults();
     this._cascadedShadowCasterPass = new CascadedShadowCasterPass(camera);
     this._depthOnlyPass = new DepthOnlyPass(engine);
@@ -131,7 +131,7 @@ export class BasicRenderPipeline {
 
     // Depth use camera's view and projection matrix
     this._cullingResults.setRenderUpdateFlagTrue(ContextRendererUpdateFlag.viewProjectionMatrix);
-    context.applyVirtualCamera(camera._virtualCamera, depthPassEnabled);
+    context.applyVirtualCamera(camera._virtualCamera, depthPassEnabled && rhi.backend === "webgl2");
     this._prepareRender(context);
 
     const batcherManager = engine._batcherManager;
@@ -231,7 +231,9 @@ export class BasicRenderPipeline {
     const internalColorTarget = this._internalColorTarget;
     const colorTarget = internalColorTarget || camera.renderTarget;
     const colorViewport = internalColorTarget ? PipelineUtils.defaultViewport : camera.viewport;
-    const needFlipProjection = !!internalColorTarget || (camera.renderTarget && cubeFace == undefined);
+    // WebGL textures start at the bottom left. Cube capture uses the opposite winding
+    // to match the face orientation used when sampling a cube on both backends.
+    const needFlipProjection = !!colorTarget && (rhi.backend === "webgl2") === (!!internalColorTarget || cubeFace == undefined);
     const keepColorFlag = !!internalColorTarget && (~finalClearFlags & CameraClearFlags.Color) !== 0;
     const hasInternalMSAA = !!internalColorTarget && internalColorTarget.antiAliasing > 1;
     const finalColorStoreAction = hasInternalMSAA ? RenderBufferStoreAction.Resolve : RenderBufferStoreAction.Store;
@@ -260,7 +262,8 @@ export class BasicRenderPipeline {
       RenderBufferLoadAction.Load,
       keepColorFlag ? RenderBufferStoreAction.Store : opaqueColorStoreAction,
       RenderBufferLoadAction.Load,
-      keepColorFlag ? RenderBufferStoreAction.Store : opaqueDepthStoreAction
+      keepColorFlag ? RenderBufferStoreAction.Store : opaqueDepthStoreAction,
+      "Camera Forward"
     );
 
     // Clear color
@@ -308,7 +311,8 @@ export class BasicRenderPipeline {
           RenderBufferLoadAction.Load,
           opaqueColorStoreAction,
           RenderBufferLoadAction.Load,
-          opaqueDepthStoreAction
+          opaqueDepthStoreAction,
+          "Camera Opaque"
         );
       }
     }
@@ -346,7 +350,8 @@ export class BasicRenderPipeline {
         RenderBufferLoadAction.Load,
         finalColorStoreAction,
         RenderBufferLoadAction.Load,
-        finalDepthStoreAction
+        finalDepthStoreAction,
+        "Camera Transparent"
       );
     } else {
       camera.shaderData.setTexture(Camera._cameraOpaqueTextureProperty, null);
@@ -503,7 +508,7 @@ export class BasicRenderPipeline {
     const pass = material.shader.subShaders[0].passes[0];
     const compileMacros = Shader._compileMacros;
     ShaderMacroCollection.unionCollection(compileMacros, engine._macroCollection, compileMacros);
-    const program = pass._getShaderProgram(engine, compileMacros);
+    const program = pass._getShaderProgram(engine, compileMacros, undefined, mesh._primitive, undefined, material.shaderData);
     program.bind();
     program.uploadAll(program.materialUniformBlock, material.shaderData);
     program.uploadAll(program.cameraUniformBlock, camera.shaderData);
@@ -512,7 +517,7 @@ export class BasicRenderPipeline {
 
     const renderState = pass._renderState;
     renderState._applyStates(engine, false, pass._renderStateDataMap, material.shaderData);
-    rhi.drawPrimitive(mesh._primitive, mesh.subMesh, program);
+    rhi.drawPrimitive(mesh._primitive, mesh.subMesh, program._platformProgram);
   }
 
   private _prepareRender(context: RenderContext): void {

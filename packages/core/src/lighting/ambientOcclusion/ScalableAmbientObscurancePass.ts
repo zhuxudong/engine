@@ -56,7 +56,7 @@ export class ScalableAmbientObscurancePass extends PipelinePass {
 
     this._depthRenderTarget = depthRenderTarget;
 
-    const format = TextureFormat.R8G8B8_UNorm;
+    const format = TextureFormat.R8G8B8A8_UNorm;
 
     this._saoRenderTarget = PipelineUtils.recreateRenderTargetIfNeeded(
       engine,

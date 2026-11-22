@@ -1,4 +1,5 @@
 import { ShaderLanguage } from "@galacean/engine-core";
+import type { IWebGPUShaderCompiler } from "@galacean/engine-design";
 import type { IShaderSource } from "@galacean/engine-design";
 import type { IShaderProgramSource } from "@galacean/engine-design/types/shader-compiler/IShaderProgramSource";
 import {
@@ -22,6 +23,7 @@ import { generateParsedShaderPassData, requireValidShaderSource } from "./Shader
  * validation lives in the bundler-only precompiler entry and is excluded from this runtime package surface.
  */
 export class ShaderCompiler {
+  constructor(private readonly webgpu?: IWebGPUShaderCompiler) {}
   private _includeMap: IncludeMap = {};
   private readonly _chunkOutputCache: ChunkOutputCache = new Map();
   private readonly _sourceParserObjectPool = new ParserObjectPool();
@@ -78,7 +80,7 @@ export class ShaderCompiler {
       this._runtimeParser,
       sourceScopeStarts
     );
-    return generateParsedShaderPassData(parsed, vertexEntry, fragmentEntry, backend);
+    return generateParsedShaderPassData(parsed, vertexEntry, fragmentEntry, backend, undefined, this.webgpu);
   }
 
   /**
@@ -90,6 +92,6 @@ export class ShaderCompiler {
    */
   generate(pass: ParsedShaderPass, backend: ShaderLanguage): IShaderProgramSource | undefined {
     const { data, vertexEntry, fragmentEntry, coreInfo } = getParsedShaderPassPayload(pass);
-    return generateParsedShaderPassData(data, vertexEntry, fragmentEntry, backend, coreInfo);
+    return generateParsedShaderPassData(data, vertexEntry, fragmentEntry, backend, coreInfo, this.webgpu);
   }
 }

@@ -17,9 +17,9 @@ import {
   ShadowResolution,
   ShadowType,
   Texture2D,
-  TextureFormat,
-  Vector3
-} from "@galacean/engine";
+  TextureFormat
+} from "@galacean/engine-core";
+import { Vector3 } from "@galacean/engine-math";
 
 function addMesh(root, mesh, material, x, y, z) {
   const entity = root.createChild();
@@ -164,6 +164,16 @@ function particles(engine, root, camera) {
       childSeed
     },
     async validate(gl) {
+      if (!gl) {
+        // Sample the simulation output after all timed frames. The selected range is written by Compute.
+        const probe = new Float32Array(6);
+        await primary._feedbackSimulator.readBinding.buffer.getDataAsync(probe);
+        const active = [primary, parents, children.generator].reduce((n, g) => n + g._getAliveParticleCount(), 0);
+        if (active !== particleCount || !probe.every(Number.isFinite) || !probe.some((x) => x !== 0)) {
+          throw new Error("WebGPU particle simulation did not populate the expected active slots.");
+        }
+        return { feedbackParticles: active, feedbackSample: Array.from(probe) };
+      }
       // Query a separate steady-state frame after all timed samples. Each simulated particle writes one point.
       await new Promise(requestAnimationFrame);
       const target = gl.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN;

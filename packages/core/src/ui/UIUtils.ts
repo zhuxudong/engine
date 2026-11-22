@@ -34,7 +34,7 @@ export class UIUtils {
     const { elements: projectE } = virtualCamera.projectionMatrix;
     const { elements: viewE } = virtualCamera.viewMatrix;
     (projectE[0] = 2 / canvas.width), (projectE[5] = 2 / canvas.height), (projectE[10] = 0);
-    renderContext.setRenderTarget(null, viewport, 0);
+    renderContext.setRenderTarget(null, viewport, 0, undefined, undefined, undefined, undefined, undefined, "UI Overlay");
     for (let i = 0, n = uiCanvases.length; i < n; i++) {
       const uiCanvas = uiCanvases.get(i);
       if (uiCanvas) {
@@ -56,6 +56,7 @@ export class UIUtils {
       }
     }
     renderContext.camera = null!;
+    rhi.endRenderPass();
     engine._macroCollection.disable(UIUtils._shouldSRGBCorrect);
   }
 }

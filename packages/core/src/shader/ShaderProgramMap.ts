@@ -17,9 +17,18 @@ export class ShaderProgramMap {
   private _cacheMap: Tree = Object.create(null);
   private _lastQueryMap: Record<number, ShaderProgram>;
   private _lastQueryKey: number;
+  private _specializations?: Map<string, ShaderProgramMap>;
 
   constructor(engine: Engine) {
     this.engine = engine;
+  }
+
+  /** Distinguish native feedback outputs and integer vertex inputs sharing the same macro mask. */
+  specialize(key: string): ShaderProgramMap {
+    const maps = (this._specializations ??= new Map());
+    let map = maps.get(key);
+    if (!map) maps.set(key, map = new ShaderProgramMap(this.engine));
+    return map;
   }
 
   get(macros: ShaderMacroCollection): ShaderProgram | null {
@@ -55,6 +64,8 @@ export class ShaderProgramMap {
   }
 
   destroy(): void {
+    this._specializations?.forEach((map) => map.destroy());
+    this._specializations = undefined;
     this._recursiveForEach(0, this._cacheMap);
     this._cacheMap = Object.create(null);
     this._cacheHierarchyDepth = 1;

@@ -23,6 +23,7 @@ import { PostProcessPass } from "./postProcess/PostProcessPass";
 import { PostProcessUberPass } from "./postProcess/PostProcessUberPass";
 import { Shader } from "./shader/Shader";
 import type { GlobalUniformBlock } from "./shader/GlobalUniformBlock";
+import type { IWebGPUShaderCompiler } from "@galacean/engine-design";
 import type { BuiltinShaders } from "./shader/BuiltinShaders";
 import { ShaderMacro } from "./shader/ShaderMacro";
 import { ShaderMacroCollection } from "./shader/ShaderMacroCollection";
@@ -42,6 +43,10 @@ import { XRManager } from "./xr/XRManager";
 export class Engine extends EventDispatcher {
   /** @internal */
   static _builtinShaders: BuiltinShaders;
+  /** @internal Built-in shader assets selected by this engine's distribution. */
+  readonly _builtinShaders: BuiltinShaders;
+  /** @internal */
+  readonly _shaderCompiler?: IShaderCompiler;
 
   /** @internal */
   static _outputSRGBCorrectMacro = ShaderMacro.getByName("ENGINE_OUTPUT_SRGB_CORRECT");
@@ -86,6 +91,11 @@ export class Engine extends EventDispatcher {
   _renderTargetPool: RenderTargetPool;
   /** @internal */
   _lastRenderState: RenderState = new RenderState();
+  /** @internal Scratch values resolved from a pass, material and render element for this draw. */
+  readonly _resolvedRenderState = new RenderState();
+  /** @internal Backend-specific specialization belongs to the device's engine. */
+  readonly _webGPUShaderCompiler?: IWebGPUShaderCompiler;
+  private _frameDepth = 0;
 
   /** @internal */
   _renderElementPool = new ClearableObjectPool(RenderElement);
@@ -246,6 +256,9 @@ export class Engine extends EventDispatcher {
   protected constructor(canvas: Canvas, hardwareRenderer: IHardwareRenderer, configuration: EngineConfiguration) {
     super();
     this._hardwareRenderer = hardwareRenderer;
+    this._webGPUShaderCompiler = configuration.webGPUShaderCompiler;
+    this._builtinShaders = configuration.builtinShaders ?? Engine._builtinShaders;
+    this._shaderCompiler = configuration.shaderCompiler;
     this._hardwareRenderer.init(canvas, this._onDeviceLost.bind(this), this._onDeviceRestored.bind(this));
 
     this._canvas = canvas;
@@ -268,7 +281,7 @@ export class Engine extends EventDispatcher {
     depthTexture2D.isGCIgnored = true;
     this._depthTexture2D = depthTexture2D;
 
-    this._basicResources = new BasicResources(this, Engine._builtinShaders);
+    this._basicResources = new BasicResources(this, this._builtinShaders);
     this._particleBufferUtils = new ParticleBufferUtils(this);
 
     const uberPass = new PostProcessUberPass(this);
@@ -378,7 +391,12 @@ export class Engine extends EventDispatcher {
 
     // Render scene and fire `onBeginRender` and `onEndRender`
     if (!this._hardwareRenderer.isContextLost()) {
-      this._render(scenes);
+      this._beginFrame();
+      try {
+        this._render(scenes);
+      } finally {
+        this._endFrame();
+      }
     }
 
     // Process pending destroys
@@ -394,6 +412,17 @@ export class Engine extends EventDispatcher {
       this._gc();
       this._waitingGC = false;
     }
+  }
+
+  /** @internal All cameras, including nested captures, submit to the enclosing frame. */
+  _beginFrame(): void {
+    if (this._frameDepth === 0) this._hardwareRenderer.beginFrame();
+    ++this._frameDepth;
+  }
+
+  /** @internal */
+  _endFrame(): void {
+    if (--this._frameDepth === 0) this._hardwareRenderer.endFrame();
   }
 
   /**
@@ -628,14 +657,14 @@ export class Engine extends EventDispatcher {
   protected _initialize(configuration: EngineConfiguration): Promise<this> {
     const { shaderCompiler, physics } = configuration;
 
-    if (shaderCompiler && !Shader._shaderCompiler) {
+    if (shaderCompiler) {
       // Bind the runtime include map so the preprocessor sees every chunk
       // the umbrella package's ShaderPool registered into ShaderFactory.
       // shader-compiler defaults to an empty map and stays free of any direct
       // ShaderFactory dependency, so the binding has to be wired here at the
       // runtime boundary.
       shaderCompiler._setIncludeMap(ShaderFactory.includeMap);
-      Shader._shaderCompiler = shaderCompiler;
+      if (this._hardwareRenderer.backend !== "webgpu" || !Shader._shaderCompiler) Shader._shaderCompiler = shaderCompiler;
     }
 
     const initializePromises: (Promise<unknown> | void)[] = [];
@@ -739,6 +768,10 @@ export class Engine extends EventDispatcher {
  * Engine configuration.
  */
 export interface EngineConfiguration {
+  /** Built-in shader assets supplied by the engine distribution. */
+  builtinShaders?: BuiltinShaders;
+  /** Optional WebGPU shader specialization supported by this engine's device. */
+  webGPUShaderCompiler?: IWebGPUShaderCompiler;
   /** Physics. */
   physics?: IPhysics;
   /** XR Device. */

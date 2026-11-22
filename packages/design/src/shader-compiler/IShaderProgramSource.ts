@@ -1,5 +1,6 @@
 import type { ShaderInstruction } from "./ICondition";
 import type { IShaderUniformPlan } from "./IShaderUniformPlan";
+import type { IWebGPUShaderProgram } from "./IWebGPUShaderProgram";
 
 /** Byte layout of a fixed, column-major std140 uniform block. */
 export interface IShaderUniformBlock {
@@ -34,6 +35,8 @@ export interface IShaderProgramSource {
   /** Explicit uniform blocks used by either stage, before macro selection. */
   uniformBlocks?: IShaderUniformBlock[];
   uniformPlan?: IShaderUniformPlan;
+  /** Precompiled WGSL for the no-feature variant; instructions retain all feature variants. */
+  wgsl?: IWebGPUShaderProgram;
   /** Vertex program, including declaration ownership that cannot be recovered from the text view. */
   vertexShaderInstructions?: ShaderInstruction[];
   /** Fragment program, including declaration ownership that cannot be recovered from the text view. */

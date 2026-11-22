@@ -1,5 +1,5 @@
 import { ShaderLanguage } from "@galacean/engine-core";
-import type { IPrecompiledShader } from "@galacean/engine-design";
+import type { IPrecompiledShader, IWebGPUShaderCompiler } from "@galacean/engine-design";
 import {
   branchAnalysis,
   createValidatedShaderTargetParser,
@@ -25,6 +25,7 @@ import {
  * it from `@galacean/engine-shader-compiler/precompile`.
  */
 export class ShaderPrecompiler {
+  constructor(private readonly webgpu?: IWebGPUShaderCompiler) {}
   private _includeMap: IncludeMap = Object.create(null);
   private readonly _chunkOutputCache: ChunkOutputCache = new Map();
   private readonly _sourceParserObjectPool = new ParserObjectPool();
@@ -102,7 +103,8 @@ export class ShaderPrecompiler {
             pass.vertexEntry,
             pass.fragmentEntry,
             platformTarget,
-            coreInfo
+            coreInfo,
+            this.webgpu
           );
           if (!program) {
             throw new Error(
@@ -117,6 +119,7 @@ export class ShaderPrecompiler {
             vertexOutputNames: program.vertexOutputNames,
             uniformBlocks: program.uniformBlocks,
             uniformPlan: program.uniformPlan,
+            wgsl: program.wgsl,
             vertexShaderInstructions: program.vertexShaderInstructions,
             fragmentShaderInstructions: program.fragmentShaderInstructions
           };

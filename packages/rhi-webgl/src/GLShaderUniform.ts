@@ -1,44 +1,46 @@
-import type { IHardwareRenderer } from "../renderingHardwareInterface";
+import type { IPlatformUniform, ShaderPropertyValueType, Texture } from "@galacean/engine-core";
 import { Color, Matrix, Vector2, Vector3, Vector4 } from "@galacean/engine-math";
-import { Engine } from "../Engine";
-import { Texture } from "../texture/Texture";
-import { ShaderPropertyValueType } from "./ShaderData";
+import type { WebGLGraphicDevice } from "./WebGLGraphicDevice";
 
 /**
  * Shader uniform。
  * @internal
  */
-export class ShaderUniform {
+export class GLShaderUniform implements IPlatformUniform {
+  isTexture = false;
   name: string;
   propertyId: number;
   location: WebGLUniformLocation;
-  applyFunc: (shaderUniform: ShaderUniform, value: ShaderPropertyValueType) => void;
+  applyFunc: (shaderUniform: GLShaderUniform, value: ShaderPropertyValueType) => void;
   cacheValue: number | Vector2 | Vector3 | Vector4;
   textureIndex: GLenum | GLenum[];
   textureDefault: Texture | Texture[];
   textureUseCompareMode: boolean = false;
 
-  private _rhi: IHardwareRenderer;
+  private _rhi: WebGLGraphicDevice;
   private _gl: WebGL2RenderingContext;
 
-  constructor(engine: Engine) {
-    const rhi = engine._hardwareRenderer;
+  apply(value: ShaderPropertyValueType): void {
+    this.applyFunc(this, value);
+  }
+
+  constructor(rhi: WebGLGraphicDevice) {
     this._rhi = rhi;
     this._gl = rhi.gl;
   }
 
-  upload1f(shaderUniform: ShaderUniform, value: number): void {
+  upload1f(shaderUniform: GLShaderUniform, value: number): void {
     if (this.cacheValue !== value) {
       this._gl.uniform1f(shaderUniform.location, value);
       this.cacheValue = value;
     }
   }
 
-  upload1fv(shaderUniform: ShaderUniform, value: Float32Array): void {
+  upload1fv(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniform1fv(shaderUniform.location, value);
   }
 
-  upload2f(shaderUniform: ShaderUniform, value: Vector2 | Vector3 | Vector4 | Color): void {
+  upload2f(shaderUniform: GLShaderUniform, value: Vector2 | Vector3 | Vector4 | Color): void {
     const cacheValue = <Vector2>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (cacheValue.x !== (<Color>value).r || cacheValue.y !== (<Color>value).g) {
@@ -55,11 +57,11 @@ export class ShaderUniform {
     }
   }
 
-  upload2fv(shaderUniform: ShaderUniform, value: Float32Array): void {
+  upload2fv(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniform2fv(shaderUniform.location, value);
   }
 
-  upload3f(shaderUniform: ShaderUniform, value: Vector3 | Vector4 | Color): void {
+  upload3f(shaderUniform: GLShaderUniform, value: Vector3 | Vector4 | Color): void {
     const cacheValue = <Vector3>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (cacheValue.x !== (<Color>value).r || cacheValue.y !== (<Color>value).g || cacheValue.z !== (<Color>value).b) {
@@ -82,11 +84,11 @@ export class ShaderUniform {
     }
   }
 
-  upload3fv(shaderUniform: ShaderUniform, value: Float32Array): void {
+  upload3fv(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniform3fv(shaderUniform.location, value);
   }
 
-  upload4f(shaderUniform: ShaderUniform, value: Vector4 | Color): void {
+  upload4f(shaderUniform: GLShaderUniform, value: Vector4 | Color): void {
     const cacheValue = <Vector4>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (
@@ -129,22 +131,22 @@ export class ShaderUniform {
     }
   }
 
-  upload4fv(shaderUniform: ShaderUniform, value: Float32Array): void {
+  upload4fv(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniform4fv(shaderUniform.location, value);
   }
 
-  upload1i(shaderUniform: ShaderUniform, value: number): void {
+  upload1i(shaderUniform: GLShaderUniform, value: number): void {
     if (this.cacheValue !== value) {
       this._gl.uniform1i(shaderUniform.location, value);
       this.cacheValue = value;
     }
   }
 
-  upload1iv(shaderUniform: ShaderUniform, value: Int32Array): void {
+  upload1iv(shaderUniform: GLShaderUniform, value: Int32Array): void {
     this._gl.uniform1iv(shaderUniform.location, value);
   }
 
-  upload2i(shaderUniform: ShaderUniform, value: Vector2 | Vector3 | Vector4 | Color): void {
+  upload2i(shaderUniform: GLShaderUniform, value: Vector2 | Vector3 | Vector4 | Color): void {
     const cacheValue = <Vector2>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (cacheValue.x !== (<Color>value).r || cacheValue.y !== (<Color>value).g) {
@@ -161,11 +163,11 @@ export class ShaderUniform {
     }
   }
 
-  upload2iv(shaderUniform: ShaderUniform, value: Int32Array): void {
+  upload2iv(shaderUniform: GLShaderUniform, value: Int32Array): void {
     this._gl.uniform2iv(shaderUniform.location, value);
   }
 
-  upload3i(shaderUniform: ShaderUniform, value: Vector3 | Vector4 | Color): void {
+  upload3i(shaderUniform: GLShaderUniform, value: Vector3 | Vector4 | Color): void {
     const cacheValue = <Vector3>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (cacheValue.x !== (<Color>value).r || cacheValue.y !== (<Color>value).g || cacheValue.z !== (<Color>value).b) {
@@ -187,10 +189,10 @@ export class ShaderUniform {
       }
     }
   }
-  upload3iv(shaderUniform: ShaderUniform, value: Int32Array): void {
+  upload3iv(shaderUniform: GLShaderUniform, value: Int32Array): void {
     this._gl.uniform3iv(shaderUniform.location, value);
   }
-  upload4i(shaderUniform: ShaderUniform, value: Vector4 | Color): void {
+  upload4i(shaderUniform: GLShaderUniform, value: Vector4 | Color): void {
     const cacheValue = <Vector4>this.cacheValue;
     if ((<Color>value).r !== undefined) {
       if (
@@ -233,69 +235,63 @@ export class ShaderUniform {
     }
   }
 
-  upload4iv(shaderUniform: ShaderUniform, value: Int32Array): void {
+  upload4iv(shaderUniform: GLShaderUniform, value: Int32Array): void {
     this._gl.uniform4iv(shaderUniform.location, value);
   }
 
-  uploadMat2(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat2(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix2fv(shaderUniform.location, false, value);
   }
 
-  uploadMat3(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat3(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix3fv(shaderUniform.location, false, value);
   }
 
-  uploadMat4(shaderUniform: ShaderUniform, value: Matrix): void {
+  uploadMat4(shaderUniform: GLShaderUniform, value: Matrix): void {
     this._gl.uniformMatrix4fv(shaderUniform.location, false, value.elements);
   }
 
-  uploadMat4v(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat4v(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix4fv(shaderUniform.location, false, value);
   }
 
-  uploadMat2x3(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat2x3(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix2x3fv(shaderUniform.location, false, value);
   }
 
-  uploadMat2x4(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat2x4(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix2x4fv(shaderUniform.location, false, value);
   }
 
-  uploadMat3x2(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat3x2(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix3x2fv(shaderUniform.location, false, value);
   }
 
-  uploadMat3x4(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat3x4(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix3x4fv(shaderUniform.location, false, value);
   }
 
-  uploadMat4x2(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat4x2(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix4x2fv(shaderUniform.location, false, value);
   }
 
-  uploadMat4x3(shaderUniform: ShaderUniform, value: Float32Array): void {
+  uploadMat4x3(shaderUniform: GLShaderUniform, value: Float32Array): void {
     this._gl.uniformMatrix4x3fv(shaderUniform.location, false, value);
   }
 
-  uploadTexture(shaderUniform: ShaderUniform, value: Texture): void {
-    const rhi = this._rhi;
-    rhi.activeTexture(shaderUniform.textureIndex as GLenum);
-    rhi.bindTexture(value._platformTexture);
-
-    value._setUseDepthCompareMode(shaderUniform.textureUseCompareMode);
+  uploadTexture(shaderUniform: GLShaderUniform, value: Texture): void {
+    this._rhi.bindSampledTexture(value, shaderUniform.textureIndex as GLenum, shaderUniform.textureUseCompareMode);
   }
 
-  uploadTextureArray(shaderUniform: ShaderUniform, value: Texture[]): void {
+  uploadTextureArray(shaderUniform: GLShaderUniform, value: Texture[]): void {
     if (!Array.isArray(value)) {
       value = <Texture[]>shaderUniform.textureDefault;
     }
     const rhi = this._rhi;
     const textureIndices = shaderUniform.textureIndex as GLenum[];
-    for (let i = 0; i < value.length; i++) {
-      const texture = value[i];
-      rhi.activeTexture(textureIndices[i]);
-      rhi.bindTexture(texture._platformTexture);
-      texture._setUseDepthCompareMode(shaderUniform.textureUseCompareMode);
+    const defaults = shaderUniform.textureDefault as Texture[];
+    for (let i = 0; i < textureIndices.length; i++) {
+      rhi.bindSampledTexture(value[i] ?? defaults[i], textureIndices[i], shaderUniform.textureUseCompareMode);
     }
   }
 }

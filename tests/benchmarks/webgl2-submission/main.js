@@ -1,13 +1,6 @@
-import {
-  AssetType,
-  Camera,
-  DirectLight,
-  MeshRenderer,
-  PrimitiveMesh,
-  UnlitMaterial,
-  Vector3,
-  WebGLEngine
-} from "@galacean/engine";
+import { AssetType, Camera, DirectLight, MeshRenderer, PrimitiveMesh, UnlitMaterial } from "@galacean/engine-core";
+import { Vector3 } from "@galacean/engine-math";
+import { inspectWebGPUFrame, captureRGBA } from "./webgpu";
 import { prepareScene } from "./scenes";
 
 function submissionScene(engine, root, camera) {
@@ -99,6 +92,7 @@ function framebufferHash(gl) {
   } finally {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
   }
+  captureRGBA(pixels,gl.drawingBufferWidth,gl.drawingBufferHeight,4*gl.drawingBufferWidth,true);
   let hash = 0x811c9dc5;
   for (const byte of pixels) hash = Math.imul(hash ^ byte, 0x01000193);
   return (hash >>> 0).toString(16).padStart(8, "0");
@@ -110,7 +104,15 @@ async function measure() {
   const canvas = document.querySelector("canvas");
   const width = scenario === "S1" ? 256 : 640;
   const height = scenario === "S1" ? 256 : 360;
-  const engine = await WebGLEngine.create({ canvas, graphicDeviceOptions: { antialias: false } });
+  const gpu = new URLSearchParams(location.search).get("backend") === "webgpu";
+  const Engine = gpu
+    ? (await import("@galacean/engine-webgpu")).WebGPUEngine
+    : (await import("@galacean/engine")).WebGLEngine;
+  const start = performance.now();
+  const engine = await Engine.create({ canvas, graphicDeviceOptions: gpu ? {} : { antialias: false } });
+  const initializationMs = performance.now() - start;
+  const device = gpu && engine._hardwareRenderer.device;
+  if (device) device.pushErrorScope("validation");
   try {
     engine.canvas.setResolution(width, height);
     const root = engine.sceneManager.activeScene.createRootEntity();
@@ -121,9 +123,12 @@ async function measure() {
         : scenario === "S5"
           ? await sponzaScene(engine, root, camera)
           : await prepareScene(scenario, engine, root, camera);
+    let firstDrawMs;
     for (let i = 0; i < 30; ++i) {
       await frame();
+      const drawStart = performance.now();
       engine.update();
+      if (i === 0) firstDrawMs = performance.now() - drawStart;
     }
     // Keep timing free of driver instrumentation, GL queries and GPU synchronization.
     const cpu = [],
@@ -138,36 +143,52 @@ async function measure() {
       engine.update();
       cpu.push(performance.now() - start);
     }
-    const gl = canvas.getContext("webgl2");
-    if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
-      throw new Error(`Unexpected benchmark resolution ${gl.drawingBufferWidth} × ${gl.drawingBufferHeight}`);
-    }
+    if (canvas.width !== width || canvas.height !== height) throw new Error("Unexpected benchmark resolution");
     await frame();
-    const counts = countCalls(gl, () => {
+    const render = () => {
       setup.beforeFrame?.(300);
       engine.update();
-    });
-    const draws =
-      (counts.drawElements || 0) +
-      (counts.drawElementsInstanced || 0) +
-      (counts.drawArrays || 0) +
-      (counts.drawArraysInstanced || 0);
-    if (!draws || (scenario === "S1" && (counts.drawElements !== 2048 || counts.drawElementsInstanced))) {
-      throw new Error("Unexpected draw count " + JSON.stringify(counts));
+    };
+    let rgbaHash, counts, renderer, evidence;
+    if (device) {
+      const result = await inspectWebGPUFrame(canvas, device, render);
+      counts = result.counts;
+      rgbaHash = result.hash;
+      renderer = device.adapterInfo?.description;
+      if (scenario === "S1" && counts.drawIndexed !== 2048)
+        throw new Error("Unexpected WebGPU draw count " + JSON.stringify(counts));
+      evidence = await setup.validate?.();
+      const error = await device.popErrorScope();
+      if (error) throw new Error(error.message);
+    } else {
+      const gl = canvas.getContext("webgl2");
+      counts = countCalls(gl, render);
+      const draws =
+        (counts.drawElements || 0) +
+        (counts.drawElementsInstanced || 0) +
+        (counts.drawArrays || 0) +
+        (counts.drawArraysInstanced || 0);
+      if (!draws || (scenario === "S1" && (counts.drawElements !== 2048 || counts.drawElementsInstanced))) {
+        throw new Error("Unexpected draw count " + JSON.stringify(counts));
+      }
+      rgbaHash = framebufferHash(gl);
+      evidence = await setup.validate?.(gl);
+      const debug = gl.getExtension("WEBGL_debug_renderer_info");
+      renderer = debug && gl.getParameter(debug.UNMASKED_RENDERER_WEBGL);
+      const driverError = gl.getError();
+      if (driverError) throw new Error("WebGL error " + driverError);
     }
-    const rgbaHash = framebufferHash(gl);
-    const evidence = await setup.validate?.(gl);
-    const debug = gl.getExtension("WEBGL_debug_renderer_info");
-    const driverError = gl.getError();
-    if (driverError) throw new Error("WebGL error " + driverError);
     return {
       scene: scenario,
+      backend: gpu ? "webgpu" : "webgl2",
+      initializationMs,
+      firstDrawMs,
       ...setup.details,
       ...evidence,
       frames: cpu.length,
-      width: gl.drawingBufferWidth,
-      height: gl.drawingBufferHeight,
-      renderer: debug && gl.getParameter(debug.UNMASKED_RENDERER_WEBGL),
+      width,
+      height,
+      renderer,
       userAgent: navigator.userAgent,
       firstMeasuredFrameMs: cpu[0],
       rgbaHash,

@@ -11,6 +11,9 @@ import {
   IPlatformPrimitive,
   IPlatformRenderTarget,
   IPlatformShaderProgram,
+  type IPlatformShaderSource,
+  type RenderState,
+  type RenderStateElementMap,
   IPlatformTexture,
   IPlatformTexture2D,
   IPlatformTextureCube,
@@ -30,11 +33,14 @@ import {
   TextureCubeFace,
   TextureFormat
 } from "@galacean/engine-core";
+import { Texture, TextureWrapMode, TextureFilterMode, TextureDepthCompareFunction } from "@galacean/engine-core";
 import { Color, Vector4 } from "@galacean/engine-math";
 import { GLBuffer } from "./GLBuffer";
 import { GLCapability } from "./GLCapability";
 import { GLExtensions } from "./GLExtensions";
 import { GLPrimitive } from "./GLPrimitive";
+import { GLShaderProgram } from "./GLShaderProgram";
+import { applyGLRenderState } from "./GLApplyRenderState";
 import { GLRenderStates } from "./GLRenderStates";
 import { GLRenderTarget } from "./GLRenderTarget";
 import { GLTexture } from "./GLTexture";
@@ -84,8 +90,25 @@ interface UniformBufferRanges {
  * WebGL graphic device, using WebGL2.0.
  */
 export class WebGLGraphicDevice implements IHardwareRenderer {
-  private static readonly _rangesByContext = new WeakMap<WebGL2RenderingContext, UniformBufferRanges>();
+  readonly backend = "webgl2";
+  beginFrame(): void {}
+  endRenderPass(): void { this._flushPendingStoreActions(); }
+  endFrame(): void {}
 
+  createPlatformShaderProgram(engine: Engine, source: IPlatformShaderSource): IPlatformShaderProgram {
+    return new GLShaderProgram(this, engine, source);
+  }
+
+  applyRenderState(state: RenderState, previous: RenderState, invert: boolean, custom?: RenderStateElementMap | null): void {
+    applyGLRenderState(this, state, previous, invert, custom);
+  }
+  private static readonly _rangesByContext = new WeakMap<WebGL2RenderingContext, UniformBufferRanges>();
+  private static readonly _samplerUnitsByContext = new WeakMap<WebGL2RenderingContext, (WebGLSampler | null)[]>();
+  private _samplerUnits: (WebGLSampler | null)[];
+  private readonly _depthSamplers = new Map<number, WebGLSampler>();
+
+  readonly supportsCompute = false;
+  readonly supportsTransformFeedback = true;
   readonly supportsRendering = true;
   maxUniformBlockSize: number;
   maxUniformBufferBindings: number;
@@ -151,7 +174,6 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   /** @internal */
   _mainFrameHeight: number = 0;
   /** @internal */
-  _enableGlobalDepthBias: boolean = false;
   /** @internal */
   _currentBindShaderProgram: IPlatformShaderProgram | null;
   /** @internal */
@@ -165,7 +187,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   /** @internal */
   readonly _options: WebGLGraphicDeviceOptions;
-  private _webGLOptions: WebGLContextAttributes;
+  private _webGLOptions: WebGLContextAttributes & { xrCompatible?: boolean };
   private _gl: WebGL2RenderingContext;
   private _renderStates: GLRenderStates;
   private _extensions: GLExtensions;
@@ -696,21 +718,46 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     }
   }
 
-  setGlobalDepthBias(bias: number, slopeBias: number): void {
-    const gl = this._gl;
-    const enable = bias !== 0 || slopeBias !== 0;
-    if (enable) {
-      gl.enable(gl.POLYGON_OFFSET_FILL);
-      gl.polygonOffset(slopeBias, bias);
-    } else {
-      gl.disable(gl.POLYGON_OFFSET_FILL);
-    }
-    this._enableGlobalDepthBias = enable;
-  }
-
   flush(): void {
     this._flushPendingStoreActions();
     this._gl.flush();
+  }
+
+  /** Sample a depth texture normally and through a shadow sampler in the same draw. */
+  bindSampledTexture(texture: Texture, slot: GLenum, compare: boolean): void {
+    this.activeTexture(slot);
+    this.bindTexture(texture._platformTexture);
+    const gl = this._gl;
+    const unit = slot - gl.TEXTURE0;
+    let sampler: WebGLSampler | null = null;
+    if (texture._isDepthTexture) {
+      const filter = compare ? texture.filterMode : TextureFilterMode.Point;
+      const func = compare ? texture.depthCompareFunction ?? TextureDepthCompareFunction.LessEqual : 0;
+      const mipmaps = texture._mipmap;
+      const u = texture.wrapModeU, v = texture.wrapModeV;
+      const key = u | (v << 2) | (filter << 4) | (+mipmaps << 6) | (+compare << 7) | (func << 8);
+      sampler = this._depthSamplers.get(key) ?? null;
+      if (!sampler) {
+        sampler = gl.createSampler();
+        if (!sampler) return;
+        const wrap = (value: TextureWrapMode) => value === TextureWrapMode.Clamp ? gl.CLAMP_TO_EDGE : value === TextureWrapMode.Repeat ? gl.REPEAT : gl.MIRRORED_REPEAT;
+        const mag = filter === TextureFilterMode.Point ? gl.NEAREST : gl.LINEAR;
+        const min = !mipmaps ? mag : filter === TextureFilterMode.Point ? gl.NEAREST_MIPMAP_NEAREST : filter === TextureFilterMode.Bilinear ? gl.LINEAR_MIPMAP_NEAREST : gl.LINEAR_MIPMAP_LINEAR;
+        gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_S, wrap(u));
+        gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_T, wrap(v));
+        gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, mag);
+        gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, min);
+        if (compare) {
+          gl.samplerParameteri(sampler, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+          gl.samplerParameteri(sampler, gl.TEXTURE_COMPARE_FUNC, gl.NEVER + func);
+        }
+        this._depthSamplers.set(key, sampler);
+      }
+    }
+    if (this._samplerUnits[unit] !== sampler) {
+      gl.bindSampler(unit, sampler);
+      this._samplerUnits[unit] = sampler;
+    }
   }
 
   forceLoseDevice(): void {
@@ -733,7 +780,6 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
 
   resetState(): void {
     this._readFrameBuffer = null;
-    this._enableGlobalDepthBias = false;
     this._currentBindShaderProgram = null;
     this._clearActiveRenderTargetState();
 
@@ -751,6 +797,10 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   protected _initGLState(gl: WebGL2RenderingContext): void {
+    let samplerUnits = WebGLGraphicDevice._samplerUnitsByContext.get(gl);
+    if (!samplerUnits) WebGLGraphicDevice._samplerUnitsByContext.set(gl, samplerUnits = []);
+    samplerUnits.length = 0;
+    this._samplerUnits = samplerUnits;
     this._shaderConstantValues = Object.create(null);
     this._activeTextureID = gl.TEXTURE0;
     this._fboColor0Attachment = [gl.COLOR_ATTACHMENT0];
@@ -785,7 +835,16 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
     this._uniformRanges = ranges;
   }
 
+  /** @internal Use the compositor target for the duration of an XR frame. */
+  setExternalFramebuffer(framebuffer: WebGLFramebuffer | null, width: number, height: number): void {
+    this._mainFrameBuffer = framebuffer;
+    this._mainFrameWidth = width;
+    this._mainFrameHeight = height;
+  }
+
   destroy(): void {
+    for (const sampler of this._depthSamplers.values()) this._gl.deleteSampler(sampler);
+    this._depthSamplers.clear();
     this._uniformRanges.buffers.fill(null);
     this._clearActiveRenderTargetState();
     const webCanvas = this._webCanvas;
@@ -876,6 +935,7 @@ export class WebGLGraphicDevice implements IHardwareRenderer {
   }
 
   private _onWebGLContextLost(event: WebGLContextEvent) {
+    this._depthSamplers.clear();
     this._uniformRanges.buffers.fill(null);
     event.preventDefault();
     this._onDeviceLost();

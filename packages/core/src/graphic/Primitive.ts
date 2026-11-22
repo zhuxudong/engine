@@ -6,6 +6,8 @@ import { IndexBufferBinding } from "./IndexBufferBinding";
 import { SubPrimitive } from "./SubPrimitive";
 import { VertexBufferBinding } from "./VertexBufferBinding";
 import { VertexElement } from "./VertexElement";
+import { VertexElementFormat } from "./enums/VertexElementFormat";
+import type { WebGPUShaderInputType } from "@galacean/engine-design";
 
 /**
  * @internal
@@ -28,6 +30,26 @@ export class Primitive extends GraphicsResource {
   private _vertexElements: VertexElement[] = [];
   private _indexBufferBinding: IndexBufferBinding | null;
   private _platformPrimitive: IPlatformPrimitive;
+  private _shaderInputs?: { key: string; types: Record<string, WebGPUShaderInputType> };
+
+  /** @internal WebGPU stage input types depend on integer versus normalized vertex fetch. */
+  _getShaderInputs(): { key: string; types: Record<string, WebGPUShaderInputType> } {
+    if (this._shaderInputs) return this._shaderInputs;
+    const types: Record<string, WebGPUShaderInputType> = Object.create(null);
+    const fields: string[] = [];
+    for (const element of this._vertexElements) {
+      const f = element.format;
+      const type =
+        f === VertexElementFormat.Byte4 || f === VertexElementFormat.Short2 || f === VertexElementFormat.Short4
+          ? "sint"
+          : f === VertexElementFormat.UByte4 || f === VertexElementFormat.UShort2 || f === VertexElementFormat.UShort4
+            ? "uint"
+            : "float";
+      types[element.attribute] = type;
+      fields.push(element.attribute + ":" + type);
+    }
+    return this._shaderInputs = { key: fields.sort().join(","), types };
+  }
 
   get vertexElements(): VertexElement[] {
     return this._vertexElements;
@@ -43,6 +65,7 @@ export class Primitive extends GraphicsResource {
   }
 
   addVertexElement(element: VertexElement): void {
+    this._shaderInputs = undefined;
     const vertexElementMap = this._vertexElementMap;
     const vertexElements = this._vertexElements;
 
@@ -58,6 +81,7 @@ export class Primitive extends GraphicsResource {
   }
 
   removeVertexElement(index: number): void {
+    this._shaderInputs = undefined;
     const vertexElements = this._vertexElements;
     // Delete the old vertex element
     const vertexElement = vertexElements[index];
@@ -67,6 +91,7 @@ export class Primitive extends GraphicsResource {
   }
 
   clearVertexElements(): void {
+    this._shaderInputs = undefined;
     this._vertexElements.length = 0;
     const vertexElementMap = this._vertexElementMap;
     for (const k in vertexElementMap) {
@@ -79,6 +104,7 @@ export class Primitive extends GraphicsResource {
    * @remarks should use together with `setVertexElementsLength`
    */
   setVertexElement(index: number, element: VertexElement): void {
+    this._shaderInputs = undefined;
     const vertexElementMap = this._vertexElementMap;
     const vertexElements = this._vertexElements;
 
@@ -92,6 +118,7 @@ export class Primitive extends GraphicsResource {
   }
 
   setVertexElementsLength(length: number): void {
+    this._shaderInputs = undefined;
     const vertexElementMap = this._vertexElementMap;
     const vertexElements = this._vertexElements;
 

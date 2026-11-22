@@ -13,6 +13,8 @@ import { RenderTarget, TextureCubeFace } from "../texture";
  * @internal
  */
 export class RenderContext {
+  /** Fixed raster depth bias required while drawing directional shadow maps. */
+  shadowDepthBias = false;
   static vpMatrixProperty = ShaderProperty._getBuiltinGlobal("camera_VPMat", ShaderDataGroup.Camera);
   static pipelineStageKey: ShaderTagKey = ShaderTagKey.getByName("pipelineStage");
 
@@ -75,10 +77,11 @@ export class RenderContext {
     viewport: Vector4,
     mipLevel?: number,
     faceIndex?: TextureCubeFace,
-    colorLoadAction?: RenderBufferLoadAction,
-    colorStoreAction?: RenderBufferStoreAction,
-    depthLoadAction?: RenderBufferLoadAction,
-    depthStoreAction?: RenderBufferStoreAction
+    colorLoadAction = RenderBufferLoadAction.Load,
+    colorStoreAction = RenderBufferStoreAction.Store,
+    depthLoadAction = RenderBufferLoadAction.Load,
+    depthStoreAction = RenderBufferStoreAction.Store,
+    label?: string
   ) {
     const engine = this.camera.engine;
     const rhi = engine._hardwareRenderer;
@@ -91,7 +94,8 @@ export class RenderContext {
       colorLoadAction,
       colorStoreAction,
       depthLoadAction,
-      depthStoreAction
+      depthStoreAction,
+      label
     );
 
     if (destination) {

@@ -12,6 +12,16 @@ import { NullTexture2D, NullTexture2DArray, NullTextureCube } from "./NullTextur
 
 /** Graphics resource adapter that never opens a GPU context. */
 export class NullGraphicDevice implements IHardwareRenderer {
+  readonly backend = "null";
+  beginFrame(): void {}
+  endRenderPass(): void {}
+  endFrame(): void {}
+  applyRenderState(): void {}
+  createPlatformShaderProgram(): never {
+    throw new Error("Shader programs require a graphics device.");
+  }
+  readonly supportsCompute = false;
+  readonly supportsTransformFeedback = false;
   readonly supportsRendering = false;
   readonly maxUniformBlockSize = 0;
   readonly maxUniformBufferBindings = 0;
@@ -26,7 +36,6 @@ export class NullGraphicDevice implements IHardwareRenderer {
     maxVertexUniformVectors: 0
   };
   _currentBindShaderProgram = null;
-  _enableGlobalDepthBias = false;
 
   get gl(): never {
     throw new Error("A WebGL context is unavailable on a null graphics device.");
@@ -110,7 +119,6 @@ export class NullGraphicDevice implements IHardwareRenderer {
   tryBindUniformBlock(): boolean {
     return false;
   }
-  setGlobalDepthBias(): void {}
   enableRasterizerDiscard(): void {}
   disableRasterizerDiscard(): void {}
   invalidateShaderProgramState(): void {}

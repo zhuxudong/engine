@@ -11,13 +11,13 @@ export const updateForE2E = (engine, deltaTime = 100, loopTime = 10) => {
   for (let i = 0; i < loopTime; ++i) {
     engine.update();
   }
-  engine._hardwareRenderer._gl.finish();
+  engine._hardwareRenderer.flush();
 };
 
 let screenshotCanvas: HTMLCanvasElement = null;
 let flipYCanvas: HTMLCanvasElement = null;
 
-export function initScreenshot(
+export async function initScreenshot(
   engine: Engine,
   camera: Camera | Camera[],
   width: number = 1200,
@@ -44,21 +44,27 @@ export function initScreenshot(
   const renderTargetData = new Uint8Array(width * height * 4);
   const renderTarget = new RenderTarget(engine, width, height, renderColorTexture, TextureFormat.Depth24Stencil8, 1);
 
-  cameras.forEach((camera) => {
-    const originalTarget = camera.renderTarget;
+  try {
+    cameras.forEach((camera) => {
+      const originalTarget = camera.renderTarget;
 
-    // render to off-screen
-    camera.renderTarget = renderTarget;
-    camera.aspectRatio = width / height;
-    camera.render();
-
-    callbacks.push(() => {
-      camera.renderTarget = originalTarget;
-      camera.resetAspectRatio();
+      // render to off-screen
+      camera.renderTarget = renderTarget;
+      camera.aspectRatio = width / height;
+      callbacks.push(() => {
+        camera.renderTarget = originalTarget;
+        camera.resetAspectRatio();
+      });
+      camera.render();
     });
-  });
 
-  renderColorTexture.getPixelBuffer(0, 0, width, height, 0, renderTargetData);
+    await renderColorTexture.getPixelBufferAsync(0, 0, width, height, 0, renderTargetData);
+  } finally {
+    for (const restore of callbacks) restore();
+    renderTarget.destroy();
+    renderColorTexture.destroy();
+    if (!isPaused) engine.resume();
+  }
 
   const imageData = context.createImageData(width, height);
   imageData.data.set(renderTargetData);
@@ -110,10 +116,6 @@ export function initScreenshot(
         cursor: pointer;
       `;
       document.body.appendChild(a);
-
-      // revert
-      callbacks.forEach((cb) => cb());
-      !isPaused && engine.resume();
     },
     isPNG ? "image/png" : "image/jpeg",
     !isPNG && jpgQuality

@@ -1,6 +1,8 @@
 import type { Color, Vector4 } from "@galacean/engine-math";
 import type { Canvas } from "../Canvas";
 import type { Engine } from "../Engine";
+import type { RenderState } from "../shader/state/RenderState";
+import type { RenderStateElementMap } from "../BasicResources";
 import type { GLCapabilityType } from "../base/Constant";
 import type { BufferBindFlag, BufferUsage, Primitive, SubPrimitive } from "../graphic";
 import type { CameraClearFlags } from "../enums/CameraClearFlags";
@@ -8,7 +10,7 @@ import type { RenderTarget, Texture2D, Texture2DArray, TextureCube, TextureCubeF
 import type { IPlatformBuffer } from "./IPlatformBuffer";
 import type { IPlatformPrimitive } from "./IPlatformPrimitive";
 import type { IPlatformRenderTarget } from "./IPlatformRenderTarget";
-import type { IPlatformShaderProgram } from "./IPlatformShaderProgram";
+import type { IPlatformShaderProgram, IPlatformShaderSource } from "./IPlatformShaderProgram";
 import type { IPlatformTexture } from "./IPlatformTexture";
 import type { IPlatformTexture2D } from "./IPlatformTexture2D";
 import type { IPlatformTexture2DArray } from "./IPlatformTexture2DArray";
@@ -20,8 +22,10 @@ import type { RenderBufferStoreAction } from "./RenderBufferStoreAction";
 
 /** Graphics resource and command boundary used by the engine. */
 export interface IHardwareRenderer {
-  /** WebGL access requires a graphics-capable backend. */
-  readonly gl: WebGL2RenderingContext;
+  readonly supportsCompute: boolean;
+  readonly supportsTransformFeedback: boolean;
+  createFeedbackCompute?(): import("./IPlatformFeedbackCompute").IPlatformFeedbackCompute;
+  readonly backend: "webgl2" | "webgpu" | "null";
   readonly maxUniformBlockSize: number;
   readonly maxUniformBufferBindings: number;
   readonly maxVertexUniformBlocks: number;
@@ -44,10 +48,6 @@ export interface IHardwareRenderer {
     readonly _forceFlush?: boolean;
     readonly _maxAllowSkinUniformVectorCount?: number;
   };
-  /** @internal */
-  _currentBindShaderProgram: IPlatformShaderProgram | null;
-  /** @internal */
-  _enableGlobalDepthBias: boolean;
 
   init(canvas: Canvas, onDeviceLost: () => void, onDeviceRestored: () => void): void;
   canIUse(capability: GLCapabilityType): boolean;
@@ -56,6 +56,11 @@ export interface IHardwareRenderer {
   supportsRenderTargetColorFormat(format: TextureFormat): boolean;
   supportsGenerateMipmaps(format: TextureFormat, isSRGBColorSpace: boolean): boolean;
   createPlatformPrimitive(primitive: Primitive): IPlatformPrimitive;
+  createPlatformShaderProgram(engine: Engine, source: IPlatformShaderSource): IPlatformShaderProgram;
+  applyRenderState(state: RenderState, lastState: RenderState, frontFaceInvert: boolean, custom?: RenderStateElementMap | null): void;
+  beginFrame(): void;
+  endRenderPass(): void;
+  endFrame(): void;
   createPlatformBuffer(
     type: BufferBindFlag,
     byteLength: number,
@@ -77,7 +82,8 @@ export interface IHardwareRenderer {
     colorLoadAction?: RenderBufferLoadAction,
     colorStoreAction?: RenderBufferStoreAction,
     depthLoadAction?: RenderBufferLoadAction,
-    depthStoreAction?: RenderBufferStoreAction
+    depthStoreAction?: RenderBufferStoreAction,
+    label?: string
   ): void;
   clearRenderTarget(engine: Engine, flags: CameraClearFlags, color?: Color | null): void;
   drawPrimitive(primitive: Primitive, subPrimitive: SubPrimitive | null, program: IPlatformShaderProgram): void;
@@ -90,8 +96,6 @@ export interface IHardwareRenderer {
   copyRenderTargetToSubTexture(source: RenderTarget | null, texture: Texture2D, viewport: Vector4): void;
   viewport(x: number, y: number, width: number, height: number): void;
   scissor(x: number, y: number, width: number, height: number): void;
-  activeTexture(textureID: number): void;
-  bindTexture(texture: IPlatformTexture): void;
   bindUniformBufferBase(bindingPoint: number, buffer: IPlatformBuffer): void;
   /** Bind a byte range; optionally orphan the existing store and upload the full range before the draw. */
   bindUniformBufferRange(
@@ -102,9 +106,6 @@ export interface IHardwareRenderer {
     data?: ArrayBufferView,
     discard?: boolean
   ): void;
-  /** Assign a binding point if the linked native program uses the named block. */
-  tryBindUniformBlock(program: object, blockName: string, bindingPoint: number): boolean;
-  setGlobalDepthBias(bias: number, slopeBias: number): void;
   enableRasterizerDiscard(): void;
   disableRasterizerDiscard(): void;
   invalidateShaderProgramState(): void;

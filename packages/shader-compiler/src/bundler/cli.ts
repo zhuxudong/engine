@@ -16,6 +16,7 @@ async function main(): Promise<void> {
       watch: { type: "boolean" },
       only: { type: "string" },
       "emit-index": { type: "boolean" },
+      target: { type: "string" },
       "emit-sources": { type: "boolean" }
     }
   });
@@ -28,8 +29,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (values.target && values.target !== "wgsl" && values.target !== "gles300") throw new Error("Unknown shader target " + values.target);
   await precompile({
     input,
+    platformTarget: values.target === "wgsl" ? 1 : 0,
     output,
     clean: values.clean,
     watch: values.watch,

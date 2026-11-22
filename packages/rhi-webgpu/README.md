@@ -1,0 +1,14 @@
+# WebGPU renderer
+
+## Backend contracts
+
+| Engine input | Backend contract |
+| --- | --- |
+| Shader data | Group 0 contains Scene, group 1 Camera, group 2 Material and reflected Auto blocks, and group 3 Renderer, instancing and RenderElement. The physical binding of an Auto block is independent of property ownership. Draw-time lookup uses RenderElement, Renderer, Material, Camera and Scene in descending priority. Each variant carries its own binding numbers and visibility. |
+| Uniform layouts | The compiler supplies byte offsets, array and matrix strides, byte length and block identity. Array elements are rounded to a 16-byte stride in uniform space. Buffer offsets satisfy the selected device’s minimum alignment. Queued draws retain the bytes visible at their submission point. |
+| Textures and samplers | Depth comparison, ordinary filtering, and unfilterable float textures have distinct layout entries. Integer fetches of joint and blend-shape data use textureLoad. Sampler identity includes all sampling state. Pipeline validation counts sampled textures and samplers independently against the device limits. |
+| Coordinates | Engine camera and culling math retain OpenGL clip depth. The shader backend maps vertex clip depth to (z + w) / 2 and accounts for window-space derivative orientation. The renderer defines attachment origin and screen sampling conventions for blits, shadows and offscreen cameras. |
+| Vertex inputs | Attribute semantic and shader location are independent of the physical buffer format. Integer attributes supplied to floating-point ShaderLab inputs require a matching integer vertex input and numeric conversion. The pipeline key includes the actual vertex layout. |
+| Particles | The WebGL2 backend captures feedback varyings. The WebGPU backend dispatches the same selected simulation through a compute entry and exposes the resulting storage buffer as the next vertex binding. Parent trajectory gather respects ring offsets and the number of children per parent. |
+
+The optional WebGPU entry owns its compiler payload and GPU resources. Historical WebGL shader bytecode retains its original instruction values. A device loss invalidates pipelines, bind groups, buffer slices and texture views owned by that device.
