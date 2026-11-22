@@ -1,0 +1,15 @@
+{
+  "glslang": {
+    "source": "https://github.com/KhronosGroup/glslang/releases/tag/16.6.0",
+    "sha256": "18c23a68d6f4a21e822a8dcee212a2a448a66494b8f58aaf1655ef6328543d11",
+    "artifact": "macos-universal-release bin/glslang"
+  },
+  "twgsl.cjs": {
+    "source": "https://raw.githubusercontent.com/BabylonJS/Babylon.js/47f84cf6dc635e97bfef29408be1cea41279334a/packages/tools/babylonServer/public/twgsl/twgsl.js",
+    "sha256": "b4f1f66263b801210f955f74aa71f1939be647ce0fd80ea5befd12a78499d5ff"
+  },
+  "twgsl.wasm": {
+    "source": "https://raw.githubusercontent.com/BabylonJS/Babylon.js/47f84cf6dc635e97bfef29408be1cea41279334a/packages/tools/babylonServer/public/twgsl/twgsl.wasm",
+    "sha256": "a434c2decdbb38caadf5f486d806384a1543554828c983c77922b2d92579914c"
+  }
+}
