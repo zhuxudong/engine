@@ -134,7 +134,7 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     }
   });
 
-  it("restores a uniform-only group after a bundled draw uses a sampled group in the same slot", async () => {
+  it("records uniform and sampled groups for each bundled draw that uses the slot", async () => {
     const device = rhi.device;
     const format = "rgba8unorm";
     const output = device.createTexture({ size: [1, 1], format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
@@ -176,13 +176,16 @@ describe.skipIf(!navigator.gpu)("Native WebGPU rendering", () => {
     const bundles = rhi["_bundles"];
     bundles.begin(pass, output, "alternating groups", [format], undefined, 1, true);
     const offsets = new Uint32Array(0);
-    for (const usesTexture of [false, true, false]) {
+    const record = vi.spyOn(bundles, "setBindGroup");
+    for (const usesTexture of [false, false, true, true, false]) {
       bundles.beginDraw();
       bundles.setPipeline(usesTexture ? sampled : solid);
-      rhi._setBindGroup(bundles, 0, usesTexture ? b : a, offsets, usesTexture);
+      rhi._setBindGroup(bundles, 0, usesTexture ? b : a, offsets);
       bundles.draw(3);
     }
     bundles.end();
+    expect(record.mock.calls.map((call) => call[1])).toEqual([a, a, b, b, a]);
+    record.mockRestore();
     pass.end();
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();

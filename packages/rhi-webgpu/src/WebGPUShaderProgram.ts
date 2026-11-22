@@ -385,7 +385,7 @@ export class WebGPUShaderProgram implements IPlatformShaderProgram {
         i++;
       }
       if (dirty) group.cached = this._resolveGroup(index, group);
-      this._graphicDevice._setBindGroup(pass, index, group.cached!, group.offsets, group.textures.length > 0);
+      this._graphicDevice._setBindGroup(pass, index, group.cached!, group.offsets);
     }
   }
 

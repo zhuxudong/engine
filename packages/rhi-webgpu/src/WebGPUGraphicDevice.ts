@@ -1213,17 +1213,17 @@ export class WebGPUGraphicDevice implements IHardwareRenderer {
     pass: RenderDrawCommands | GPUComputePassEncoder,
     index: number,
     group: GPUBindGroup,
-    offsets: Uint32Array,
-    containsTextures = false
+    offsets: Uint32Array
   ): void {
-    // Recording every sampled group for each bundled draw keeps its material views intact on
-    // WebKit's Metal backend when a later mesh switches textures. The finished bundle remains reusable.
-    if (pass !== this._bundles && pass !== this._renderPass) {
-      pass.setBindGroup(index, group, offsets, 0, offsets.length);
+    // WebKit/Metal needs the uniform ranges as well as the sampled views recorded for each
+    // bundled draw. Otherwise some instances use another draw's transform during camera motion.
+    if (pass !== this._renderPass) {
+      if (offsets.length) pass.setBindGroup(index, group, offsets, 0, offsets.length);
+      else pass.setBindGroup(index, group);
       return;
     }
     let cached = this._groupOffsets[index];
-    let changed = this._appliedGroups[index] !== group || (pass === this._bundles && containsTextures);
+    let changed = this._appliedGroups[index] !== group;
     if (!cached || cached.length < offsets.length) {
       this._groupOffsets[index] = cached = new Uint32Array(offsets.length);
       changed = true;
