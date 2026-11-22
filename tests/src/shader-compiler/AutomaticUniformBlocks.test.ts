@@ -267,6 +267,39 @@ describe("compiler-selected automatic uniform blocks", () => {
     withLinkedProgram(result, (gl, program) => expect(gl.getUniformLocation(program, "images[1]")).not.toBeNull());
   });
 
+  it("shares a range between compatible stage-private uniforms at their driver offsets", () => {
+    const vertex = "uniform mat4 model;";
+    const fragment = "uniform vec4 tint;";
+    const result = finalizeShaderUniforms(
+      vertex + "\nvoid main() { gl_Position = model * vec4(1.0); }",
+      fragment + "\nout vec4 color; void main() { color = tint; }",
+      [
+        {
+          site: { kind: "uniform", instruction: 0, type: "mat4", name: "model" },
+          start: 0,
+          end: vertex.length,
+          text: vertex
+        }
+      ],
+      [
+        {
+          site: { kind: "uniform", instruction: 0, type: "vec4", name: "tint" },
+          start: 0,
+          end: fragment.length,
+          text: fragment
+        }
+      ],
+      { maxBlockBytes: 16384, maxBindings: 24 }
+    );
+    expect(result.uniformBlocks).toHaveLength(1);
+    expect(result.uniformBlocks[0].members.map((member) => member.offset)).toEqual([0, 64]);
+    withLinkedProgram(result, (gl, program) => {
+      expect(gl.getProgramParameter(program, gl.ACTIVE_UNIFORM_BLOCKS)).toBe(1);
+      const indices = gl.getUniformIndices(program, ["model", "tint"])!;
+      expect(gl.getActiveUniforms(program, indices, gl.UNIFORM_OFFSET)).toEqual([0, 64]);
+    });
+  });
+
   it("keeps a vertex-only uniform out of the fragment stage's type namespace", () => {
     function select(name: string): IShaderUniformSelection {
       const text = `uniform float ${name};`;

@@ -87,7 +87,7 @@ GLES also moves replacement uniforms, struct declarations, and their enclosing c
 
 When static inheritance coverage remains unknown, the instruction stream selects declarations using the actual macro state at their original source positions. The active declaration in the narrowest ShaderLab scope wins; macro directives still execute in source order. This applies to functions, uniforms, ordinary structs, and generated IO declarations. Forward declarations and moved types retain the ownership of their original declarations.
 
-`ShaderCompiler.generate()` returns these variant-selectable instruction streams alongside unselected `vertex` and `fragment` text for inspection. The text views alone do not contain deferred ownership and must not be re-encoded as a substitute for the returned instructions. Engine `ShaderPass` consumes the instructions to produce final GLSL. `.shaderc` preserves them as JSON; use matching compiler and engine versions when shipping artifacts. Existing instruction opcodes retain their numeric values.
+`ShaderCompiler.generate()` returns these variant-selectable instruction streams alongside unselected `vertex` and `fragment` text for inspection. The text views alone do not contain deferred ownership and must not be re-encoded as a substitute for the returned instructions. Engine `ShaderPass` consumes the instructions to produce final GLSL. `.shaderc` preserves the instructions as JSON. Engine versions that support the optional layout metadata also accept older assets with the original instruction opcodes.
 
 ## Declaration dependencies
 

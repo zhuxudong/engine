@@ -346,7 +346,8 @@ export function finalizeShaderUniforms(
       else byName.set(uniform.name, [{ stage, uniform }]);
     }
   }
-  const usedNames = new Set((vertexSource + "\n" + fragmentSource).match(/[A-Za-z_]\w*/g));
+  const vertexNames = new Set(vertexSource.match(/[A-Za-z_]\w*/g));
+  const fragmentNames = new Set(fragmentSource.match(/[A-Za-z_]\w*/g));
   let nextName = 0;
   interface Page {
     block: IShaderUniformBlock;
@@ -361,7 +362,7 @@ export function finalizeShaderUniforms(
   function newBlock(mask: number): IShaderUniformBlock {
     let bindingName: string;
     do bindingName = `gs_Auto_${nextName++}`;
-    while (usedNames.has(bindingName));
+    while (vertexNames.has(bindingName) || fragmentNames.has(bindingName));
     const block: IShaderUniformBlock = { name: "Auto", bindingName, byteLength: 0, members: [] };
     blocks.push(block);
     if (mask & 1) vertexBlocks++;
@@ -426,7 +427,33 @@ export function finalizeShaderUniforms(
       }
     }
   }
+  // Two private numeric blocks can share one upload and range binding when neither
+  // introduces an identifier already used by the other stage. Each stage keeps the
+  // same number of blocks. Starting the second layout at a 16-byte boundary
+  // preserves each member's std140 alignment, including vec3/scalar packing.
+  for (const page of pages) {
+    if (page.stages.size !== 1 || !page.stages.has(vertex) || page.fields.some((f) => fragmentNames.has(f.name)))
+      continue;
+    const offset = page.block.byteLength;
+    // GLSL must place the second layout exactly at this boundary.
+    if (offset % 16 !== 0) continue;
+    const other = pages.find(
+      (p) =>
+        p.stages.size === 1 &&
+        p.stages.has(fragment) &&
+        offset + round(p.block.byteLength, 16) <= maxBlockBytes &&
+        !p.fields.some((f) => vertexNames.has(f.name))
+    );
+    if (!other) continue;
+    page.fields.push(...other.fields);
+    for (const member of other.block.members) page.block.members.push({ ...member, offset: offset + member.offset });
+    page.block.byteLength = offset + other.block.byteLength;
+    page.stages.add(fragment);
+    other.stages.clear();
+    blocks.splice(blocks.indexOf(other.block), 1);
+  }
   for (const { block, fields, stages } of pages) {
+    if (!stages.size) continue;
     block.byteLength = round(block.byteLength, 16);
     const text = `layout(std140) uniform ${block.bindingName} {\n${fields.map(fieldText).join("\n")}\n};\n`;
     for (const stage of stages) stage.prefix += text;
