@@ -36,6 +36,7 @@ export class GlobalUniformBlock {
   private readonly _staging: Uint32Array;
   private readonly _previous: Uint32Array;
   private readonly _materialRanges?: { words: Uint32Array; offset: number }[];
+  private readonly _cacheRendererValues: boolean;
   private _nextMaterialRange = 0;
   private _rendererRanges?: RendererUniformCache;
   private readonly _stride: number;
@@ -58,6 +59,8 @@ export class GlobalUniformBlock {
     const integers = new Int32Array(data);
     this._staging = new Uint32Array(data);
     this._previous = new Uint32Array(size / 4);
+    // A compact per-draw block can contain both transform matrices and material values.
+    this._cacheRendererValues = layout.name === "Auto" && size <= 256;
     // Retain at most 1 KiB of extra packed values for small automatically grouped blocks.
     if (layout.name === "Auto" && size <= 128) {
       this._materialRanges = Array.from({ length: 8 }, () => ({ words: new Uint32Array(size / 4), offset: -1 }));
@@ -117,7 +120,7 @@ export class GlobalUniformBlock {
       field.writer.write(field.view, field.offset, value);
     }
 
-    if (this._materialRanges && hasRendererValue && renderer?._rendererId) {
+    if (this._cacheRendererValues && hasRendererValue && renderer?._rendererId) {
       const ranges = (this._rendererRanges ??= new RendererUniformCache(this._engine, this._binding, this._stride));
       if (ranges.bind(renderer._rendererId, this._staging)) return;
     }

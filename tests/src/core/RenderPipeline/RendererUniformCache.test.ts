@@ -10,6 +10,7 @@ import {
   ShaderMacroCollection,
   Texture2D,
   TextureFormat,
+  UnlitMaterial,
   Vector4,
   WebGLEngine
 } from "@galacean/engine";
@@ -94,6 +95,37 @@ it("reuses stable renderer ranges across frames and draws changed matrix, tint a
   expect(pixel(2)).toEqual([0, 128, 0, 255]);
   expect(pixel(6)).toEqual([0, 0, 255, 255]);
   expect(frame()).toBe(0);
+  expect(gl.getError()).toBe(gl.NO_ERROR);
+});
+
+it("reuses the built-in unlit layout with transforms and alternating materials", () => {
+  const root = engine.sceneManager.activeScene.createRootEntity();
+  const camera = root.createChild().addComponent(Camera);
+  camera.entity.transform.setPosition(0, 0, 5);
+  camera.isOrthographic = true;
+  camera.orthographicSize = 1;
+  const mesh = PrimitiveMesh.createCuboid(engine, 0.08, 0.3, 0.1);
+  const materials = Array.from({ length: 8 }, (_, i) => {
+    const material = new UnlitMaterial(engine);
+    material.baseColor.set(i / 8, 0.5, 1, 1);
+    return material;
+  });
+  for (let i = 0; i < 16; ++i) {
+    const entity = root.createChild();
+    entity.transform.setPosition((i - 7.5) / 8, 0, 0);
+    const renderer = entity.addComponent(MeshRenderer);
+    renderer.mesh = mesh;
+    renderer.setMaterial(materials[i % materials.length]);
+    renderer.priority = i;
+  }
+  engine.update();
+  engine.update();
+  const gl = engine._hardwareRenderer.gl;
+  const uploads = vi.spyOn(gl, "bufferSubData");
+  const draws = vi.spyOn(gl, "drawElements");
+  engine.update();
+  expect(draws).toHaveBeenCalledTimes(16);
+  expect(uploads.mock.calls.filter(([target]) => target === gl.UNIFORM_BUFFER)).toHaveLength(0);
   expect(gl.getError()).toBe(gl.NO_ERROR);
 });
 
