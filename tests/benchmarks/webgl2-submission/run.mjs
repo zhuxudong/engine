@@ -33,6 +33,7 @@ for (const scenario of scenarios) {
     if (captures) params.set("capture", "1");
     if (prewarm) params.set("prewarm", "1");
     if (timing) params.set("timing", "1");
+    if (scenario === "S1" && process.env.SUBMISSION_PHASES === "1") params.set("submissionPhases", "1");
     if (scenario === "S5" && process.env.S5_EFFECTS) params.set("effects", process.env.S5_EFFECTS);
     await page.goto("http://localhost/?" + params);
     await page.waitForFunction(() => !!document.querySelector("#result").dataset.status, undefined, {

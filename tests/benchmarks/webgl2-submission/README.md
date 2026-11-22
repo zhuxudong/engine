@@ -44,6 +44,8 @@ Use `?scene=Recovery&backend=webgpu&background` to exercise a real page backgrou
 
 S1 allocates independent geometry for every renderer. Add `&sharedMesh` to the page URL for the companion case with the same draw count, pixels and materials, and a single shared mesh resource.
 
+Use `SUBMISSION_PHASES=1` in a separate S1 run to measure CPU time from the camera's draw pass through the end of the engine update, including queue submission. The usual full-update measurement also includes scene updates, culling, sorting and batching.
+
 ### Desktop image comparisons
 
 Set `S5_EFFECTS=all` to render Sponza with HDR, high-quality ambient occlusion, four soft shadow cascades and 4× MSAA. Choose `no-sao`, `no-shadows` or `no-msaa` to isolate one effect. The page accepts the same values through `?scene=S5&effects=all`. Without the option the original S5 performance workload is unchanged.
@@ -65,3 +67,5 @@ node tests/benchmarks/backend-parity/compare.mjs /tmp/wk-gl.png /tmp/wk-gpu.png
 ```
 
 The AO and refraction regression exercises the canvas and an explicit render target on each backend. The dynamic cube probe regression reads back each face before and after a second capture. See the [desktop image results](results/desktop-parity.md) for the measured differences and their references.
+
+Pass `--all` to the gallery runner to exercise every case in `e2e/case`, including GPU particles, animation clips and primitive topology.

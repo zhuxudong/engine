@@ -195,6 +195,17 @@ async function measure() {
     // Keep timing free of driver instrumentation, GL queries and GPU synchronization.
     const cpu = [],
       intervals = [];
+    const drawSubmission = [];
+    let drawStart;
+    const measureSubmission = scenario === "S1" && options.has("submissionPhases");
+    if (measureSubmission) {
+      const pipeline = camera._renderPipeline;
+      const draw = pipeline._drawRenderPass;
+      pipeline._drawRenderPass = function (...args) {
+        drawStart = performance.now();
+        return draw.apply(this, args);
+      };
+    }
     const gpuTimes = [];
     let lastSubmission = 0;
     const gl = !gpu && canvas.getContext("webgl2");
@@ -222,9 +233,15 @@ async function measure() {
         }
       }
       const start = performance.now();
+      drawStart = undefined;
       setup.beforeFrame?.(i);
       engine.update();
-      cpu.push(performance.now() - start);
+      const end = performance.now();
+      cpu.push(end - start);
+      if (measureSubmission) {
+        if (drawStart === undefined) throw new Error("The S1 camera skipped its draw pass.");
+        drawSubmission.push(end - drawStart);
+      }
       if (query) {
         gl.endQuery(extension.TIME_ELAPSED_EXT);
         pendingQueries.push(query);
@@ -303,6 +320,7 @@ async function measure() {
       firstMeasuredFrameMs: cpu[0],
       rgbaHash,
       submissionMs: stats(cpu),
+      ...(measureSubmission && { cameraDrawThroughSubmitMs: stats(drawSubmission) }),
       frameIntervalMs: stats(intervals),
       callsPerFrame: counts
     };

@@ -39,8 +39,18 @@ const examples = [
   "camera-fxaa"
 ];
 const root = fileURLToPath(new URL("../../../e2e/", import.meta.url));
+const galleryRoot = path.join(root, ".dev");
+const template = await readFile(path.join(galleryRoot, "template/iframe.ejs"), "utf8");
 const directory = process.env.CAPTURE_DIRECTORY;
-const selected = process.argv.length > 2 ? process.argv.slice(2) : examples;
+const requested = process.argv.slice(2);
+const selected = requested.includes("--all")
+  ? (await readdir(path.join(root, "case")))
+      .filter((file) => !file.startsWith(".") && file.endsWith(".ts"))
+      .sort()
+      .map((file) => file.slice(0, -3))
+  : requested.length
+    ? requested
+    : examples;
 if (directory) await mkdir(directory, { recursive: true });
 const goldenDirectory = path.join(root, "fixtures/originImage");
 const goldenFiles = process.env.GOLDENS === "1" ? await readdir(goldenDirectory) : null;
@@ -65,8 +75,8 @@ let failures = 0;
 try {
   for (const backend of ["webgl2", "webgpu"]) {
     const server = await createServer({
-      root,
-      publicDir: path.join(root, ".dev/public"),
+      root: galleryRoot,
+      publicDir: path.join(galleryRoot, "public"),
       configFile: false,
       logLevel: "error",
       cacheDir: path.join(root, "node_modules/.vite-parity-" + backend),
@@ -85,19 +95,19 @@ try {
           configureServer(server) {
             server.middlewares.use((req, res, next) => {
               const url = new URL(req.url, "http://localhost");
-              if (url.pathname !== "/") return next();
-              const name = url.searchParams.get("case");
+              const name = /^\/mpa\/([^/]+)\.html$/.exec(url.pathname)?.[1];
+              if (!name) return next();
               if (!selected.includes(name)) {
                 res.statusCode = 404;
                 res.end();
                 return;
               }
               res.setHeader("content-type", "text/html");
-              res.end(
-                '<!DOCTYPE html><style>canvas{width:900px;height:600px}</style><canvas id="canvas"></canvas><script type="module" src="/case/' +
-                  encodeURIComponent(name) +
-                  '.ts"></script>'
-              );
+              const source = path
+                .join(root, "case", name + ".ts")
+                .split(path.sep)
+                .join("/");
+              res.end(template.replace("<%= title %>", name).replace("<%= url %>", "/@fs/" + source));
             });
           }
         }
@@ -107,7 +117,7 @@ try {
     await server.listen();
     try {
       for (const entry of selected) {
-        const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         await page.addInitScript(() => {
@@ -123,7 +133,7 @@ try {
         });
         try {
           await page.goto(
-            "http://127.0.0.1:" + server.httpServer.address().port + "/?case=" + encodeURIComponent(entry)
+            "http://127.0.0.1:" + server.httpServer.address().port + "/mpa/" + encodeURIComponent(entry) + ".html"
           );
           await page.waitForSelector('[data-testid="screenshot"]', { timeout: 60000 });
           const actual = await page.evaluate(async () => {
